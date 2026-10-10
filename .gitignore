@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+logs/
+.ipynb_checkpoints/
+*.egg-info/
+.venv/
+
+# Trained weights and exported models
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+
+# Executables and compiled extensions
+*.exe
+*.dll
+*.pyd
+*.so
+*.dylib
+
+# Recordings and packed copies
+*.mp4
+*.avi
+*.webm
+*.zip
+events.out.tfevents*
+
+assets/urdf/quadruped_arm_merged.urdf

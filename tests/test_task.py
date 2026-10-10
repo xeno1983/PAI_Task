@@ -1,0 +1,110 @@
+"""Reward stages, quaternion frames, and observation layout."""
+
+from __future__ import annotations
+
+import math
+import unittest
+
+import torch
+
+from pick_and_carry.config import NUM_ACTIONS, NUM_OBS, OBS_LAYOUT, RewardScales, layout_dim
+from pick_and_carry.helpers import (
+    compute_stage_reward,
+    fallen_mask,
+    grasp_mask,
+    place_mask,
+    quat_apply,
+    task_phase,
+    world_to_base,
+    yaw_quat,
+)
+
+
+class LayoutTests(unittest.TestCase):
+    def test_dimensions(self):
+        self.assertEqual(layout_dim(OBS_LAYOUT), 68)
+        self.assertEqual(NUM_OBS, 68)
+        self.assertEqual(NUM_ACTIONS, 20)
+
+
+class GeometryTests(unittest.TestCase):
+    def test_yaw_rotation(self):
+        q = torch.tensor([[math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4)]])
+        rotated = quat_apply(q, torch.tensor([[1.0, 0.0, 0.0]]))
+        self.assertTrue(torch.allclose(rotated, torch.tensor([[0.0, 1.0, 0.0]]), atol=1e-5))
+
+    def test_world_to_base_identity(self):
+        points = torch.tensor([[1.0, 2.0, 3.0]])
+        base = torch.zeros(1, 3)
+        quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        self.assertTrue(torch.allclose(world_to_base(points, base, quat), points))
+
+    def test_yaw_quat_norm(self):
+        q = yaw_quat(torch.tensor([0.3, -1.2]))
+        self.assertTrue(torch.allclose(q.norm(dim=-1), torch.ones(2), atol=1e-5))
+
+
+class RewardTests(unittest.TestCase):
+    def test_stage_bonuses(self):
+        n = 3
+        ee = torch.zeros(n, 3)
+        obj = torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 0.02], [0.0, 0.0, 0.0]])
+        goal = torch.zeros(n, 3)
+        goal[:, 2] = 0.02
+        base = torch.zeros(n, 3)
+        grasped = torch.tensor([False, False, True])
+        newly = torch.tensor([True, False, False])
+        placed = torch.tensor([False, True, False])
+        fallen = torch.tensor([False, False, True])
+        scales = RewardScales()
+        reward, terms = compute_stage_reward(
+            ee_pos=ee,
+            obj_pos=obj,
+            goal_pos=goal,
+            base_pos=base,
+            grasped=grasped,
+            newly_grasped=newly,
+            placed=placed,
+            fallen=fallen,
+            gripper_opening=torch.full((n,), 0.04),
+            gripper_open_width=0.04,
+            actions=torch.zeros(n, NUM_ACTIONS),
+            scales=scales,
+            dt=0.02,
+            approach_sigma=0.25,
+            transport_sigma=0.4,
+            base_sigma=0.6,
+        )
+        self.assertAlmostEqual(float(terms["grasp_bonus"][0]), scales.grasp_bonus)
+        self.assertAlmostEqual(float(terms["place"][1]), scales.place_bonus)
+        self.assertAlmostEqual(float(terms["fall"][2]), -scales.fall)
+        self.assertEqual(reward.shape, (n,))
+        self.assertGreater(float(terms["transport"][2]), 0.0)
+        self.assertEqual(float(terms["approach_ee"][2]), 0.0)
+
+    def test_grasp_and_place_masks(self):
+        ee = torch.tensor([[0.0, 0.0, 0.1]])
+        obj = torch.tensor([[0.0, 0.0, 0.12]])
+        goal = torch.tensor([[0.0, 0.0, 0.02]])
+        self.assertTrue(bool(grasp_mask(ee, obj, torch.tensor([0.0]), 0.1, 0.012)))
+        self.assertFalse(bool(grasp_mask(ee, obj, torch.tensor([0.04]), 0.1, 0.012)))
+        grasped = torch.tensor([False])
+        was = torch.tensor([True])
+        low_obj = torch.tensor([[0.05, 0.0, 0.03]])
+        self.assertTrue(bool(place_mask(low_obj, goal, grasped, was, 0.15, 0.08)))
+        upright = torch.tensor([[0.0, 0.0, -1.0]])
+        height = torch.tensor([0.42])
+        self.assertFalse(bool(fallen_mask(upright, height, 60.0, 0.18)))
+        upside_down = torch.tensor([[0.0, 0.0, 1.0]])
+        self.assertTrue(bool(fallen_mask(upside_down, height, 60.0, 0.18)))
+
+    def test_walk_pick_walk_release_phases(self):
+        grasped = torch.tensor([False, False, True, True])
+        base_obj = torch.tensor([1.2, 0.4, 0.3, 0.3])
+        obj_goal = torch.tensor([2.0, 1.5, 1.2, 0.2])
+        phase = task_phase(grasped, base_obj, obj_goal, 0.55, 0.45)
+        self.assertEqual(phase.tolist(), [0, 1, 2, 3])
+
+
+if __name__ == "__main__":
+    unittest.main()
