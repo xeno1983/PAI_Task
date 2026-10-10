@@ -52,7 +52,7 @@ Genesis がなくても、報酬と URDF のテストは通ります。
 | 2 | PPO で学習し、終わると曲線と 20 秒の再生 | `PickAndCarry_ppo.mp4` または `PickAndCarry_z1.mp4` |
 | 3 | 短い SAC（Panda のみ、8 環境、500 ステップ） | `PickAndCarry_sac.mp4` |
 | 4 | Colab 用 zip | `起動スクリプト\PAI_Task_colab.zip` |
-| 5 | クリックで物資と運び先を決めて再生 | 同じ mp4 |
+| 5 | クリックで物資と運び先を決めて再生。ROS 2 を選ぶと実行中に運び先を変えられる | 同じ mp4 |
 | 6 | 学習の早い時点と遅い時点を 1 本に並べる | `PickAndCarry_compare.mp4` |
 | 7 | 学習曲線をブラウザで開く | `PickAndCarry_curves.html` |
 | 8 | スライドと録画を、説明音声つきの 1 本にする | `PickAndCarry_presentation.mp4` |
@@ -69,6 +69,8 @@ Genesis がなくても、報酬と URDF のテストは通ります。
 6. 対象物の見つけ方。シミュレータの位置（既定）か、手先カメラ。
 
 途中で止めても、最後に `saved ppo_XXXX.pt` と出た時点から次回続けられます。保存は 20 iteration ごとです。画面の iteration がファイルより先に進んでいることがあります。
+
+5 番は、腕・走行環境・分け方・見つけ方のあと、rviz2 を使うかを聞きます。使うときは推論が 60 秒になり、そのあいだ rviz2 のクリックで運び先だけが動きます。物資の位置は、最初のクリック画面のままです。
 
 ## 4. コマンドで実行する
 
@@ -98,7 +100,31 @@ Z1 で最初から学ぶときは `--arm z1 --log-dir logs/ppo_z1` を付けま�
 | `--terrain-amplitude 0.045` | 波または段の高さ（メートル） |
 | `--resume latest` | そのログフォルダの最新の適合する重みから続ける |
 | `--play` | 学習せず再生する |
+| `--ros` | 推論だけ。状態を送り、実行中の運び先を受け取る。学習中に付けると止まる |
 | `--no-assist-grasp` | 指の接触だけで持つ。既定は、つかんだ判定のあいだ箱を手先へ固定する |
+
+### 推論中に運び先を動かす
+
+Genesis の画面は開きません。表示は WSL2 の rviz2 です。シミュレーションは今の Windows の仮想環境のままです。ROS の Python はこちらには入れません。
+
+WSL で、プロジェクト（例: `/mnt/c/Users/xeno1/PAI_Task`）に移動してから次を実行します。`ros-<distro>-desktop` が入っている必要があります。
+
+```bash
+bash ros/display.sh panda
+```
+
+Z1 のときは `bash ros/display.sh z1` です。箱の URDF を rviz2 に出します。公式メッシュは使いません。
+
+Windows では起動スクリプトの 5 番で「ROS 2 で表示する」を選びます。rviz2 は WSL の Ubuntu（ROS 2 Jazzy）で開きます。手で開くときは、先に WSL で `bash ros/display.sh panda` を実行し、その WSL のアドレスを `--ros-host` に渡します。
+
+```powershell
+$wslIp = (wsl.exe -d Ubuntu -- hostname -I).Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)[0]
+.\.venv\Scripts\python.exe scripts\infer_gui.py --log-dir logs/ppo_walk --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry_ppo.mp4" --seconds 60 --ros --ros-host $wslIp --terrain-steps --terrain-amplitude 0.045
+```
+
+クリック画面の 1 点目が物資、2 点目が最初の運び先です。起動スクリプトの 5 番で ROS 2 を選ぶと、rviz2 が開きます。表示まで十数秒かかることがあります。上部の Publish Point を選んで地面をクリックすると、その点が新しい運び先になります。緑のマーカーと、方策が見る目標が同時に動きます。コースの外はコース内に収めます。高さはその地点の地面です。
+
+荷物を持っているときに遠くをクリックすると、また運び先へ歩きます。近くをクリックすると、置く動作に入ります。まだ掴む前のクリックは、置き場所の記憶だけを更新します。時間切れでは出発点に戻りません。転倒したときと、置き終えたときは次の試行が始まり、運び先は最後のクリックのままです。
 
 学習曲線と比較動画です。
 
@@ -175,3 +201,6 @@ Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(
 | `pick_and_carry/env.py` | Genesis のシーン |
 | `pick_and_carry/agents.py` | PPO の方策と clip 付きの更新 |
 | `pick_and_carry/train_ppo.py` | 学習と再生 |
+| `pick_and_carry/ros_bridge.py` | 推論中の状態送信と運び先の受信。ROS 自体は入れない |
+| `ros/bridge_node.py` | WSL 側で関節、姿勢、マーカーに変換し、クリックを返す |
+| `ros/display.sh` | robot_state_publisher と rviz2 を起動する |

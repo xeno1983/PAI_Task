@@ -33,7 +33,7 @@ Write-Host "      動画: 起動スクリプトフォルダの PickAndCarry_ppo.
 Write-Host "      Enter だけなら 1000 回、並列 16 体。もう一度選ぶと続きから学習する。"
 Write-Host "   3  短い SAC（8 環境、500 ステップ、録画あり、Panda のみ）"
 Write-Host "   4  Colab 用 zip を起動スクリプトフォルダに作る"
-Write-Host "   5  推論。クリックで物資を置き、次のクリックで運び先を決める（追加学習なし）"
+Write-Host "   5  推論。クリックで物資と運び先を決める。ROS 2 を選ぶと実行中に rviz2 で運び先を変えられる"
 Write-Host "   6  学習の途中経過を並べた比較動画を作る（追加学習なし）。走行環境を選ぶ"
 Write-Host "      同じ初期配置で、早い時点と遅い時点を同時に再生する。"
 Write-Host "      動画: 起動スクリプトフォルダの PickAndCarry_compare.mp4"
@@ -155,6 +155,49 @@ function Select-Vision {
     }
 }
 
+function Select-Ros {
+    Write-Host ""
+    Write-Host " rviz2"
+    Write-Host "   1  使わない。クリック画面の運び先のまま録画する"
+    Write-Host "   2  ROS 2 で表示する。rviz2 を開き、推論中のクリックで運び先を動かす"
+    $picked = Read-Host "rviz2 [1]"
+    if ($picked -eq "2") {
+        Start-Rviz
+    } else {
+        Write-Host "録画だけ行います。"
+        $script:rosArgs = @()
+        $script:inferSeconds = 20
+    }
+}
+
+function Start-Rviz {
+    $armName = "panda"
+    if ($script:logDir -eq "logs/ppo_z1") { $armName = "z1" }
+    Write-Host "WSL の Ubuntu を起動しています。"
+    $raw = & wsl.exe -d Ubuntu -- hostname -I
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WSL の Ubuntu を起動できませんでした。録画だけ行います。"
+        $script:rosArgs = @()
+        $script:inferSeconds = 20
+        return
+    }
+    $wslIp = ((@($raw) -join " ") -split "\s+" | Where-Object { $_ })[0]
+    if ([string]::IsNullOrWhiteSpace($wslIp)) {
+        Write-Host "WSL のアドレスが分かりません。録画だけ行います。"
+        $script:rosArgs = @()
+        $script:inferSeconds = 20
+        return
+    }
+    $root = (Get-Location).Path
+    $wslPath = "/mnt/" + $root.Substring(0, 1).ToLower() + ($root.Substring(2) -replace "\\", "/")
+    $script:rosArgs = @("--ros", "--ros-host", $wslIp, "--ros-port", "11411")
+    $script:inferSeconds = 60
+    $command = "wsl.exe -d Ubuntu -- bash -lc `"cd $wslPath && bash ros/display.sh $armName`""
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/k $command"
+    Write-Host "rviz2 を開いています。表示まで十数秒かかることがあります。"
+    Write-Host "Publish Point で地面をクリックすると、運び先が動きます。"
+}
+
 $code = 0
 switch ($choice) {
     "1" {
@@ -234,8 +277,9 @@ switch ($choice) {
         Select-Terrain
         Select-Control
         Select-Vision
+        Select-Ros
         $video = Join-Path $out $videoName
-        & $python -u scripts\infer_gui.py --log-dir $logDir --record $video --seconds 20 @armArgs @terrainArgs @controlArgs @visionArgs
+        & $python -u scripts\infer_gui.py --log-dir $logDir --record $video --seconds $script:inferSeconds @armArgs @terrainArgs @controlArgs @visionArgs @rosArgs
         $code = $LASTEXITCODE
         if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
     }

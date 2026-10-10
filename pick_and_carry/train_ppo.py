@@ -17,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
 from pick_and_carry.config import EnvConfig
 from pick_and_carry.env import PickAndCarryEnv
+from pick_and_carry.ros_bridge import DEFAULT_HOST, DEFAULT_PORT, InferenceBridge, ros_usage_error
 from pick_and_carry.tracking import append_metrics, write_run
 
 
@@ -85,6 +86,13 @@ def parse_args():
     parser.add_argument("--seconds", type=float, default=20.0, help="Length of a --play recording, in simulation seconds.")
     parser.add_argument("--object-xy", type=str, default=None, help="Inference supply position, 'x,y' in meters.")
     parser.add_argument("--goal-xy", type=str, default=None, help="Inference drop position, 'x,y' in meters.")
+    parser.add_argument(
+        "--ros",
+        action="store_true",
+        help="Inference only. Publish robot state and accept a new drop point while playing.",
+    )
+    parser.add_argument("--ros-host", default=DEFAULT_HOST, help="Address the inference bridge listens on.")
+    parser.add_argument("--ros-port", type=int, default=DEFAULT_PORT)
     return parser.parse_args()
 
 
@@ -165,7 +173,7 @@ def save_checkpoint(
 
 def make_config(args) -> EnvConfig:
     amplitude = 0.035 if args.terrain_amplitude is None else args.terrain_amplitude
-    return EnvConfig(
+    cfg = EnvConfig(
         num_envs=args.num_envs,
         backend=args.backend,
         show_viewer=args.viewer,
@@ -183,6 +191,10 @@ def make_config(args) -> EnvConfig:
         fixed_object_xy=_parse_xy(args.object_xy),
         fixed_goal_xy=_parse_xy(args.goal_xy),
     )
+    if args.play and args.ros:
+        # One click session should not snap the robot home on the 20 s training timeout.
+        cfg.episode_length_s = max(cfg.episode_length_s, float(args.seconds))
+    return cfg
 
 
 def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
@@ -216,15 +228,45 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     return start_iteration, str(ckpt_path)
 
 
+def _accept_goal(env, obs, bridge: InferenceBridge):
+    """Apply a clicked drop point before the policy acts, then queue the current pose."""
+    goal = bridge.poll_goal()
+    if goal is not None:
+        applied = env.set_goal_xy(*goal)
+        obs = env.obs_buf
+        print(f"運び先を ({applied[0]:.2f}, {applied[1]:.2f}) に更新しました。", flush=True)
+    bridge.publish(env.inference_state())
+    return obs
+
+
 def play_policy(args, cfg, env, agent, obs) -> None:
     if not args.resume:
         raise SystemExit("Pass --resume latest (or a checkpoint path) with --play.")
+    bridge = None
     steps = max(1, int(round(args.seconds / cfg.dt)))
     print(f"playing {steps} steps ({args.seconds:.0f}s)", flush=True)
-    for _ in range(steps):
-        with torch.no_grad():
-            action = agent.act_mean(obs)
-        obs, _, _, _ = env.step(action)
+    try:
+        if args.ros:
+            bridge = InferenceBridge(args.ros_host, args.ros_port)
+            try:
+                bridge.start()
+            except OSError as exc:
+                raise SystemExit(f"ROS の待ち受けに失敗しました ({args.ros_host}:{args.ros_port}): {exc}") from exc
+            print(
+                f"ROS へ接続します {args.ros_host}:{args.ros_port} 。rviz2 の Publish Point で運び先を更新します。",
+                flush=True,
+            )
+        for _ in range(steps):
+            if bridge is not None:
+                obs = _accept_goal(env, obs, bridge)
+            with torch.no_grad():
+                action = agent.act_mean(obs)
+            obs, _, _, _ = env.step(action)
+        if bridge is not None:
+            _accept_goal(env, obs, bridge)
+    finally:
+        if bridge is not None:
+            bridge.close()
 
 
 def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration: int) -> None:
@@ -344,6 +386,9 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
 
 def main() -> None:
     args = parse_args()
+    error = ros_usage_error(enabled=args.ros, play=args.play, num_envs=args.num_envs)
+    if error:
+        raise SystemExit(error)
     cfg = make_config(args)
     if args.viewer:
         print("Opening the 3D window. The first launch can take one to three minutes.", flush=True)

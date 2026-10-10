@@ -11,6 +11,7 @@ The task math lives outside this file so it can be read without the simulator:
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -40,6 +41,7 @@ from pick_and_carry.helpers import (
 )
 from pick_and_carry.observation import object_in_base, pack_observation
 from pick_and_carry.reward import task_reward
+from pick_and_carry.ros_bridge import clamp_goal_xy
 from pick_and_carry.terrain import make_course, make_supply_yard, make_terrain_bank, paste_tile, sample_height
 
 
@@ -811,6 +813,48 @@ class PickAndCarryEnv:
             return
         self.goal_marker.set_pos(self.goal_pos[idx], envs_idx=idx, zero_velocity=True)
         self.goal_marker.set_quat(self.init_base_quat.expand(idx.shape[0], 4), envs_idx=idx, zero_velocity=True)
+
+    def set_goal_xy(self, x: float, y: float) -> tuple[float, float]:
+        """Move the drop point of the single inference environment and refresh the observation.
+
+        The new point is kept for later episode resets. The supply position is unchanged.
+        """
+        if self.num_envs != 1:
+            raise RuntimeError("set_goal_xy is for one environment.")
+        cx, cy = clamp_goal_xy(x, y)
+        xy = torch.tensor([[cx, cy]], dtype=torch.float32, device=self.device)
+        z = self._ground_z(xy) + float(self.cfg.goal_marker_size[2]) * 0.5
+        self.goal_pos[0, 0] = cx
+        self.goal_pos[0, 1] = cy
+        self.goal_pos[0, 2] = float(z[0, 0])
+        self.cfg.fixed_goal_xy = (cx, cy)
+        self._release_hold.zero_()
+        self._pin_goal(None)
+        self._update_phase()
+        self.prev_goal_dist.copy_(pairwise_distance(self.obj_pos, self.goal_pos))
+        self._write_observation()
+        return cx, cy
+
+    def inference_state(self) -> dict[str, object]:
+        """One environment, as plain numbers for the ROS bridge."""
+
+        def row(tensor: torch.Tensor) -> list[float]:
+            return [float(value) for value in tensor.detach().reshape(-1).cpu().tolist()]
+
+        return {
+            "type": "state",
+            "arm": self.arm.name,
+            "urdf": Path(self.urdf_path).name,
+            "joint_names": list(self.actuated_names),
+            "joint_pos": row(self.dof_pos[0]),
+            "base_pos": row(self.base_pos[0]),
+            "base_quat_wxyz": row(self.base_quat[0]),
+            "ee_pos": row(self.ee_pos[0]),
+            "object_pos": row(self.obj_pos[0]),
+            "goal_pos": row(self.goal_pos[0]),
+            "phase": int(self.phase[0].item()),
+            "cube_size": float(self.cfg.cube_size),
+        }
 
     def _write_observation(self) -> None:
         leg = slice(0, len(self.leg_names))
