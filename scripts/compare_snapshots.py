@@ -27,8 +27,9 @@ import numpy as np
 import torch
 
 from pick_and_carry.agents import ActorCritic
+from pick_and_carry.arms import get_arm
 from pick_and_carry.compare import draw_label, even_size, select_evenly, snapshot_label, tile_frames
-from pick_and_carry.config import NUM_ACTIONS, NUM_OBS, EnvConfig
+from pick_and_carry.config import EnvConfig
 from pick_and_carry.env import PickAndCarryEnv
 
 PHASE_LABELS = ("不整地→物体", "拾う", "不整地→目標", "放す")
@@ -50,6 +51,7 @@ def parse_args():
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--terrain-amplitude", type=float, default=None)
     parser.add_argument("--terrain-steps", action="store_true")
+    parser.add_argument("--arm", choices=("panda", "z1"), default="panda")
     parser.add_argument("--control-split", choices=("split", "walk", "both"), default="split")
     parser.add_argument("--wrist-camera", action="store_true")
     return parser.parse_args()
@@ -65,7 +67,7 @@ def default_output() -> Path:
     return Path("logs/ppo/compare.mp4")
 
 
-def load_snapshots(log_dir: Path) -> tuple[list[dict], int]:
+def load_snapshots(log_dir: Path, expected_obs: int, expected_act: int, arm: str) -> tuple[list[dict], int]:
     records: list[dict] = []
     skipped = 0
     for path in sorted(log_dir.glob("ppo_*.pt")):
@@ -73,9 +75,7 @@ def load_snapshots(log_dir: Path) -> tuple[list[dict], int]:
             blob = torch.load(path, map_location="cpu", weights_only=False)
         except TypeError:
             blob = torch.load(path, map_location="cpu")
-        obs_dim = int(blob.get("obs_dim", -1))
-        act_dim = int(blob.get("act_dim", -1))
-        if obs_dim != NUM_OBS or act_dim != NUM_ACTIONS or "model" not in blob:
+        if int(blob.get("obs_dim", -1)) != expected_obs or int(blob.get("act_dim", -1)) != expected_act or str(blob.get("arm", "panda")) != arm or "model" not in blob:
             skipped += 1
             continue
         records.append(
@@ -212,7 +212,8 @@ def main() -> None:
     if args.fps < 1:
         raise SystemExit("--fps は 1 以上にしてください。")
     output = args.output or default_output()
-    records, skipped = load_snapshots(args.log_dir)
+    arm = get_arm(args.arm)
+    records, skipped = load_snapshots(args.log_dir, arm.num_obs, arm.num_actions, arm.name)
     if skipped:
         print(f"サイズが違う重みを {skipped} 件スキップしました。", flush=True)
     if not records:
@@ -240,6 +241,7 @@ def main() -> None:
         terrain_steps=args.terrain_steps,
         terrain_amplitude=0.035 if args.terrain_amplitude is None else args.terrain_amplitude,
         control_split=args.control_split,
+        arm=args.arm,
         wrist_camera=args.wrist_camera,
     )
     env = PickAndCarryEnv(cfg=cfg)

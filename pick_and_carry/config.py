@@ -141,9 +141,14 @@ NUM_ACTIONS = layout_dim(ACTION_LAYOUT)
 
 
 def default_urdf_path() -> Path:
-    """Prefer a merged mesh URDF when the user has generated one."""
+    """Prefer a merged mesh URDF, then official visuals on the primitive body."""
     if MERGED_URDF.is_file():
         return MERGED_URDF
+    from pick_and_carry.visual_urdf import styled_urdf_path
+
+    styled = styled_urdf_path()
+    if styled is not None:
+        return styled
     return PRIMITIVE_URDF
 
 
@@ -212,6 +217,9 @@ class EnvConfig:
     # walk: legs the whole time, arm held still, reward is travel and not falling.
     # both: legs and arm together for the whole episode.
     control_split: str = "split"
+    # panda keeps the 7-DoF Franka and the existing 68-dimensional checkpoints.
+    # z1 is the Unitree Z1 (6 DoF, about 5 kg) and needs its own training run.
+    arm: str = "panda"
     # Wrist camera on the hand. Grasp uses the segmented cube, not the simulator position.
     wrist_camera: bool = False
     wrist_camera_res: tuple[int, int] = (64, 48)

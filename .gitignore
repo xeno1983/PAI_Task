@@ -27,3 +27,4 @@ logs/
 events.out.tfevents*
 
 assets/urdf/quadruped_arm_merged.urdf
+assets/urdf/.visual/
