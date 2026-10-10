@@ -51,6 +51,7 @@ def parse_args():
     parser.add_argument("--terrain-amplitude", type=float, default=None)
     parser.add_argument("--terrain-steps", action="store_true")
     parser.add_argument("--control-split", choices=("split", "walk", "both"), default="split")
+    parser.add_argument("--wrist-camera", action="store_true")
     return parser.parse_args()
 
 
@@ -239,6 +240,7 @@ def main() -> None:
         terrain_steps=args.terrain_steps,
         terrain_amplitude=0.035 if args.terrain_amplitude is None else args.terrain_amplitude,
         control_split=args.control_split,
+        wrist_camera=args.wrist_camera,
     )
     env = PickAndCarryEnv(cfg=cfg)
     agent = ActorCritic(env.num_obs, env.num_actions).to(env.device)
