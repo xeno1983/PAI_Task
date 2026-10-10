@@ -20,6 +20,16 @@ from pick_and_carry.env import PickAndCarryEnv
 from pick_and_carry.tracking import append_metrics, write_run
 
 
+def format_remaining(seconds: float) -> str:
+    """Predicted time left, as hours, minutes, and seconds."""
+    total = max(0, int(round(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}時間{minutes:02d}分{secs:02d}秒"
+    return f"{minutes}分{secs:02d}秒"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train pick-and-carry with PPO on Genesis.")
     parser.add_argument("--num-envs", type=int, default=16)
@@ -51,6 +61,11 @@ def parse_args():
         default="split",
         help="split: legs then arm. walk: locomotion only. both: legs and arm together.",
     )
+    parser.add_argument(
+        "--wrist-camera",
+        action="store_true",
+        help="Detect the cube with a camera on the hand and grasp only when it is seen.",
+    )
     parser.add_argument("--log-dir", type=Path, default=Path("logs/ppo"))
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument(
@@ -62,7 +77,18 @@ def parse_args():
     )
     parser.add_argument("--play", action="store_true", help="Run the loaded policy and skip learning.")
     parser.add_argument("--seconds", type=float, default=20.0, help="Length of a --play recording, in simulation seconds.")
+    parser.add_argument("--object-xy", type=str, default=None, help="Inference supply position, 'x,y' in meters.")
+    parser.add_argument("--goal-xy", type=str, default=None, help="Inference drop position, 'x,y' in meters.")
     return parser.parse_args()
+
+
+def _parse_xy(text: str | None) -> tuple[float, float] | None:
+    if text is None:
+        return None
+    parts = text.split(",")
+    if len(parts) != 2:
+        raise SystemExit(f"Expected x,y, got {text}")
+    return float(parts[0]), float(parts[1])
 
 
 def _torch_load(path: Path, device: torch.device):
@@ -137,6 +163,9 @@ def main() -> None:
         terrain_steps=args.terrain_steps,
         terrain_amplitude=cfg_amplitude,
         control_split=args.control_split,
+        wrist_camera=args.wrist_camera,
+        fixed_object_xy=_parse_xy(args.object_xy),
+        fixed_goal_xy=_parse_xy(args.goal_xy),
     )
     if args.viewer:
         print("Opening the 3D window. The first launch can take one to three minutes.", flush=True)
@@ -178,7 +207,8 @@ def main() -> None:
                 print(f"resumed {ckpt_path} at iteration {start_iteration}", flush=True)
     print(
         f"PPO obs={env.num_obs} act={env.num_actions} envs={env.num_envs} "
-        f"freeze_legs={cfg.freeze_legs} control_split={cfg.control_split} urdf={env.urdf_path} device={device}",
+        f"freeze_legs={cfg.freeze_legs} control_split={cfg.control_split} "
+        f"wrist_camera={cfg.wrist_camera} urdf={env.urdf_path} device={device}",
         flush=True,
     )
     if not args.play:
@@ -201,6 +231,7 @@ def main() -> None:
                 "freeze_legs": cfg.freeze_legs,
                 "scripted_gait": cfg.scripted_gait,
                 "control_split": cfg.control_split,
+                "wrist_camera": cfg.wrist_camera,
             },
         )
     if args.play:
@@ -224,7 +255,13 @@ def main() -> None:
             args.log_dir / "ppo_0000.pt", agent, optimizer, 0, env.num_obs, env.num_actions, cfg.scripted_gait
         )
 
-    for iteration in range(start_iteration + 1, start_iteration + args.iterations + 1):
+    last_iteration = start_iteration + args.iterations
+    print(
+        f"学習 {start_iteration}/{last_iteration} から開始します。1回終わるたびに残り時間を出します。",
+        flush=True,
+    )
+    step_times: list[float] = []
+    for iteration in range(start_iteration + 1, last_iteration + 1):
         started = time.perf_counter()
         obs_buf, act_buf, logp_buf, val_buf, rew_buf, boot_buf, done_buf = [], [], [], [], [], [], []
         grasp_sum = 0.0
@@ -303,13 +340,15 @@ def main() -> None:
         if "success_rate" in env.extras:
             row["success"] = float(env.extras["success_rate"])
         append_metrics(args.log_dir / "metrics.jsonl", row)
+        step_times.append(elapsed)
+        remaining = (last_iteration - iteration) * (sum(step_times) / len(step_times))
         print(
-            f"iter {iteration:04d} reward {mean_reward:.3f} ee_dist {mean_dist:.3f} "
+            f"iter {iteration}/{last_iteration}  残り {format_remaining(remaining)}  "
+            f"reward {mean_reward:.3f} ee_dist {mean_dist:.3f} "
             f"grasp {grasp_rate:.2f} grip {grip_sum / args.num_steps:.3f} "
             f"policy {metrics['policy_loss']:.3f} fps {fps:.0f}",
             flush=True,
         )
-        last_iteration = start_iteration + args.iterations
         if iteration % args.save_interval == 0 or iteration == last_iteration:
             save_checkpoint(
                 args.log_dir / f"ppo_{iteration:04d}.pt",

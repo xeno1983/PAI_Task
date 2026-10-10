@@ -33,7 +33,9 @@ from pick_and_carry.terrain import make_course, make_supply_yard, make_terrain_b
 from pick_and_carry.helpers import (
     compute_stage_reward,
     fallen_mask,
+    detect_wrist_target,
     grasp_mask,
+    gripper_is_closed,
     pairwise_distance,
     place_mask,
     task_phase,
@@ -94,7 +96,9 @@ class PickAndCarryEnv:
 
         self.num_envs = self.cfg.num_envs
         self.camera = None
+        self.wrist_camera = None
         self._recording = False
+        self._wrist_warning_sent = False
         self.num_obs = NUM_OBS
         self.num_actions = NUM_ACTIONS
         self.obs_slices = layout_slices(OBS_LAYOUT)
@@ -138,7 +142,11 @@ class PickAndCarryEnv:
                 enable_self_collision=False,
                 max_collision_pairs=self.cfg.max_collision_pairs,
             ),
-            vis_options=gs.options.VisOptions(rendered_envs_idx=[0], shadow=False),
+            vis_options=gs.options.VisOptions(
+                rendered_envs_idx=list(range(self.num_envs if self.cfg.wrist_camera else 1)),
+                shadow=False,
+                segmentation_level="link",
+            ),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(2.2, -2.2, 1.4),
                 camera_lookat=(0.4, 0.0, 0.4),
@@ -236,6 +244,14 @@ class PickAndCarryEnv:
             ),
             surface=gs.surfaces.Default(color=(0.15, 0.75, 0.35, 0.45)),
         )
+        if self.cfg.wrist_camera:
+            self.wrist_camera = self.scene.add_camera(
+                res=self.cfg.wrist_camera_res,
+                pos=(0.0, 0.0, 0.5),
+                lookat=(0.2, 0.0, 0.4),
+                fov=self.cfg.wrist_camera_fov,
+                GUI=False,
+            )
         if self.cfg.record_path or self.cfg.enable_camera:
             self.camera = self.scene.add_camera(
                 res=self.cfg.camera_res,
@@ -247,6 +263,15 @@ class PickAndCarryEnv:
         self.scene.build(n_envs=self.num_envs, env_spacing=self.cfg.env_spacing)
         if self.terrain is not None:
             self._prepare_terrain_runtime()
+        if self.wrist_camera is not None:
+            # Fixed panda_hand is merged away. panda_hand_tcp stays, 0.1034 m out along the hand +Z.
+            # The camera sits 0.045 m out from the palm and looks through the fingers (OpenGL looks along -Z).
+            offset = np.eye(4, dtype=np.float32)
+            offset[1, 1] = -1.0
+            offset[2, 2] = -1.0
+            offset[2, 3] = 0.045 - 0.1034
+            self.wrist_camera.attach(self.robot.get_link("panda_hand_tcp"), offset)
+            self._supply_link_idx = [int(cube.links[0].idx) for cube in self.supplies]
         if self.camera is not None and self.cfg.record_path:
             self.camera.start_recording(save_to_filename=self.cfg.record_path, fps=25)
             self._recording = True
@@ -354,6 +379,8 @@ class PickAndCarryEnv:
         self.gait_blend = torch.ones((n,), dtype=torch.float32, device=self.device)
         self.base_obj_dist = torch.zeros((n,), dtype=torch.float32, device=self.device)
         self.obj_goal_dist = torch.zeros((n,), dtype=torch.float32, device=self.device)
+        self.wrist_pos = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
+        self.wrist_visible = torch.zeros((n,), dtype=torch.bool, device=self.device)
         self.gravity = torch.tensor((0.0, 0.0, -1.0), dtype=torch.float32, device=self.device)
         self.init_base_pos = self._tensor(self.cfg.base_init_pos)
         self.init_base_quat = self._tensor(self.cfg.base_init_quat)
@@ -690,6 +717,7 @@ class PickAndCarryEnv:
         self.ee_pos = ee[:, 0, :] if ee.ndim == 3 else ee
         self._read_object()
         self._read_contacts()
+        self._sense_wrist()
 
     def _read_object(self) -> None:
         if len(self.supplies) == 1:
@@ -721,14 +749,63 @@ class PickAndCarryEnv:
 
     def _update_grasp_flags(self) -> None:
         opening = self._gripper_opening()
-        self.grasped = grasp_mask(
-            self.ee_pos,
-            self.obj_pos,
-            opening,
-            self.cfg.grasp_distance,
-            self.cfg.gripper_closed,
-        )
+        if self.cfg.wrist_camera:
+            # A closed gripper counts only when the wrist camera sees the cube at the hand.
+            # If the view is lost while the fingers stay closed, keep the hold.
+            closed = gripper_is_closed(opening, self.cfg.gripper_closed)
+            seen = grasp_mask(
+                self.ee_pos,
+                self.wrist_pos,
+                opening,
+                self.cfg.grasp_distance,
+                self.cfg.gripper_closed,
+            ) & self.wrist_visible
+            self.grasped = seen | (self.prev_grasped & closed & ~self.wrist_visible)
+        else:
+            self.grasped = grasp_mask(
+                self.ee_pos,
+                self.obj_pos,
+                opening,
+                self.cfg.grasp_distance,
+                self.cfg.gripper_closed,
+            )
         self.was_grasped |= self.grasped
+
+    @staticmethod
+    def _camera_matrix(transform) -> np.ndarray:
+        if hasattr(transform, "detach"):
+            transform = transform.detach().cpu().numpy()
+        return np.asarray(transform, dtype=np.float32)
+
+    def _sense_wrist(self) -> None:
+        if self.wrist_camera is None:
+            return
+        try:
+            self.wrist_camera.move_to_attach()
+            _, depth, segmentation, _ = self.wrist_camera.render(
+                rgb=False,
+                depth=True,
+                segmentation=True,
+                force_render=True,
+            )
+            target = [self._supply_link_idx[int(index)] for index in self._supply_index.tolist()]
+            positions, visible = detect_wrist_target(
+                depth,
+                segmentation,
+                target,
+                focal=float(self.wrist_camera.f),
+                cx=float(self.wrist_camera.cx),
+                cy=float(self.wrist_camera.cy),
+                transform=self._camera_matrix(self.wrist_camera.transform),
+            )
+        except Exception as exc:
+            if not self._wrist_warning_sent:
+                print(f"Wrist camera detection failed; the cube stays unseen. {exc}", flush=True)
+                self._wrist_warning_sent = True
+            self.wrist_visible.zero_()
+            return
+        self.wrist_pos.copy_(torch.as_tensor(positions, dtype=torch.float32, device=self.device))
+        self.wrist_visible.copy_(torch.as_tensor(visible, dtype=torch.bool, device=self.device))
 
     def _assist_grasp(self) -> None:
         if not self.cfg.assist_grasp or not bool(self.grasped.any()):
@@ -812,7 +889,13 @@ class PickAndCarryEnv:
         gripper_pos = self.dof_pos[:, fingers].mean(dim=-1, keepdim=True)
         gripper_vel = self.dof_vel[:, fingers].mean(dim=-1, keepdim=True)
         ee_b = world_to_base(self.ee_pos, self.base_pos, self.base_quat)
-        obj_b = world_to_base(self.obj_pos, self.base_pos, self.base_quat)
+        if self.cfg.wrist_camera:
+            seen = world_to_base(self.wrist_pos, self.base_pos, self.base_quat)
+            unseen = torch.zeros_like(seen)
+            unseen[:, 2] = -1.0
+            obj_b = torch.where(self.wrist_visible[:, None], seen, unseen)
+        else:
+            obj_b = world_to_base(self.obj_pos, self.base_pos, self.base_quat)
         goal_b = world_to_base(self.goal_pos, self.base_pos, self.base_quat)
         self.obs_buf = torch.cat(
             (
@@ -972,16 +1055,26 @@ class PickAndCarryEnv:
         self.scene.rigid_solver.dyn_info.vverts.init_pos.from_numpy(np.ascontiguousarray(positions, dtype=np.float32))
 
     def _sample_object(self, n: int, shift: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        xy = self._uniform_xy(n, self.cfg.object_x_range, self.cfg.object_y_range) + shift
+        if self.cfg.fixed_object_xy is None:
+            xy = self._uniform_xy(n, self.cfg.object_x_range, self.cfg.object_y_range) + shift
+            yaw = torch.empty((n,), device=self.device).uniform_(-math.pi, math.pi)
+        else:
+            xy = self._fixed_xy(n, self.cfg.fixed_object_xy) + shift
+            yaw = torch.zeros((n,), device=self.device)
         z = self._ground_z(xy) + self.cfg.cube_size * 0.5 + 0.002
-        pos = torch.cat((xy, z), dim=-1)
-        quat = yaw_quat(torch.empty((n,), device=self.device).uniform_(-math.pi, math.pi))
-        return pos, quat
+        return torch.cat((xy, z), dim=-1), yaw_quat(yaw)
 
     def _sample_goal(self, n: int, shift: torch.Tensor) -> torch.Tensor:
-        xy = self._uniform_xy(n, self.cfg.goal_x_range, self.cfg.goal_y_range) + shift
+        if self.cfg.fixed_goal_xy is None:
+            xy = self._uniform_xy(n, self.cfg.goal_x_range, self.cfg.goal_y_range) + shift
+        else:
+            xy = self._fixed_xy(n, self.cfg.fixed_goal_xy) + shift
         z = self._ground_z(xy) + self.cfg.goal_marker_size[2] * 0.5
         return torch.cat((xy, z), dim=-1)
+
+    def _fixed_xy(self, n: int, xy: tuple[float, float]) -> torch.Tensor:
+        point = torch.tensor(xy, dtype=torch.float32, device=self.device).view(1, 2)
+        return point.expand(n, 2).clone()
 
     def _uniform_xy(self, n: int, x_range: tuple[float, float], y_range: tuple[float, float]) -> torch.Tensor:
         x = torch.empty((n, 1), device=self.device).uniform_(*x_range)

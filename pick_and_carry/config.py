@@ -212,6 +212,10 @@ class EnvConfig:
     # walk: legs the whole time, arm held still, reward is travel and not falling.
     # both: legs and arm together for the whole episode.
     control_split: str = "split"
+    # Wrist camera on the hand. Grasp uses the segmented cube, not the simulator position.
+    wrist_camera: bool = False
+    wrist_camera_res: tuple[int, int] = (64, 48)
+    wrist_camera_fov: float = 70.0
     # 0 keeps the single pick-and-carry course. Above 0 builds a wide repeating yard.
     yard_stations: int = 0
     # Each episode draws a new bump pattern. A yard recording keeps one pattern.
@@ -247,6 +251,9 @@ class EnvConfig:
     # On the flat goal pad, beyond the second bumpy strip.
     goal_x_range: tuple[float, float] = GOAL_X_RANGE
     goal_y_range: tuple[float, float] = (-0.25, 0.25)
+    # Inference clicks. None keeps the random pad sample.
+    fixed_object_xy: tuple[float, float] | None = None
+    fixed_goal_xy: tuple[float, float] | None = None
     # Base-to-object distance that starts the pickup. Object-to-goal distance
     # that starts the release while the cube is held.
     pickup_distance: float = 0.55

@@ -25,21 +25,47 @@ Write-Host "   1  ロボットを 8 秒間立たせて録画"
 Write-Host "      正解: 犬が平らな足場に立ち、前方に段差、その先にオレンジの立方体。"
 Write-Host "            最後に smoke ok と exit code: 0"
 Write-Host "            動画: 起動スクリプトフォルダの PickAndCarry_smoke.mp4"
-Write-Host "   2  歩行から学習する。不整地→拾う→不整地→置く を 1000 iteration"
+Write-Host "   2  歩行から学習する。不整地→拾う→不整地→置く。回数はあとで入力"
 Write-Host "      歩き方は方策が学ぶ。拾うときと置くときは脚を立ち姿勢に固定する。"
-Write-Host "      始める前に、走行環境と、歩行だけの学習か同時の把持かを選ぶ。"
+Write-Host "      始める前に、走行環境、学習の分け方、手先カメラを選ぶ。"
 Write-Host "      段の位置はエピソードごとに少し変わる。続きは logs\ppo_walk から読む。"
 Write-Host "      動画: 起動スクリプトフォルダの PickAndCarry_ppo.mp4"
-Write-Host "      目安: 40 分ほど。もう一度選ぶと、その続きから学習する。"
+Write-Host "      Enter だけなら 1000 回、並列 16 体。もう一度選ぶと続きから学習する。"
 Write-Host "   3  短い SAC（8 環境、500 ステップ、録画あり）"
 Write-Host "   4  Colab 用 zip を起動スクリプトフォルダに作る"
-Write-Host "   5  今の学習結果だけを動画にする（追加学習なし）。走行環境を選ぶ"
+Write-Host "   5  推論。クリックで物資を置き、次のクリックで運び先を決める（追加学習なし）"
 Write-Host "   6  学習の途中経過を並べた比較動画を作る（追加学習なし）。走行環境を選ぶ"
 Write-Host "      同じ初期配置で、早い時点と遅い時点を同時に再生する。"
 Write-Host "      動画: 起動スクリプトフォルダの PickAndCarry_compare.mp4"
 Write-Host "   7  学習曲線を開く（追加学習なし）"
 Write-Host "      報酬、把持率、手先の距離、設置率。"
 Write-Host "      ブラウザ: 起動スクリプトフォルダの PickAndCarry_curves.html"
+Write-Host ""
+
+function Get-LatestIteration {
+    $dir = Join-Path (Get-Location) "logs\ppo_walk"
+    $best = 0
+    if (Test-Path $dir) {
+        foreach ($file in Get-ChildItem -Path $dir -Filter "ppo_*.pt" -ErrorAction SilentlyContinue) {
+            if ($file.BaseName -match '^ppo_(\d+)$') {
+                $value = [int]$Matches[1]
+                if ($value -gt $best) { $best = $value }
+            }
+        }
+    }
+    return $best
+}
+
+$latestIter = Get-LatestIteration
+$iterName = "ppo_{0:d4}.pt" -f $latestIter
+if ($latestIter -gt 0 -and (Test-Path (Join-Path (Get-Location) "logs\ppo_walk\$iterName"))) {
+    Write-Host " 現在の iteration: $latestIter"
+    Write-Host " 保存: logs\ppo_walk\$iterName"
+    Write-Host " 2 を選ぶと、iteration $latestIter から続ける回数を入力します。"
+} else {
+    Write-Host " 現在の iteration: 0（保存された重みはありません）"
+    Write-Host " 2 を選ぶと、iteration 0 から続ける回数を入力します。"
+}
 Write-Host ""
 $choice = Read-Host "番号を入力 [1]"
 if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
@@ -92,6 +118,22 @@ function Select-Control {
     }
 }
 
+function Select-Vision {
+    Write-Host ""
+    Write-Host " 対象物の見つけ方"
+    Write-Host "   1  シミュレータの位置をそのまま使う"
+    Write-Host "   2  手先のカメラで箱を見つける。見えているときだけつかむ"
+    $picked = Read-Host "見つけ方 [1]"
+    if ([string]::IsNullOrWhiteSpace($picked)) { $picked = "1" }
+    if ($picked -eq "2") {
+        Write-Host "手先カメラで検知して把持します。"
+        $script:visionArgs = @("--wrist-camera")
+    } else {
+        Write-Host "シミュレータの位置で把持します。"
+        $script:visionArgs = @()
+    }
+}
+
 $code = 0
 switch ($choice) {
     "1" {
@@ -104,17 +146,44 @@ switch ($choice) {
     }
     "2" {
         Write-Host ""
-        Write-Host "不整地を渡って拾い、もう一度不整地を渡って置く学習を 1000 iteration 進めます。終わると学習曲線と動画を開きます。"
+        Write-Host "不整地を渡って拾い、もう一度不整地を渡って置く学習を進めます。終わると学習曲線と動画を開きます。"
+        $trainIters = 0
+        while ($trainIters -lt 1) {
+            $rawIters = Read-Host "学習回数 [1000]"
+            if ([string]::IsNullOrWhiteSpace($rawIters)) { $rawIters = "1000" }
+            $parsedIters = 0
+            if (-not [int]::TryParse($rawIters, [ref]$parsedIters) -or $parsedIters -lt 1) {
+                Write-Host "1 以上の整数を入力してください。"
+                continue
+            }
+            $trainIters = $parsedIters
+        }
+        Write-Host "開始時の iteration: $latestIter    終了目標: $($latestIter + $trainIters)（$trainIters 回）"
+        $numEnvs = 0
+        while ($numEnvs -lt 1) {
+            $rawEnvs = Read-Host "同時に動かすロボット数 [16]"
+            if ([string]::IsNullOrWhiteSpace($rawEnvs)) { $rawEnvs = "16" }
+            $parsedEnvs = 0
+            if (-not [int]::TryParse($rawEnvs, [ref]$parsedEnvs) -or $parsedEnvs -lt 1) {
+                Write-Host "1 以上の整数を入力してください。"
+                continue
+            }
+            $numEnvs = $parsedEnvs
+        }
+        if ($numEnvs -gt 32) {
+            Write-Host "この GPU は 8GB です。32 を超えるとメモリ不足で止まることがあります。"
+        }
         Select-Terrain
         Select-Control
-        & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs 16 --iterations 1000 --num-steps 128 --save-interval 20 --log-dir logs/ppo_walk @terrainArgs @controlArgs
+        Select-Vision
+        & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir logs/ppo_walk @terrainArgs @controlArgs @visionArgs
         $code = $LASTEXITCODE
         if ($code -eq 0) {
             $curves = Join-Path $out "PickAndCarry_curves.html"
             & $python -u scripts\plot_curves.py --log-dir logs/ppo_walk --output $curves
             if ($LASTEXITCODE -eq 0 -and (Test-Path $curves)) { Start-Process $curves }
             $video = Join-Path $out "PickAndCarry_ppo.mp4"
-            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir logs/ppo_walk @terrainArgs @controlArgs
+            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir logs/ppo_walk @terrainArgs @controlArgs @visionArgs
             $code = $LASTEXITCODE
             if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
         }
@@ -136,21 +205,24 @@ switch ($choice) {
     }
     "5" {
         Write-Host ""
-        Write-Host "今の学習結果を再生して動画にします。"
+        Write-Host "クリック画面を開きます。使う重み: iteration $latestIter"
+        Write-Host "1回目のクリックが物資、2回目が運び先です。"
         Select-Terrain
         Select-Control
+        Select-Vision
         $video = Join-Path $out "PickAndCarry_ppo.mp4"
-        & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir logs/ppo_walk @terrainArgs @controlArgs
+        & $python -u scripts\infer_gui.py --log-dir logs/ppo_walk --record $video --seconds 20 @terrainArgs @controlArgs @visionArgs
         $code = $LASTEXITCODE
         if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
     }
     "6" {
         Write-Host ""
-        Write-Host "保存済みの時点を同じ配置で再生し、並べた動画を作ります。"
+        Write-Host "保存済みの時点を同じ配置で再生し、並べた動画を作ります。最新は iteration $latestIter です。"
         Select-Terrain
         Select-Control
+        Select-Vision
         $video = Join-Path $out "PickAndCarry_compare.mp4"
-        & $python -u scripts\compare_snapshots.py --log-dir logs/ppo_walk --output $video --seconds 16 --panels 4 @terrainArgs @controlArgs
+        & $python -u scripts\compare_snapshots.py --log-dir logs/ppo_walk --output $video --seconds 16 --panels 4 @terrainArgs @controlArgs @visionArgs
         $code = $LASTEXITCODE
         if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
     }

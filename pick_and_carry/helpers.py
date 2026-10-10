@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 
 from pick_and_carry.config import RewardScales
@@ -151,3 +152,58 @@ def compute_stage_reward(
     }
     reward = torch.stack(tuple(terms.values()), dim=0).sum(dim=0)
     return reward, terms
+
+
+_OPENGL_TO_OPENCV = np.array(
+    [[1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+    dtype=np.float32,
+)
+
+
+def detect_wrist_target(
+    depth,
+    segmentation,
+    target_ids,
+    focal: float,
+    cx: float,
+    cy: float,
+    transform,
+    near: float = 0.02,
+    far: float = 2.0,
+    min_pixels: int = 4,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Centroid of one segmented object in a wrist-camera depth image.
+
+    ``depth`` and ``segmentation`` are (H, W) or (N, H, W). ``transform`` is the
+    camera pose, (4, 4) or (N, 4, 4), in the same convention as Genesis.
+    Returns world positions (N, 3) and a visibility flag (N,).
+    """
+    depth_arr = np.asarray(depth, dtype=np.float32)
+    seg_arr = np.asarray(segmentation)
+    if seg_arr.ndim == depth_arr.ndim + 1:
+        seg_arr = seg_arr[..., 0]
+    if depth_arr.ndim == 2:
+        depth_arr = depth_arr[None]
+        seg_arr = seg_arr[None]
+    count, height, width = depth_arr.shape
+    ids = np.asarray(target_ids, dtype=np.int64).reshape(-1)
+    if ids.shape[0] == 1 and count > 1:
+        ids = np.repeat(ids, count)
+    pose = np.asarray(transform, dtype=np.float32)
+    if pose.ndim == 2:
+        pose = np.repeat(pose[None], count, axis=0)
+    cam_pose = pose @ _OPENGL_TO_OPENCV
+    rows, cols = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+    positions = np.zeros((count, 3), dtype=np.float32)
+    visible = np.zeros((count,), dtype=bool)
+    for index in range(count):
+        mask = (seg_arr[index] == ids[index]) & (depth_arr[index] > near) & (depth_arr[index] < far * 0.999)
+        if int(mask.sum()) < min_pixels:
+            continue
+        z = depth_arr[index][mask]
+        x = z * (cols[mask].astype(np.float32) + 0.5 - cx) / focal
+        y = z * (rows[mask].astype(np.float32) + 0.5 - cy) / focal
+        points = np.stack((x, y, z, np.ones_like(z)), axis=-1)
+        positions[index] = (points @ cam_pose[index].T)[:, :3].mean(axis=0)
+        visible[index] = True
+    return positions, visible

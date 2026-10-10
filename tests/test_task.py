@@ -5,11 +5,15 @@ from __future__ import annotations
 import math
 import unittest
 
+import numpy as np
 import torch
 
 from pick_and_carry.config import NUM_ACTIONS, NUM_OBS, OBS_LAYOUT, RewardScales, layout_dim
+from scripts.infer_gui import canvas_point, world_point
+
 from pick_and_carry.helpers import (
     compute_stage_reward,
+    detect_wrist_target,
     fallen_mask,
     grasp_mask,
     place_mask,
@@ -104,6 +108,27 @@ class RewardTests(unittest.TestCase):
         obj_goal = torch.tensor([2.0, 1.5, 1.2, 0.2])
         phase = task_phase(grasped, base_obj, obj_goal, 0.55, 0.45)
         self.assertEqual(phase.tolist(), [0, 1, 2, 3])
+
+    def test_wrist_camera_centroid_uses_only_the_target_pixels(self):
+        depth = np.full((8, 8), 0.5, dtype=np.float32)
+        seg = np.zeros((8, 8), dtype=np.int32)
+        seg[3:5, 3:5] = 7
+        depth[3:5, 3:5] = 0.20
+        pose = np.eye(4, dtype=np.float32)
+        positions, visible = detect_wrist_target(depth, seg, [7], focal=8.0, cx=4.0, cy=4.0, transform=pose)
+        self.assertTrue(bool(visible[0]))
+        self.assertAlmostEqual(float(positions[0, 0]), 0.0, places=4)
+        self.assertAlmostEqual(float(positions[0, 2]), -0.20, places=4)
+        missed, unseen = detect_wrist_target(depth, seg, [3], focal=8.0, cx=4.0, cy=4.0, transform=pose)
+        self.assertFalse(bool(unseen[0]))
+        self.assertAlmostEqual(float(missed[0, 0]), 0.0, places=4)
+
+    def test_click_map_round_trips_world_xy(self):
+        for point in ((0.0, 0.0), (1.75, -0.2), (4.0, 0.4)):
+            px, py = canvas_point(*point)
+            back = world_point(px, py)
+            self.assertAlmostEqual(back[0], point[0], places=4)
+            self.assertAlmostEqual(back[1], point[1], places=4)
 
 
 if __name__ == "__main__":
