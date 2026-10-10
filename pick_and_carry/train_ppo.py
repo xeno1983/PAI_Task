@@ -56,6 +56,12 @@ def parse_args():
     parser.add_argument("--terrain-amplitude", type=float, default=None, help="Bump and step height in meters.")
     parser.add_argument("--terrain-steps", action="store_true", help="Add flat treads on the travel strips.")
     parser.add_argument(
+        "--arm",
+        choices=("panda", "z1"),
+        default="panda",
+        help="panda keeps the saved 68-dimensional weights. z1 is the lighter arm and starts a new run.",
+    )
+    parser.add_argument(
         "--control-split",
         choices=("split", "walk", "both"),
         default="split",
@@ -98,8 +104,8 @@ def _torch_load(path: Path, device: torch.device):
         return torch.load(path, map_location=device)
 
 
-def resolve_checkpoint(log_dir: Path, resume: str, obs_dim: int, act_dim: int, scripted_gait: bool) -> Path | None:
-    """Return a checkpoint for this task. 'latest' skips a different observation size or gait mode."""
+def resolve_checkpoint(log_dir: Path, resume: str, obs_dim: int, act_dim: int, scripted_gait: bool, arm: str) -> Path | None:
+    """Return a checkpoint for this task. 'latest' skips a different arm, size, or gait."""
     if resume != "latest":
         path = Path(resume)
         if not path.is_file():
@@ -107,9 +113,15 @@ def resolve_checkpoint(log_dir: Path, resume: str, obs_dim: int, act_dim: int, s
         return path
     compatible: list[Path] = []
     skipped_gait = 0
+    skipped_arm = 0
     for path in sorted(log_dir.glob("ppo_*.pt")):
         blob = _torch_load(path, torch.device("cpu"))
         if int(blob.get("obs_dim", -1)) != obs_dim or int(blob.get("act_dim", -1)) != act_dim:
+            continue
+        # Files saved before the arm choice are the Franka.
+        saved_arm = str(blob.get("arm", "panda"))
+        if saved_arm != arm:
+            skipped_arm += 1
             continue
         # Files saved before the split used the fixed trot.
         saved_gait = bool(blob.get("scripted_gait", True))
@@ -117,6 +129,8 @@ def resolve_checkpoint(log_dir: Path, resume: str, obs_dim: int, act_dim: int, s
             skipped_gait += 1
             continue
         compatible.append(path)
+    if not compatible and skipped_arm:
+        print(f"skipped {skipped_arm} checkpoint(s) from a different arm.", flush=True)
     if not compatible and skipped_gait:
         kind = "fixed trot" if not scripted_gait else "learned walk"
         print(f"skipped {skipped_gait} checkpoint(s) from the {kind}.", flush=True)
@@ -131,6 +145,7 @@ def save_checkpoint(
     obs_dim: int,
     act_dim: int,
     scripted_gait: bool,
+    arm: str,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -141,16 +156,16 @@ def save_checkpoint(
             "obs_dim": obs_dim,
             "act_dim": act_dim,
             "scripted_gait": scripted_gait,
+            "arm": arm,
         },
         path,
     )
     print(f"saved {path}", flush=True)
 
 
-def main() -> None:
-    args = parse_args()
-    cfg_amplitude = 0.035 if args.terrain_amplitude is None else args.terrain_amplitude
-    cfg = EnvConfig(
+def make_config(args) -> EnvConfig:
+    amplitude = 0.035 if args.terrain_amplitude is None else args.terrain_amplitude
+    return EnvConfig(
         num_envs=args.num_envs,
         backend=args.backend,
         show_viewer=args.viewer,
@@ -161,100 +176,62 @@ def main() -> None:
         scripted_gait=args.scripted_gait,
         seed=args.seed,
         terrain_steps=args.terrain_steps,
-        terrain_amplitude=cfg_amplitude,
+        terrain_amplitude=amplitude,
         control_split=args.control_split,
+        arm=args.arm,
         wrist_camera=args.wrist_camera,
         fixed_object_xy=_parse_xy(args.object_xy),
         fixed_goal_xy=_parse_xy(args.goal_xy),
     )
-    if args.viewer:
-        print("Opening the 3D window. The first launch can take one to three minutes.", flush=True)
-    env = PickAndCarryEnv(cfg=cfg)
-    device = env.device
-    agent = ActorCritic(env.num_obs, env.num_actions).to(device)
-    optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
-    args.log_dir.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(log_dir=str(args.log_dir))
-    obs = env.reset()
-    start_iteration = 0
-    resumed_from = None
-    if args.resume:
-        ckpt_path = resolve_checkpoint(
-            args.log_dir, args.resume, env.num_obs, env.num_actions, cfg.scripted_gait
-        )
-        if ckpt_path is None:
-            if args.play:
-                raise SystemExit(f"No checkpoint in {args.log_dir.resolve()}. Train once before playing.")
-            print(f"no checkpoint in {args.log_dir.resolve()}. Starting from scratch.", flush=True)
-        else:
-            blob = _torch_load(ckpt_path, device)
-            obs_dim = int(blob.get("obs_dim", -1))
-            act_dim = int(blob.get("act_dim", -1))
-            saved_gait = bool(blob.get("scripted_gait", True))
-            if obs_dim != env.num_obs or act_dim != env.num_actions or saved_gait != cfg.scripted_gait:
-                print(
-                    f"checkpoint {ckpt_path} is for obs {obs_dim} act {act_dim} "
-                    f"scripted_gait {saved_gait}, this task is obs {env.num_obs} act {env.num_actions} "
-                    f"scripted_gait {cfg.scripted_gait}. Starting from scratch.",
-                    flush=True,
-                )
-            else:
-                agent.load_state_dict(blob["model"])
-                if "optimizer" in blob:
-                    optimizer.load_state_dict(blob["optimizer"])
-                start_iteration = int(blob.get("iteration", 0))
-                resumed_from = str(ckpt_path)
-                print(f"resumed {ckpt_path} at iteration {start_iteration}", flush=True)
-    print(
-        f"PPO obs={env.num_obs} act={env.num_actions} envs={env.num_envs} "
-        f"freeze_legs={cfg.freeze_legs} control_split={cfg.control_split} "
-        f"wrist_camera={cfg.wrist_camera} urdf={env.urdf_path} device={device}",
-        flush=True,
-    )
-    if not args.play:
-        write_run(
-            args.log_dir / "run.json",
-            {
-                "algorithm": "ppo",
-                "resumed_from": resumed_from,
-                "start_iteration": start_iteration,
-                "iterations_requested": args.iterations,
-                "num_envs": env.num_envs,
-                "num_steps": args.num_steps,
-                "learning_rate": args.lr,
-                "seed": args.seed,
-                "obs_dim": env.num_obs,
-                "act_dim": env.num_actions,
-                "terrain": cfg.terrain,
-                "terrain_amplitude_m": cfg.terrain_amplitude,
-                "terrain_steps": cfg.terrain_steps,
-                "freeze_legs": cfg.freeze_legs,
-                "scripted_gait": cfg.scripted_gait,
-                "control_split": cfg.control_split,
-                "wrist_camera": cfg.wrist_camera,
-            },
-        )
-    if args.play:
-        if not args.resume:
-            raise SystemExit("Pass --resume latest (or a checkpoint path) with --play.")
-        steps = max(1, int(round(args.seconds / cfg.dt)))
-        print(f"playing {steps} steps ({args.seconds:.0f}s)", flush=True)
-        for _ in range(steps):
-            with torch.no_grad():
-                action = agent.act_mean(obs)
-            obs, _, _, _ = env.step(action)
-        writer.close()
-        env.close()
-        print(f"logs: {args.log_dir.resolve()}")
-        if args.record:
-            print(f"video: {Path(args.record).resolve()}")
-        return
 
+
+def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
+    """Load a checkpoint when --resume is set. Returns the saved iteration and path."""
+    if not args.resume:
+        return 0, None
+    ckpt_path = resolve_checkpoint(args.log_dir, args.resume, env.num_obs, env.num_actions, cfg.scripted_gait, cfg.arm)
+    if ckpt_path is None:
+        if args.play:
+            raise SystemExit(f"No checkpoint in {args.log_dir.resolve()}. Train once before playing.")
+        print(f"no checkpoint in {args.log_dir.resolve()}. Starting from scratch.", flush=True)
+        return 0, None
+    blob = _torch_load(ckpt_path, env.device)
+    obs_dim = int(blob.get("obs_dim", -1))
+    act_dim = int(blob.get("act_dim", -1))
+    saved_gait = bool(blob.get("scripted_gait", True))
+    saved_arm = str(blob.get("arm", "panda"))
+    if obs_dim != env.num_obs or act_dim != env.num_actions or saved_gait != cfg.scripted_gait or saved_arm != cfg.arm:
+        print(
+            f"checkpoint {ckpt_path} is for arm {saved_arm} obs {obs_dim} act {act_dim} "
+            f"scripted_gait {saved_gait}, this task is arm {cfg.arm} obs {env.num_obs} act {env.num_actions} "
+            f"scripted_gait {cfg.scripted_gait}. Starting from scratch.",
+            flush=True,
+        )
+        return 0, None
+    agent.load_state_dict(blob["model"])
+    if "optimizer" in blob:
+        optimizer.load_state_dict(blob["optimizer"])
+    start_iteration = int(blob.get("iteration", 0))
+    print(f"resumed {ckpt_path} at iteration {start_iteration}", flush=True)
+    return start_iteration, str(ckpt_path)
+
+
+def play_policy(args, cfg, env, agent, obs) -> None:
+    if not args.resume:
+        raise SystemExit("Pass --resume latest (or a checkpoint path) with --play.")
+    steps = max(1, int(round(args.seconds / cfg.dt)))
+    print(f"playing {steps} steps ({args.seconds:.0f}s)", flush=True)
+    for _ in range(steps):
+        with torch.no_grad():
+            action = agent.act_mean(obs)
+        obs, _, _, _ = env.step(action)
+
+
+def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration: int) -> None:
     if start_iteration == 0:
         save_checkpoint(
-            args.log_dir / "ppo_0000.pt", agent, optimizer, 0, env.num_obs, env.num_actions, cfg.scripted_gait
+            args.log_dir / "ppo_0000.pt", agent, optimizer, 0, env.num_obs, env.num_actions, cfg.scripted_gait, cfg.arm
         )
-
     last_iteration = start_iteration + args.iterations
     print(
         f"学習 {start_iteration}/{last_iteration} から開始します。1回終わるたびに残り時間を出します。",
@@ -297,7 +274,10 @@ def main() -> None:
             args.gamma,
             args.lam,
         )
-        flat = lambda items: torch.cat(items, dim=0)
+
+        def flat(items):
+            return torch.cat(items, dim=0)
+
         metrics = ppo_update(
             agent,
             optimizer,
@@ -358,8 +338,57 @@ def main() -> None:
                 env.num_obs,
                 env.num_actions,
                 cfg.scripted_gait,
+                cfg.arm,
             )
 
+
+def main() -> None:
+    args = parse_args()
+    cfg = make_config(args)
+    if args.viewer:
+        print("Opening the 3D window. The first launch can take one to three minutes.", flush=True)
+    env = PickAndCarryEnv(cfg=cfg)
+    device = env.device
+    agent = ActorCritic(env.num_obs, env.num_actions).to(device)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
+    args.log_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(log_dir=str(args.log_dir))
+    obs = env.reset()
+    start_iteration, resumed_from = resume_agent(args, env, cfg, agent, optimizer)
+    print(
+        f"PPO obs={env.num_obs} act={env.num_actions} envs={env.num_envs} "
+        f"arm={cfg.arm} freeze_legs={cfg.freeze_legs} control_split={cfg.control_split} "
+        f"wrist_camera={cfg.wrist_camera} urdf={env.urdf_path} device={device}",
+        flush=True,
+    )
+    if not args.play:
+        write_run(
+            args.log_dir / "run.json",
+            {
+                "algorithm": "ppo",
+                "resumed_from": resumed_from,
+                "start_iteration": start_iteration,
+                "iterations_requested": args.iterations,
+                "num_envs": env.num_envs,
+                "num_steps": args.num_steps,
+                "learning_rate": args.lr,
+                "seed": args.seed,
+                "obs_dim": env.num_obs,
+                "act_dim": env.num_actions,
+                "terrain": cfg.terrain,
+                "terrain_amplitude_m": cfg.terrain_amplitude,
+                "terrain_steps": cfg.terrain_steps,
+                "freeze_legs": cfg.freeze_legs,
+                "scripted_gait": cfg.scripted_gait,
+                "arm": cfg.arm,
+                "control_split": cfg.control_split,
+                "wrist_camera": cfg.wrist_camera,
+            },
+        )
+    if args.play:
+        play_policy(args, cfg, env, agent, obs)
+    else:
+        run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration)
     writer.close()
     env.close()
     print(f"logs: {args.log_dir.resolve()}")

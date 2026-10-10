@@ -1,28 +1,129 @@
-# Go2 + Franka Pick-and-Carry（Genesis / Colab）
+# Go2 Pick-and-Carry（Genesis）
 
-Genesis 上で、四足の Unitree Go2 の背中に Franka Panda を固定し、立方体を拾って目標エリアまで運ぶ環境です。強化学習のループは PPO と SAC の両方を同梱しています。
+Unitree Go2 の背中に腕を固定し、不整地を渡って立方体を拾い、目標へ置く環境です。学習は PPO が本体で、短い SAC も同梱しています。画面は出さず、結果は mp4 で確認します。この GPU では Genesis の 3D ウィンドウが落ちるため、`--viewer` は使いません。
 
-## マウント
+確認済みの組み合わせは Windows、Python 3.12、PyTorch 2.11.0+cu128、Genesis 1.4.3、RTX 5070 Laptop（8 GB）です。
 
-Go2 の `base` は +X が前、+Z が上です。Franka の `panda_link0` も +Z が上なので、回転なしでアームは直立します。
+## 1. 必要なもの
 
-固定ジョイント `arm_mount_joint` の原点は `base` から `(-0.05, 0, 0.08)` です。前後方向の中心より少し後ろ、胴体上面（約 0.057 m）のすぐ上にフランジが来ます。
+- NVIDIA GPU。RTX 50 番台は CUDA 12.8 以降の PyTorch が必要です。CPU 版の torch では動きません。
+- Python 3.12。
+- プロジェクトを置いたフォルダ。以下ではその場所をプロジェクトルートと呼びます。
 
-`assets/urdf/quadruped_arm.urdf` はメッシュなしのプリミティブ版です。関節名は公式の Go2 / Panda と揃えてあり、アームリンクの質量は合計約 3 kg に落としてあります。公式 URDF を結合したファイルがあると、環境はそちらを優先します。
+## 2. 環境構築（Windows）
 
-```bash
-python scripts/merge_urdf.py --go2 /path/go2.urdf --panda /path/panda.urdf
+PowerShell で、プロジェクトルートに仮想環境を作ります。システム Python の PyTorch は触りません。Genesis より先に CUDA 付き PyTorch を入れます。
+
+```powershell
+cd <プロジェクトルート>
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-出力は `assets/urdf/quadruped_arm_merged.urdf` です。メッシュパスは絶対パスに書き換えます。公式 Franka は約 18 kg で Go2（約 15 kg）より重いので、最初の学習では `--arm-mass-scale 0.25` を推奨します。
+`requirements.txt` は Genesis、TensorBoard、NumPy です。
 
-## 環境 API
+文字化けを避けるため、以後のコマンドの前に次を置きます。起動スクリプトはこれを自分で設定します。
 
-タスクは「不整地を渡って物体へ近づく → 平らな足場で拾う → 不整地を渡って運ぶ → 平らな足場で置く」です。段差は二つの移動区間だけで、拾う足場と置く足場は平らです。物体も目標も、腕が届く前に不整地を渡る位置に出ます。エピソードが始まるたびに、その環境の段差の形と高さが変わります。
+```powershell
+$env:PYTHONUTF8 = "1"
+```
 
-歩き方は学習です。移動中、方策が立ち姿勢を中心に脚 12 関節を動かします。拾う間と置く間は、脚を立ち姿勢に固定するプログラムです。腕とグリッパは、拾う間と置く間だけ方策が動かし、移動中は既定の姿勢と開閉に固定します。`--scripted-gait` を付けると、以前の対角トロットに戻せます。
+動作確認は、ビューアなしで 1 体を数ステップ進めます。初回はシミュレーションカーネルのコンパイルで 1〜2 分かかり、2 回目以降は十数秒です。最後に `smoke ok` と出れば成功です。
 
-`PickAndCarryEnv.reset()` は `(num_envs, 68)` の観測を返します。`step(action)` は `obs, reward, done, info` を返します。`action` は `(num_envs, 20)` で、各成分は `[-1, 1]` です。
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_local.py
+```
+
+Genesis がなくても、報酬と URDF のテストは通ります。
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+## 3. 起動スクリプトで実行する
+
+デスクトップの `起動スクリプト\PickAndCarry_run.bat` をダブルクリックします。中身は `launcher\PickAndCarry_run.ps1` と同じメニューです。ログの窓は、`exit code` が出るまで閉じません。
+
+| 番号 | 内容 | 主な出力 |
+| --- | --- | --- |
+| 1 | 8 秒間立たせて録画 | `PickAndCarry_smoke.mp4`（Z1 なら `PickAndCarry_z1_smoke.mp4`） |
+| 2 | PPO で学習し、終わると曲線と 20 秒の再生 | `PickAndCarry_ppo.mp4` または `PickAndCarry_z1.mp4` |
+| 3 | 短い SAC（Panda のみ、8 環境、500 ステップ） | `PickAndCarry_sac.mp4` |
+| 4 | Colab 用 zip | `起動スクリプト\PAI_Task_colab.zip` |
+| 5 | クリックで物資と運び先を決めて再生 | 同じ mp4 |
+| 6 | 学習の早い時点と遅い時点を 1 本に並べる | `PickAndCarry_compare.mp4` |
+| 7 | 学習曲線をブラウザで開く | `PickAndCarry_curves.html` |
+| 8 | スライドと録画を、説明音声つきの 1 本にする | `PickAndCarry_presentation.mp4` |
+
+出力ファイルは、bat と同じ `起動スクリプト` フォルダにできます。
+
+2 番を選ぶと、次を順に聞きます。Enter は括弧内の既定です。
+
+1. 腕。Panda（既定）か Z1。
+2. 学習回数（1000）。今の iteration にこの回数を足します。
+3. 同時に動かすロボット数（16）。32 を超えると 8 GB の GPU ではメモリ不足になることがあります。手先カメラを使うと、同じ台数でも遅くなります。
+4. 走行環境。低い波 3.5 cm、段差 4.5 cm（既定）、段差 6 cm。段は箱の前に 1 段、置く前に 2 段で、箱と目標の下は平らです。
+5. 学習の分け方。歩行のみ、歩行と把持を分割（既定）、同時。
+6. 対象物の見つけ方。シミュレータの位置（既定）か、手先カメラ。
+
+途中で止めても、最後に `saved ppo_XXXX.pt` と出た時点から次回続けられます。保存は 20 iteration ごとです。画面の iteration がファイルより先に進んでいることがあります。
+
+## 4. コマンドで実行する
+
+起動スクリプトと同じ学習を、プロジェクトルートから直接行う例です。Panda の続きは `logs/ppo_walk`、Z1 は `logs/ppo_z1` です。引数を付けない `train_ppo` の既定ログは `logs/ppo` なので、続きから学ぶときは `--log-dir` を明示します。
+
+```powershell
+$env:PYTHONUTF8 = "1"
+.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --resume latest --num-envs 16 --iterations 1000 --num-steps 128 --save-interval 20 --log-dir logs/ppo_walk --terrain-steps --terrain-amplitude 0.045
+```
+
+Z1 で最初から学ぶときは `--arm z1 --log-dir logs/ppo_z1` を付けます。Panda の重みは寸法が違うので読みません。
+
+再生は学習せず、保存した重みで mp4 を書きます。
+
+```powershell
+.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --seconds 20 --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry_ppo.mp4" --log-dir logs/ppo_walk --terrain-steps --terrain-amplitude 0.045
+```
+
+よく使う引数は次です。
+
+| 引数 | 意味 |
+| --- | --- |
+| `--arm panda` / `--arm z1` | 腕。既定は panda |
+| `--control-split split` / `walk` / `both` | 歩行と把持の分け方。既定は split |
+| `--wrist-camera` | 手先カメラで箱を見てからつかむ |
+| `--terrain-steps` | 移動区間に段差を足す |
+| `--terrain-amplitude 0.045` | 波または段の高さ（メートル） |
+| `--resume latest` | そのログフォルダの最新の適合する重みから続ける |
+| `--play` | 学習せず再生する |
+| `--no-assist-grasp` | 指の接触だけで持つ。既定は、つかんだ判定のあいだ箱を手先へ固定する |
+
+学習曲線と比較動画です。
+
+```powershell
+.\.venv\Scripts\python.exe scripts\plot_curves.py --log-dir logs/ppo_walk --output "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry_curves.html"
+.\.venv\Scripts\python.exe scripts\compare_snapshots.py --log-dir logs/ppo_walk --seconds 16 --panels 4 --terrain-steps --terrain-amplitude 0.045
+```
+
+曲線は報酬、把持率、手先と箱の距離、設置率です。TensorBoard は `tensorboard --logdir logs/ppo_walk` です。ここには方策 Loss、価値 Loss、エントロピーも残ります。
+
+## 5. タスクの要点
+
+コースは、平地から出発し、不整地、拾う平地、不整地、置く平地の順です。1 試行は 20 秒（`dt` 0.02 秒で 1000 ステップ）です。転倒は傾き 60 度超、またはベース高さ 0.18 m 未満です。時間切れは失敗ではなく、価値関数で次状態を補います。
+
+歩き方は方策が学びます。`--control-split` の 3 通りは観測の次元を変えません。
+
+- `split`（既定）: 歩いている間は脚。拾う間と置く間は腕と指。
+- `walk`: 脚だけ。腕は固定、指は開いたまま。報酬は前進と、転ばないこと。
+- `both`: 脚・腕・指を試行のあいだずっと出す。
+
+腕の初期姿勢で、手先は胴体の前方およそ 0.4 m に来ます。箱は一辺 4 cm です。つかんだとみなす距離は 0.12 m、指が閉じた基準は Panda で開き 0.012 m 未満です。
+
+### 観測と行動（Panda）
+
+`reset()` は `(環境数, 68)`、`step(action)` は `obs, reward, done, info` を返します。行動は `(環境数, 20)` で、各成分は -1 から 1 です。Z1 は腕が 6 関節なので、観測 66、行動 19 です。並びは同じで、腕の角度と角速度だけ 1 関節分短くなります。
 
 | 区間 | 内容 |
 | --- | --- |
@@ -32,95 +133,45 @@ python scripts/merge_urdf.py --go2 /path/go2.urdf --panda /path/panda.urdf
 | 27:30 | ベース線速度 × 2 |
 | 30:33 | ベース角速度 × 0.25 |
 | 33:34 | ベース高さ |
-| 34:38 | 足先の接地フラグ |
-| 38:45 | アーム 7 関節角 |
-| 45:52 | アーム関節速度 × 0.05 |
-| 52:53 | グリッパ開き（0 が閉じ、0.04 が全開） |
+| 34:38 | 足先の接地（接触力 1 N 超） |
+| 38:45 | 腕の関節角（Panda は 7、Z1 は 6） |
+| 45:52 | 腕の関節速度 × 0.05 |
+| 52:53 | グリッパ。Panda は 0 が閉じ、0.04 m が全開 |
 | 53:54 | グリッパ速度 × 0.05 |
 | 54:57 | 手先位置（ベース座標） |
-| 57:60 | 物体位置（ベース座標） |
+| 57:60 | 物体位置（ベース座標）。手先カメラで見えないときは (0, 0, -1) |
 | 60:63 | 目標位置（ベース座標） |
 | 63:64 | 把持フラグ |
-| 64:68 | 段階 one-hot（不整地→物体、拾う、不整地→目標、放す） |
+| 64:68 | 段階 one-hot（箱へ歩く、拾う、運ぶ、置く） |
 
-行動は `[脚 12 | アーム 7 | グリッパ 1]` です。位置制御では脚とアームは立ち姿勢からの差分です。移動中の脚は最大約 0.5 rad まで方策が動かします。グリッパは `-1` で閉じ、`+1` で全開（0.04 m）です。移動中の報酬は、前方 0.4 m/s に近いほど高く、横滑りすると下がります。`EnvConfig.control_mode="torque"` にすると同じ次元をトルク指令として使います。
+行動は `[脚 12 | 腕 | グリッパ 1]` です。脚と腕は立ち姿勢からの差分で、脚は最大約 0.5 rad です。グリッパは -1 で閉じ、+1 で開きます。
 
-報酬は `compute_reward()` が次の項を足します。
+報酬の式は `pick_and_carry/reward.py` です。前進（秒速 0.40 m 付近）、接近、把持、運搬、設置（+10）、転倒（-5）、操作量、生存を足します。歩行だけの学習では把持と設置の点は出しません。`ee_dist` は記録用で、報酬には足しません。
 
-- 手先とベースの、物体への接近（未把持のとき）
-- 物体の近くでグリッパを閉じる整形項と、把持が成立した瞬間のボーナス
-- 把持中の、目標への運搬
-- 一度把持した物体を目標半径内の低い位置で離したときの設置ボーナス
-- 転倒（傾き 60 度超、またはベース高さ 0.18 m 未満）のペナルティとエピソード終了
-- 行動の二乗によるエネルギー正則化
-- 生存ボーナス
+## 6. 腕
 
-デフォルトでは、把持判定（手先が物体から 0.10 m 以内かつグリッパ開きが 0.012 m 未満）が真のあいだ、物体を手先に固定します。指先の摩擦だけで持つ段階に進むときは `assist_grasp=False` です。自己衝突は切ってあります。立方体とロボット、地面の衝突は有効です。
+既定は Franka Panda です。実機は約 18 kg で Go2 の定格積載（約 8 kg）を超えます。学習用 URDF `assets/urdf/quadruped_arm.urdf` は腕の質量を約 3.4 kg に落としてあり、見た目のメッシュは公式の形状を参照します。保存済みの Panda の重みは、この 68 次元のまま続きます。
 
-## ローカル（Windows + NVIDIA GPU）
+Unitree Z1 は `--arm z1` です。公式の関節位置と慣性を使い、グリッパ込みで約 5.2 kg、6 軸です。URDF は `assets/urdf/quadruped_z1.urdf` です。観測が変わるので、Panda の重みは読まず `logs/ppo_z1` で最初から学習します。
 
-このマシンではプロジェクト直下の `.venv` を使います。システム Python の PyTorch は CPU 版のままです。RTX 50 番台は CUDA 12.8 以降の PyTorch が必要なので、Genesis より先に cu128 を入れます。
+Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(-0.05, 0, 0.08)` に固定します。胴体の少し後ろ、上面のすぐ上です。
 
-PowerShell:
+## 7. Colab
 
-```powershell
-cd C:\Users\xeno1\PAI_Task
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -U pip
-.\.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu128
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-$env:PYTHONUTF8 = "1"
-.\.venv\Scripts\python.exe scripts\smoke_local.py
-```
+手順は [docs/COLAB.md](docs/COLAB.md) です。ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。GPU ランタイムが必須で、CPU のままでは地形の準備で止まります。短い確認は 8 環境です。3D ウィンドウは使わず、mp4 をノートの中で再生します。
 
-`PYTHONUTF8=1` は、Genesis のログに含まれる罫線文字を cp932 のコンソールが落とさないようにするためです。`smoke_local.py` は環境を 1 つ作り、ゼロ行動で 5 ステップ進めます。初回はシミュレーションカーネルのコンパイルで 1〜2 分かかり、2 回目以降は数秒です。
+## 8. コードの場所
 
-確認済みの組み合わせは Python 3.12、PyTorch 2.11.0+cu128、Genesis 1.4.3、RTX 5070 Laptop（8 GB）です。
+シミュレータがなくても読める計算は次のファイルです。
 
-## Colab
-
-GPU ランタイムで、このリポジトリを `/content/PAI_Task` に置きます。
-
-```python
-!pip install -q -r requirements.txt
-%cd /content/PAI_Task
-!python scripts/validate_urdf.py
-!python -m pick_and_carry.train_ppo --num-envs 64 --iterations 20
-```
-
-初回の `scene.build` はカーネルコンパイルで数十秒から数分かかります。T4 では環境数 64 から始め、メモリが余れば 256 まで上げます。ビューアは Colab ではオフのままにします。TensorBoard のログは `logs/ppo` と `logs/sac` です。
-
-```bash
-python -m pick_and_carry.train_sac --num-envs 16 --steps 5000
-```
-
-同じ手順は `notebooks/pick_and_carry_colab.ipynb` にも分けてあります。
-
-## 学習の比較動画
-
-PPO は学習前の重みを `logs/ppo/ppo_0000.pt` に残し、その後は `--save-interval`（起動メニューでは 20 iteration）ごとに `ppo_0020.pt` のように保存します。途中経過は、同じ物体と目標で再生して 1 本の動画に並べます。パネルは左上から学習の早い順です。
-
-```powershell
-.\.venv\Scripts\python.exe scripts\compare_snapshots.py --seconds 16 --panels 4
-```
-
-出力は `デスクトップ\起動スクリプト\PickAndCarry_compare.mp4` です。観測のサイズが違う古い重みはスキップします。
-
-## 学習曲線
-
-PPO は iteration ごとに `logs/ppo/metrics.jsonl` へ報酬、把持率、手先と箱の距離、設置率を追記します。同時に TensorBoard のイベントも `logs/ppo` に残します。実行条件は `logs/ppo/run.json` です。曲線のページは次で作れます。
-
-```powershell
-.\.venv\Scripts\python.exe scripts\plot_curves.py
-```
-
-出力は `デスクトップ\起動スクリプト\PickAndCarry_curves.html` です。細い線が各 iteration、太い線が移動平均です。TensorBoard を直接見るときは `tensorboard --logdir logs/ppo` です。
-
-## ローカルで確認できること
-
-Genesis がなくても、URDF の整合と報酬の段階はテストできます。
-
-```bash
-python scripts/build_primitive_urdf.py
-python -m unittest discover -s tests
-```
+| ファイル | 内容 |
+| --- | --- |
+| `pick_and_carry/config.py` | 環境設定、Panda の観測 68 と行動 20 |
+| `pick_and_carry/arms.py` | Panda と Z1 の関節、質量の前提、次元 |
+| `pick_and_carry/observation.py` | 観測ベクトルの組み立て |
+| `pick_and_carry/reward.py` | 段階ごとの報酬 |
+| `pick_and_carry/control.py` | 脚・腕・指の目標角度 |
+| `pick_and_carry/helpers.py` | 座標変換、把持・設置・転倒、手先カメラの重心 |
+| `pick_and_carry/env.py` | Genesis のシーン |
+| `pick_and_carry/agents.py` | PPO の方策と clip 付きの更新 |
+| `pick_and_carry/train_ppo.py` | 学習と再生 |

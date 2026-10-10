@@ -8,7 +8,10 @@ import unittest
 import numpy as np
 import torch
 
-from pick_and_carry.config import NUM_ACTIONS, NUM_OBS, OBS_LAYOUT, RewardScales, layout_dim
+from pick_and_carry.config import NUM_ACTIONS, NUM_OBS, OBS_LAYOUT, EnvConfig, RewardScales, layout_dim
+from pick_and_carry.control import arm_gripper_command, learned_leg_target
+from pick_and_carry.observation import pack_observation
+from pick_and_carry.reward import task_reward
 from scripts.infer_gui import canvas_point, world_point
 
 from pick_and_carry.helpers import (
@@ -122,6 +125,87 @@ class RewardTests(unittest.TestCase):
         missed, unseen = detect_wrist_target(depth, seg, [3], focal=8.0, cx=4.0, cy=4.0, transform=pose)
         self.assertFalse(bool(unseen[0]))
         self.assertAlmostEqual(float(missed[0, 0]), 0.0, places=4)
+
+    def test_walk_mode_drops_manipulation_reward(self):
+        n = 1
+        cfg = EnvConfig(control_split="walk", scripted_gait=False)
+        zeros = torch.zeros(n, 3)
+        reward, terms, *_ = task_reward(
+            ee_pos=zeros,
+            obj_pos=zeros,
+            goal_pos=zeros,
+            base_pos=torch.tensor([[0.0, 0.0, 0.42]]),
+            grasped=torch.tensor([True]),
+            prev_grasped=torch.tensor([False]),
+            was_grasped=torch.tensor([True]),
+            place_latched=torch.tensor([False]),
+            projected_gravity=torch.tensor([[0.0, 0.0, -1.0]]),
+            phase=torch.tensor([1]),
+            prev_ee_dist=torch.tensor([0.2]),
+            prev_goal_dist=torch.tensor([1.0]),
+            prev_base_dist=torch.tensor([1.0]),
+            base_obj_dist=torch.tensor([1.0]),
+            base_lin_vel=torch.tensor([[0.40, 0.0, 0.0]]),
+            base_ang_vel=torch.zeros(n, 3),
+            gripper_opening=torch.tensor([0.0]),
+            actions=torch.zeros(n, NUM_ACTIONS),
+            cfg=cfg,
+        )
+        self.assertEqual(float(terms["grasp_bonus"]), 0.0)
+        self.assertEqual(float(terms["place"]), 0.0)
+        self.assertGreater(float(terms["forward"]), 0.0)
+        self.assertEqual(reward.shape, (n,))
+
+    def test_observation_scales_and_unseen_object(self):
+        obs = pack_observation(
+            leg_pos=torch.zeros(1, 12),
+            leg_vel=torch.ones(1, 12),
+            projected_gravity=torch.tensor([[0.0, 0.0, -1.0]]),
+            base_lin_vel=torch.ones(1, 3),
+            base_ang_vel=torch.ones(1, 3),
+            base_height=torch.tensor([[0.42]]),
+            foot_contact=torch.zeros(1, 4),
+            arm_pos=torch.zeros(1, 7),
+            arm_vel=torch.ones(1, 7),
+            gripper_pos=torch.tensor([[0.04]]),
+            gripper_vel=torch.ones(1, 1),
+            ee_pos=torch.zeros(1, 3),
+            object_pos=torch.tensor([[0.0, 0.0, -1.0]]),
+            goal_pos=torch.zeros(1, 3),
+            grasped=torch.tensor([False]),
+            phase=torch.tensor([2]),
+        )
+        self.assertEqual(obs.shape, (1, NUM_OBS))
+        self.assertAlmostEqual(float(obs[0, 12]), 0.05)
+        self.assertAlmostEqual(float(obs[0, 27]), 2.0)
+        self.assertAlmostEqual(float(obs[0, 30]), 0.25)
+        self.assertEqual(obs[0, 64:68].tolist(), [0.0, 0.0, 1.0, 0.0])
+
+    def test_split_holds_the_arm_while_walking(self):
+        arm_act = torch.ones(1, 7)
+        grip = torch.tensor([[-1.0]])
+        default = torch.zeros(1, 7)
+        lower = torch.full((7,), -3.0)
+        upper = torch.full((7,), 3.0)
+        walking, opening = arm_gripper_command(
+            arm_act, grip, default, torch.tensor([0]), control_split="split", arm_scale=1.2, gripper_open=0.04, lower=lower, upper=upper
+        )
+        self.assertTrue(torch.equal(walking, default))
+        self.assertAlmostEqual(float(opening), 0.04)
+        picking, _ = arm_gripper_command(
+            arm_act, grip, default, torch.tensor([1]), control_split="split", arm_scale=1.2, gripper_open=0.04, lower=lower, upper=upper
+        )
+        self.assertTrue(torch.allclose(picking, torch.full((1, 7), 1.2)))
+        legs = learned_leg_target(
+            torch.ones(1, 12),
+            torch.zeros(12),
+            torch.tensor([False]),
+            control_split="split",
+            action_scale=0.5,
+            lower=torch.full((12,), -3.0),
+            upper=torch.full((12,), 3.0),
+        )
+        self.assertTrue(torch.equal(legs, torch.zeros(1, 12)))
 
     def test_click_map_round_trips_world_xy(self):
         for point in ((0.0, 0.0), (1.75, -0.2), (4.0, 0.4)):

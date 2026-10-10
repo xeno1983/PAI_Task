@@ -55,6 +55,7 @@ def parse_args():
     parser.add_argument("--seconds", type=float, default=20.0)
     parser.add_argument("--terrain-amplitude", type=float, default=None)
     parser.add_argument("--terrain-steps", action="store_true")
+    parser.add_argument("--arm", choices=("panda", "z1"), default="panda")
     parser.add_argument("--control-split", choices=("split", "walk", "both"), default="split")
     parser.add_argument("--wrist-camera", action="store_true")
     return parser.parse_args()
@@ -161,6 +162,8 @@ def main() -> None:
             f"{gx:.4f},{gy:.4f}",
             "--control-split",
             args.control_split,
+            "--arm",
+            args.arm,
         ]
         if args.terrain_steps:
             command.append("--terrain-steps")

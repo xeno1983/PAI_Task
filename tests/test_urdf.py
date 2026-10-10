@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from pick_and_carry.config import MOUNT_RPY, MOUNT_XYZ, PRIMITIVE_URDF
 from pick_and_carry.urdf_tools import UrdfError, merge_urdfs, validate_urdf
+from pick_and_carry.visual_urdf import styled_urdf_path
 
 GO2 = """<?xml version="1.0"?>
 <robot name="go2">
@@ -60,6 +62,19 @@ class PrimitiveUrdfTests(unittest.TestCase):
             self.assertAlmostEqual(got, expected, places=5)
         for got, expected in zip(report["mount_rpy"], MOUNT_RPY):
             self.assertAlmostEqual(got, expected, places=5)
+
+    def test_styled_visuals_keep_the_primitive_body(self):
+        path = styled_urdf_path()
+        self.assertIsNotNone(path)
+        robot = ET.parse(path).getroot()
+        base = next(link for link in robot.findall("link") if link.get("name") == "base")
+        mesh = base.find("visual/geometry/mesh")
+        self.assertIsNotNone(mesh)
+        self.assertTrue(str(mesh.get("filename")).endswith("base.dae"))
+        self.assertEqual(base.find("collision/geometry/box").get("size"), "0.376 0.12 0.114")
+        self.assertEqual(base.find("inertial/mass").get("value"), "6.921")
+        hand = next(link for link in robot.findall("link") if link.get("name") == "panda_hand")
+        self.assertTrue(str(hand.find("visual/geometry/mesh").get("filename")).endswith("hand.obj"))
 
 
 class MergeTests(unittest.TestCase):

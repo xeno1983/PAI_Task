@@ -33,6 +33,7 @@ def main() -> None:
     parser.add_argument("--record", type=str, default=None, help="Save an mp4 of the run to this path.")
     parser.add_argument("--seconds", type=float, default=None, help="How long to hold the standing pose.")
     parser.add_argument("--steps", type=int, default=None, help="Step count. Overrides --seconds.")
+    parser.add_argument("--arm", choices=("panda", "z1"), default="panda")
     args = parser.parse_args()
     if args.steps is not None:
         steps = args.steps
@@ -53,7 +54,7 @@ def main() -> None:
 
     started = time.perf_counter()
     env = PickAndCarryEnv(
-        cfg=EnvConfig(num_envs=1, backend="gpu", show_viewer=args.viewer, record_path=args.record, seed=0)
+        cfg=EnvConfig(num_envs=1, backend="gpu", show_viewer=args.viewer, record_path=args.record, seed=0, arm=args.arm)
     )
     print(f"scene ready in {time.perf_counter() - started:.1f}s", flush=True)
     print("urdf", env.urdf_path, flush=True)
