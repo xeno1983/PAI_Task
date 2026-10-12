@@ -194,6 +194,7 @@ class PickAndCarryEnv:
         self._tile_stride = 0
         self._tile_shifts = None
         self._terrain_rng = np.random.default_rng(self.cfg.seed)
+        self._terrain_mix = 1.0
         self._visual_map = None
         self.terrain = None
         self._yard_pickups = None
@@ -1299,7 +1300,7 @@ class PickAndCarryEnv:
         """Give each resetting env a new bump pattern. Other envs keep their ground."""
         for env_id in env_ids:
             tile, _, _ = make_course(
-                self.cfg.terrain_amplitude,
+                self.cfg.terrain_amplitude * self._terrain_mix,
                 self._terrain_scale,
                 self._terrain_rng,
                 steps=self.cfg.terrain_steps,
@@ -1337,6 +1338,19 @@ class PickAndCarryEnv:
         if int(np.count_nonzero(chosen >= 0)) < rows * cols // 2:
             return None
         return chosen
+
+    def set_catch_level(self, level: str) -> None:
+        """Next reset uses this ball. The scene stays the same."""
+        if level not in ("static", "slow", "random", "noisy"):
+            raise ValueError(f"catch_level must be static, slow, random, or noisy, got {level}.")
+        self.cfg.catch_level = level
+
+    def set_terrain_mix(self, mix: float) -> None:
+        """1 is the selected rough ground. 0 is flat. New bumps use the mix from the next reset."""
+        self._terrain_mix = min(1.0, max(0.0, float(mix)))
+        if self._terrain_grid is None:
+            return
+        self._retile(list(range(self.num_envs)))
 
     def _publish_terrain(self) -> None:
         height = np.ascontiguousarray(self._terrain_grid, dtype=np.float32)

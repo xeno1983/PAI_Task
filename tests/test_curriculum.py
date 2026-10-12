@@ -10,9 +10,11 @@ from pick_and_carry.config import layout_dim
 from pick_and_carry.curriculum import (
     decode_base_action,
     earlier_stages,
+    later_stages,
     locomotion_reward,
     manipulation_reward,
     pack_walk_observation,
+    retreat_choice,
     sample_ball,
     sample_command,
     stage_layouts,
@@ -135,6 +137,10 @@ class TransferTests(unittest.TestCase):
             earlier_stages("catch", "noisy"),
             [("catch", "random"), ("catch", "slow"), ("catch", "static"), ("haul", "static")],
         )
+        self.assertEqual(later_stages("walk"), [("rough", "static")])
+        self.assertEqual(later_stages("rough"), [])
+        self.assertEqual(later_stages("catch", "slow"), [("catch", "random"), ("catch", "noisy")])
+        self.assertEqual(later_stages("catch", "noisy"), [])
 
     def test_rough_starts_from_walk_until_it_has_its_own_weights(self):
         import tempfile
@@ -168,3 +174,31 @@ class TransferTests(unittest.TestCase):
             self.assertEqual(found, haul / "ppo_0001.pt")
             legs = find_locomotion_checkpoint(root)
             self.assertEqual(legs, rough / "ppo_0004.pt")
+            found = resolve_checkpoint(
+                walk, "latest", 41, 12, False, "panda", "walk", root=root, retreat=True
+            )
+            self.assertEqual(found, rough / "ppo_0004.pt")
+            found = resolve_checkpoint(walk, "latest", 41, 12, False, "panda", "walk", root=root)
+            self.assertEqual(found, walk / "ppo_0002.pt")
+
+
+class RetreatChoiceTests(unittest.TestCase):
+    def test_low_scores_step_down_and_stop_at_the_easiest(self):
+        current, poor, good = 2, 0, 0
+        for score in (0.1, 0.1):
+            current, poor, good = retreat_choice(
+                score, current=current, target=2, poor_streak=poor, good_streak=good, patience=2
+            )
+        self.assertEqual(current, 1)
+        current, poor, good = retreat_choice(0.1, current=0, target=2, poor_streak=1, good_streak=0, patience=2)
+        current, poor, good = retreat_choice(0.1, current=current, target=2, poor_streak=poor, good_streak=good, patience=2)
+        self.assertEqual(current, 0)
+
+    def test_high_scores_climb_back_only_to_the_selected_task(self):
+        current, poor, good = retreat_choice(0.9, current=0, target=2, poor_streak=0, good_streak=1, patience=2)
+        self.assertEqual(current, 1)
+        current, poor, good = retreat_choice(0.9, current=2, target=2, poor_streak=0, good_streak=5, patience=2)
+        self.assertEqual(current, 2)
+
+    def test_a_missing_score_does_not_move(self):
+        self.assertEqual(retreat_choice(None, current=2, target=2, poor_streak=3, good_streak=1), (2, 3, 1))

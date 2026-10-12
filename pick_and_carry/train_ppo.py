@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
 from pick_and_carry.config import EnvConfig, layout_dim
-from pick_and_carry.curriculum import earlier_stages, stage_layouts, stage_log_dir
+from pick_and_carry.curriculum import earlier_stages, later_stages, retreat_choice, stage_layouts, stage_log_dir
 from pick_and_carry.env import PickAndCarryEnv
 from pick_and_carry.ros_bridge import DEFAULT_HOST, DEFAULT_PORT, FileBridge, pack_rgb_image, ros_usage_error
 from pick_and_carry.tracking import append_metrics, write_run
@@ -86,6 +86,11 @@ def parse_args():
         choices=("static", "slow", "random", "noisy"),
         default="static",
         help="How the ball moves in the catch stage.",
+    )
+    parser.add_argument(
+        "--retreat",
+        action="store_true",
+        help="Practice this easier stage from a harder stage's weights.",
     )
     parser.add_argument("--log-dir", type=Path, default=Path("logs/ppo"))
     parser.add_argument("--save-interval", type=int, default=10)
@@ -190,18 +195,32 @@ def resolve_checkpoint(
     curriculum: str = "carry",
     catch_level: str = "static",
     root: Path | None = None,
+    retreat: bool = False,
 ) -> Path | None:
-    """Own folder first. If it is empty, the previous stage with the same network."""
+    """Own folder first. Empty folders use an easier stage. ``retreat`` prefers a harder stage."""
     if resume != "latest":
         path = Path(resume)
         if not path.is_file():
             raise SystemExit(f"Checkpoint not found: {path}")
         return path
+    # The walk network does not read the arm, so either arm can seed the other.
+    match_arm = curriculum not in ("walk", "rough")
+    if retreat:
+        for stage, level in later_stages(curriculum, catch_level):
+            found = latest_matching(
+                stage_log_dir(stage, level, arm, root=root),
+                obs_dim,
+                act_dim,
+                scripted_gait,
+                arm,
+                stage,
+                match_arm=match_arm,
+            )
+            if found is not None:
+                return found
     own = latest_matching(log_dir, obs_dim, act_dim, scripted_gait, arm, curriculum)
     if own is not None:
         return own
-    # The walk network does not read the arm, so either arm can seed rough.
-    match_arm = curriculum not in ("walk", "rough")
     for stage, level in earlier_stages(curriculum, catch_level):
         found = latest_matching(
             stage_log_dir(stage, level, arm, root=root),
@@ -309,6 +328,74 @@ def make_config(args) -> EnvConfig:
     return cfg
 
 
+def _level_from_path(path: Path) -> str:
+    name = path.parent.name
+    prefix = "ppo_curriculum_catch_"
+    if name.startswith(prefix) and name[len(prefix) :] in ("static", "slow", "random", "noisy"):
+        return name[len(prefix) :]
+    return "static"
+
+
+def _stage_rank(stage: str, catch_level: str) -> int:
+    """Higher means a harder task on the same ladder. Carry stays at zero."""
+    if stage == "walk":
+        return 1
+    if stage == "rough":
+        return 2
+    if stage == "haul":
+        return 3
+    if stage == "catch" and catch_level in ("static", "slow", "random", "noisy"):
+        return 4 + ("static", "slow", "random", "noisy").index(catch_level)
+    return 0
+
+
+class _Difficulty:
+    """Ease the live task when scores stay low, then climb back to the selected one."""
+
+    def __init__(self, curriculum: str, catch_level: str):
+        self.poor = 0
+        self.good = 0
+        self.kind = None
+        self.current = 0
+        self.target = 0
+        self.labels: tuple[str, ...] = ()
+        if curriculum == "rough":
+            self.kind = "terrain"
+            self.labels = ("平地", "半分の段差", "選んだ不整地")
+            self.target = 2
+            self.current = 2
+        elif curriculum == "catch":
+            self.kind = "catch"
+            self.labels = ("静止", "ゆっくり", "ばらす", "ノイズ")
+            self.target = ("static", "slow", "random", "noisy").index(catch_level)
+            self.current = self.target
+
+    def update(self, env, score: float | None) -> str:
+        if self.kind is None:
+            return ""
+        new, self.poor, self.good = retreat_choice(
+            score,
+            current=self.current,
+            target=self.target,
+            poor_streak=self.poor,
+            good_streak=self.good,
+        )
+        if new != self.current:
+            previous = self.current
+            self.current = new
+            if self.kind == "terrain":
+                env.set_terrain_mix((0.0, 0.5, 1.0)[new])
+            else:
+                env.set_catch_level(("static", "slow", "random", "noisy")[new])
+            if new < previous:
+                print(f"成績が低いので、{self.labels[new]} に戻しました。回復したら上げます。", flush=True)
+            else:
+                print(f"成績が戻ったので、{self.labels[new]} に上げました。", flush=True)
+        if self.current == self.target:
+            return ""
+        return self.labels[self.current]
+
+
 def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     """Load a checkpoint when --resume is set. Returns the saved iteration and path."""
     if not args.resume:
@@ -322,6 +409,7 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
         cfg.arm,
         cfg.curriculum,
         cfg.catch_level,
+        retreat=getattr(args, "retreat", False),
     )
     if ckpt_path is None:
         if args.play:
@@ -350,8 +438,13 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
         )
         return 0, None
     agent.load_state_dict(blob["model"])
-    if saved_stage != cfg.curriculum:
-        print(f"前の段階 {saved_stage} の重みから始めます: {ckpt_path}", flush=True)
+    same_folder = ckpt_path.parent.resolve() == Path(args.log_dir).resolve()
+    if not same_folder:
+        harder = _stage_rank(saved_stage, _level_from_path(ckpt_path)) > _stage_rank(cfg.curriculum, cfg.catch_level)
+        if harder:
+            print(f"上の段階の重みで、易しい課題に戻って学びます: {ckpt_path}", flush=True)
+        else:
+            print(f"前の段階 {saved_stage} の重みから始めます: {ckpt_path}", flush=True)
         return 0, str(ckpt_path)
     if "optimizer" in blob:
         optimizer.load_state_dict(blob["optimizer"])
@@ -472,12 +565,15 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         flush=True,
     )
     step_times: list[float] = []
+    difficulty = _Difficulty(cfg.curriculum, cfg.catch_level)
     for iteration in range(start_iteration + 1, last_iteration + 1):
         started = time.perf_counter()
         obs_buf, act_buf, logp_buf, val_buf, rew_buf, boot_buf, done_buf = [], [], [], [], [], [], []
         grasp_sum = 0.0
         dist_sum = 0.0
         grip_sum = 0.0
+        success_sum = 0.0
+        success_count = 0
         if cfg.curriculum in ("walk", "rough", "haul"):
             progress_key = "tracking"
         elif cfg.curriculum == "catch":
@@ -501,6 +597,9 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             done_buf.append(done.to(dtype=reward.dtype))
             obs = next_obs
             grasp_sum += float(env.grasped.float().mean())
+            if "success_rate" in info:
+                success_sum += float(info["success_rate"])
+                success_count += 1
             progress = env.reward_terms.get(progress_key)
             if progress is not None:
                 dist_sum += float(progress.mean())
@@ -571,6 +670,15 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             detail = f"approach {mean_dist:.3f} grasp {grasp_rate:.2f}"
         else:
             detail = f"tracking {mean_dist:.3f}"
+        if cfg.curriculum == "rough":
+            live_score = mean_dist
+        elif cfg.curriculum == "catch" and success_count:
+            live_score = success_sum / success_count
+        else:
+            live_score = None
+        active = difficulty.update(env, live_score)
+        if active:
+            detail = f"{detail}  設定 {active}"
         print(
             f"iter {iteration}/{last_iteration}  残り {format_remaining(remaining)}  "
             f"reward {mean_reward:.3f} {detail} "

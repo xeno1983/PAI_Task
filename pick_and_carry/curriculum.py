@@ -23,7 +23,7 @@ PROGRESS_CAP = 0.05
 
 
 def earlier_stages(stage: str, catch_level: str = "static") -> list[tuple[str, str]]:
-    """Same-sized policies that can initialize this stage, nearest first."""
+    """Same-sized policies that can initialize this stage, nearest easier first."""
     if stage == "rough":
         return [("walk", "static")]
     if stage != "catch":
@@ -34,6 +34,54 @@ def earlier_stages(stage: str, catch_level: str = "static") -> list[tuple[str, s
     priors = [("catch", level) for level in reversed(CATCH_LEVELS[:index])]
     priors.append(("haul", "static"))
     return priors
+
+
+def later_stages(stage: str, catch_level: str = "static") -> list[tuple[str, str]]:
+    """Same-sized policies one step harder, nearest first. Used to practice an easier task again."""
+    if stage == "walk":
+        return [("rough", "static")]
+    if stage == "haul":
+        return [("catch", level) for level in CATCH_LEVELS]
+    if stage != "catch":
+        return []
+    if catch_level not in CATCH_LEVELS:
+        raise ValueError(f"unknown catch level {catch_level}")
+    index = CATCH_LEVELS.index(catch_level)
+    return [("catch", level) for level in CATCH_LEVELS[index + 1 :]]
+
+
+def retreat_choice(
+    score: float | None,
+    *,
+    current: int,
+    target: int,
+    poor_streak: int,
+    good_streak: int,
+    patience: int = 8,
+    poor: float = 0.30,
+    good: float = 0.60,
+) -> tuple[int, int, int]:
+    """Move one step easier after repeated low scores, and back toward ``target`` after repeated high ones.
+
+    Index 0 is the easiest setting. ``target`` is the hardest index this run is allowed to reach.
+    A missing score leaves the streaks unchanged.
+    """
+    if score is None or target < 0:
+        return current, poor_streak, good_streak
+    current = min(max(current, 0), target)
+    if score < poor:
+        poor_streak += 1
+        good_streak = 0
+        if poor_streak >= patience and current > 0:
+            return current - 1, 0, 0
+        return current, poor_streak, good_streak
+    if score > good:
+        good_streak += 1
+        poor_streak = 0
+        if good_streak >= patience and current < target:
+            return current + 1, 0, 0
+        return current, poor_streak, good_streak
+    return current, 0, 0
 
 
 def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "panda", root: Path | None = None) -> Path:

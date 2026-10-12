@@ -340,6 +340,72 @@ def add_curriculum_slide(prs) -> None:
     )
 
 
+def add_technique_slide(prs) -> None:
+    """How training is staged, rewarded, and allowed to step back."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(12.0), Inches(0.38))
+    write(title, ["学習の工夫"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.48), Inches(12.4), Inches(0.30))
+    write(
+        subtitle,
+        ["一度に全部を覚えさせない。できた能力は次へ渡し、成績が落ちたら易しい課題へ戻してから上げる。"],
+        size=14,
+        color=MUTED,
+        spacing=0,
+    )
+    y = Inches(0.95)
+    h = Inches(6.2)
+    card(
+        slide,
+        Inches(0.28),
+        y,
+        Inches(6.35),
+        h,
+        "覚え方",
+        [
+            "歩行と把持を同時にゼロから学ばせない",
+            "段階は、歩行 → 不整地 → 箱運び",
+            "　　→ 歩きながら持つ → キャッチ",
+            "形が同じときだけ、重みをそのまま渡す",
+            "　　歩行 → 不整地",
+            "　　歩きながら持つ → キャッチの各レベル",
+            "形が違うときは、脚だけを固定して使う",
+            "　　不整地、無ければ平地の歩行方策",
+            "　　新しく学ぶのは腕と進む速さ",
+            "箱運びの 68 次元は別保存のまま残す",
+            "　　Panda と Z1 の重みも混ぜない",
+        ],
+        TEAL,
+    )
+    card(
+        slide,
+        Inches(6.78),
+        y,
+        Inches(6.25),
+        h,
+        "報酬と、難しさの戻し方",
+        [
+            "成功の瞬間だけでは学ばない",
+            "毎ステップ、接近・速度の一致・生存で点を出す",
+            "箱運びは段階で出す点を変える",
+            "　　歩くときは前進、拾うときは把持、置くときは設置",
+            "歩行の記録は tracking。1 が指令どおり",
+            "",
+            "8 回続けて成績が低いと、一段易しくする",
+            "　　不整地 → 半分の段差 → 平地",
+            "　　ノイズ → ばらす → ゆっくり → 静止",
+            "8 回続けて回復すると、選んだ課題まで上げる",
+            "メニューでは、上の段階の重みで",
+            "　　易しい課題を学び直せる",
+        ],
+        GREEN,
+    )
+
+
 def add_reward_slide(prs) -> None:
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
@@ -553,6 +619,7 @@ def main() -> None:
     )
     add_problem_slide(prs)
     add_curriculum_slide(prs)
+    add_technique_slide(prs)
     add_reward_slide(prs)
     curve_png = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry_curves.png"
     rows = _load_metrics()

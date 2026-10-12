@@ -69,6 +69,11 @@ SLIDE_NARRATION = (
     "歩きながら持つ段階では、覚えた脚を固定し、腕と進む速さを学びます。箱は手に固定しています。"
     "最後は転がるボールです。静止、ゆっくり、ばらす、ノイズ、の順で、近いレベルの重みから続けます。"
     "1秒保持すると成功です。次の段階へ進むかは、録画を見て決めます。人の点数で報酬は置き換えていません。",
+    "学習の工夫です。歩行と把持を一度に覚えさせず、段階に分けています。"
+    "形が同じ段階だけ、前の重みを引き継ぎます。形が違うときは、覚えた歩行を脚として固定し、腕と進む速さだけを新しく学びます。"
+    "報酬は、成功した瞬間だけではなく、毎ステップの接近と、速度の一致でも点を出します。"
+    "不整地で成績が低いあいだは平地に戻し、キャッチで成功が少ないあいだは易しいボールに戻します。"
+    "8回続いて回復したら、選んだ課題まで上げます。メニューからは、上の段階の重みで易しい課題を学び直すこともできます。",
     "報酬の説明です。箱運びでは、秒速0.4メートルで前に進むと点が増えます。"
     "箱に手を近づける、つかむ、運ぶ、目標に置く、でも点が増えます。"
     "置けた瞬間は10点、転ぶと5点の減点です。横滑りと、大きすぎる操作も減点です。"
@@ -80,8 +85,8 @@ SLIDE_NARRATION = (
     "箱運びの曲線では、報酬と把持率は上がるほど良く、手先と箱の距離は下がるほど良いです。"
     "歩行の記録はトラッキングで、1に近いほど指令どおりです。方策のロスは、ゼロの近くに落ち着きます。",
 )
-# Conditions, the course, and the curriculum play first. Reward and curves follow the recordings.
-OPENING_SLIDES = 3
+# Conditions, the course, the curriculum, and the training techniques play first.
+OPENING_SLIDES = 4
 VIDEO_NARRATION = {
     "PickAndCarry_smoke.mp4": "起動確認です。ロボットが足場に立つかを見ます。",
     "PickAndCarry_z1_smoke.mp4": "ゼットワンでの起動確認です。軽い腕でも足場に立つかを見ます。",
@@ -332,6 +337,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="pac_pres_") as tmp:
         work = Path(tmp)
         slides = export_slides(args.pptx, work / "slides")
+        if len(slides) != len(SLIDE_NARRATION):
+            print(
+                f"スライドは {len(slides)} 枚、説明は {len(SLIDE_NARRATION)} 件です。",
+                flush=True,
+            )
         clips: list[Path] = []
 
         def append_slide(index: int, slide: Path) -> None:
