@@ -25,21 +25,21 @@ Write-Host "   1  ロボットを 8 秒間立たせて録画"
 Write-Host "      正解: 犬が平らな足場に立ち、前方に段差、その先にオレンジの立方体。"
 Write-Host "            最後に smoke ok と exit code: 0"
 Write-Host "            動画: 起動スクリプトフォルダの PickAndCarry_smoke.mp4"
-Write-Host "   2  歩行から学習する。不整地→拾う→不整地→置く。回数はあとで入力"
-Write-Host "      歩き方は方策が学ぶ。拾うときと置くときは脚を立ち姿勢に固定する。"
-Write-Host "      始める前に、腕、走行環境、学習の分け方、手先カメラを選ぶ。"
-Write-Host "      Panda の続きは logs\ppo_walk、Z1 の続きは logs\ppo_z1 から読む。"
-Write-Host "      動画: 起動スクリプトフォルダの PickAndCarry_ppo.mp4"
-Write-Host "      Enter だけなら 1000 回、並列 16 体。もう一度選ぶと続きから学習する。"
-Write-Host "   3  短い SAC（8 環境、500 ステップ、録画あり、Panda のみ）"
+Write-Host "   2  学習。段階を選んでから回数を入れる"
+Write-Host "      ピック＆プレースだけ、走行環境・学習の分け方・手先カメラを選ぶ。"
+Write-Host "      不整地の歩行は段差の高さだけ。歩行・持ち歩き・キャッチは追加の選択なし。"
+Write-Host "      ROS 2 は学習では使わない。"
+Write-Host "      Enter だけなら 1000 回、並列 16 体。同じ段階をもう一度選ぶと続きから学習する。"
+Write-Host "   3  短い SAC（8 環境、500 ステップ、録画あり、Panda のピック＆プレースのみ）"
 Write-Host "   4  Colab 用 zip を起動スクリプトフォルダに作る"
-Write-Host "   5  推論。タスクを選んで、その保存した重みを再生する"
-Write-Host "      箱運びはクリックで物資と運び先を決める。ROS 2 を選ぶと実行中に rviz2 で運び先を変えられる"
-Write-Host "   6  学習の途中経過を並べた比較動画を作る（追加学習なし）。走行環境を選ぶ"
-Write-Host "      同じ初期配置で、早い時点と遅い時点を同時に再生する。"
+Write-Host "   5  推論。段階を選んで、その保存した重みを再生する"
+Write-Host "      ピック＆プレースだけ、クリックで物資と運び先を決める。ROS 2 を選ぶと rviz2 で運び先を変えられる。"
+Write-Host "      歩行・不整地・持ち歩き・キャッチは録画だけ。ROS 2 は使わない。"
+Write-Host "   6  ピック＆プレースの途中経過を並べた比較動画（追加学習なし）"
+Write-Host "      走行環境、学習の分け方、手先カメラを選ぶ。歩行やキャッチの比較はここでは作れない。"
 Write-Host "      動画: 起動スクリプトフォルダの PickAndCarry_compare.mp4"
-Write-Host "   7  学習曲線を開く（追加学習なし）"
-Write-Host "      報酬、把持率、手先の距離、設置率。"
+Write-Host "   7  学習曲線を開く（追加学習なし）。腕と段階を選ぶと、その保存先を開く"
+Write-Host "      ピック＆プレースは報酬、把持率、手先の距離、設置率。"
 Write-Host "      ブラウザ: 起動スクリプトフォルダの PickAndCarry_curves.html"
 Write-Host "   8  プレゼン用の動画を作る（追加学習なし）"
 Write-Host "      学習条件のスライドを作り直し、フォルダ内の録画を1本につなぐ。説明の音声も入る。"
@@ -73,8 +73,8 @@ if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
 function Select-Arm {
     Write-Host ""
     Write-Host " マニピュレータ"
-    Write-Host "   1  Franka Panda（約 18 kg の実機。学習上の質量は約 3.4 kg）。今の重みから続く"
-    Write-Host "   2  Unitree Z1（約 5.2 kg、6 軸）。最初から学習し、logs\ppo_z1 に保存する"
+    Write-Host "   1  Franka Panda（実機約 18 kg。学習上の質量は約 3.4 kg）"
+    Write-Host "   2  Unitree Z1（約 5.2 kg、関節 6）。Panda の重みは使いません"
     $picked = Read-Host "腕 [1]"
     if ([string]::IsNullOrWhiteSpace($picked)) { $picked = "1" }
     if ($picked -eq "2") {
@@ -99,7 +99,7 @@ function Select-Curriculum {
     Write-Host "   1  いまのピック＆プレース。置いてある箱を掴んで運ぶ"
     Write-Host "   2  歩行。平地で前後進と旋回"
     Write-Host "   3  不整地の歩行。2 の続きとして同じ観測"
-    Write-Host "   4  歩きながら持つ。脚は決まった歩き、腕と進む速さを学ぶ"
+    Write-Host "   4  歩きながら持つ。脚は歩行で覚えた動き。腕と進む速さを学ぶ"
     Write-Host "   5  転がるボールを掴む"
     $picked = Read-Host "段階 [1]"
     if ([string]::IsNullOrWhiteSpace($picked)) { $picked = "1" }
@@ -110,19 +110,22 @@ function Select-Curriculum {
         $script:curriculumArgs = @("--curriculum", "walk")
         $script:logDir = "logs/ppo_curriculum_walk"
         $script:videoName = "PickAndCarry_walk.mp4"
-        Write-Host "平地の歩行です。保存先は logs\ppo_curriculum_walk です。"
+        Write-Host "平地の歩行です。脚の歩き方を学習します。保存先は logs\ppo_curriculum_walk です。"
+        Write-Host "歩行の重みは腕が違っても続きます。見た目の腕だけ変わります。追加で選ぶ項目はありません。"
     } elseif ($picked -eq "3") {
         $script:stage = "rough"
         $script:curriculumArgs = @("--curriculum", "rough")
         $script:logDir = "logs/ppo_curriculum_rough"
         $script:videoName = "PickAndCarry_rough.mp4"
-        Write-Host "不整地の歩行です。平地の重みがあればそこから続けます。成績が低いあいだは平地に戻し、回復したら段差を上げます。保存先は logs\ppo_curriculum_rough です。"
+        Write-Host "不整地の歩行です。平地の重みがあればそこから続けます。保存先は logs\ppo_curriculum_rough です。"
+        Write-Host "このあと選ぶのは段差の高さだけです。成績が低いあいだは平地に戻し、回復したら段差を上げます。"
     } elseif ($picked -eq "4") {
         $script:stage = "haul"
         $script:curriculumArgs = @("--curriculum", "haul")
         $script:logDir = "logs/ppo_curriculum_haul"
         $script:videoName = "PickAndCarry_haul.mp4"
-        Write-Host "掴んだまま歩く段階です。脚は歩行の重みを使い、腕と進む速さを学習します。保存先は logs\ppo_curriculum_haul です。"
+        Write-Host "掴んだまま歩く段階です。平地で、脚は歩行の重み、腕と進む速さを学習します。保存先は logs\ppo_curriculum_haul です。"
+        Write-Host "追加で選ぶ項目はありません。"
     } elseif ($picked -eq "5") {
         $script:stage = "catch"
         Write-Host "   1  手の前で静止"
@@ -135,12 +138,16 @@ function Select-Curriculum {
         $script:curriculumArgs = @("--curriculum", "catch", "--catch-level", $level)
         $script:logDir = "logs/ppo_curriculum_catch_$level"
         $script:videoName = "PickAndCarry_catch.mp4"
-        Write-Host "キャッチ（$level）です。この段階の重みがなければ、一つ前から続けます。保存先は $script:logDir です。"
+        Write-Host "キャッチ（$level）です。平地で、脚は歩行の重み、腕と進む速さを学習します。保存先は $script:logDir です。"
+        Write-Host "この段階の重みがなければ、一つ前から続けます。追加で選ぶ項目はありません。"
         if ($level -ne "static") {
             Write-Host "成績が低いあいだは易しいボールに戻し、回復したら上げます。"
         }
     } else {
-        Write-Host "ピック＆プレースのまま進めます。"
+        Write-Host "ピック＆プレースです。このあと、走行環境・学習の分け方・手先カメラを選びます。"
+        if ($ForPlay) {
+            Write-Host "推論では、クリックで物資と運び先を決められます。ROS 2 を選ぶと rviz2 で運び先を変えられます。"
+        }
     }
     $script:activeIter = Get-LatestIteration ($script:logDir -replace "/", "\")
     if (-not $ForPlay -and ($script:stage -in @("walk", "haul", "catch"))) {
@@ -159,10 +166,15 @@ function Ask-Retreat {
 }
 
 function Select-Terrain {
+    param([switch]$Walking)
     Write-Host ""
     Write-Host " 走行環境"
     Write-Host "   1  低い波（高さ 3.5cm）"
-    Write-Host "   2  段差を足す（高さ 4.5cm）。箱の前に1段、置くまでにもう2段"
+    if ($Walking) {
+        Write-Host "   2  段差を足す（高さ 4.5cm）"
+    } else {
+        Write-Host "   2  段差を足す（高さ 4.5cm）。箱の前に1段、置くまでにもう2段"
+    }
     Write-Host "   3  段差を高くする（高さ 6cm）"
     $picked = Read-Host "走行環境 [2]"
     if ([string]::IsNullOrWhiteSpace($picked)) { $picked = "2" }
@@ -237,6 +249,23 @@ function Select-Ros {
     }
 }
 
+function Select-StageOptions {
+    param([switch]$ForPlay)
+    $script:terrainArgs = @()
+    $script:controlArgs = @()
+    $script:visionArgs = @()
+    $script:rosArgs = @()
+    $script:inferSeconds = 20
+    if ($script:stage -eq "carry") {
+        Select-Terrain
+        Select-Control
+        Select-Vision
+        if ($ForPlay) { Select-Ros }
+    } elseif ($script:stage -eq "rough") {
+        Select-Terrain -Walking
+    }
+}
+
 function Start-Rviz {
     $armName = "panda"
     if ($script:logDir -eq "logs/ppo_z1") { $armName = "z1" }
@@ -264,7 +293,7 @@ switch ($choice) {
     }
     "2" {
         Write-Host ""
-        Write-Host "不整地を渡って拾い、もう一度不整地を渡って置く学習を進めます。終わると学習曲線と動画を開きます。"
+        Write-Host "段階を選んで学習します。終わると、その保存先の学習曲線と動画を開きます。"
         Select-Arm
         Select-Curriculum
         $trainIters = 0
@@ -293,19 +322,7 @@ switch ($choice) {
         if ($numEnvs -gt 32) {
             Write-Host "この GPU は 8GB です。32 を超えるとメモリ不足で止まることがあります。"
         }
-        if ($script:stage -eq "carry") {
-            Select-Terrain
-            Select-Control
-            Select-Vision
-        } elseif ($script:stage -eq "rough") {
-            Select-Terrain
-            $script:controlArgs = @()
-            $script:visionArgs = @()
-        } else {
-            $script:terrainArgs = @()
-            $script:controlArgs = @()
-            $script:visionArgs = @()
-        }
+        Select-StageOptions
         & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
         $code = $LASTEXITCODE
         if ($code -eq 0) {
@@ -339,24 +356,19 @@ switch ($choice) {
         Select-Curriculum -ForPlay
         Write-Host "推論します。使う重み: iteration $script:activeIter （$logDir）"
         $video = Join-Path $out $videoName
+        Select-StageOptions -ForPlay
         if ($script:stage -eq "carry") {
             Write-Host "1回目のクリックが物資、2回目が運び先です。"
-            Select-Terrain
-            Select-Control
-            Select-Vision
-            Select-Ros
             & $python -u scripts\infer_gui.py --log-dir $logDir --record $video --seconds $script:inferSeconds @armArgs @terrainArgs @controlArgs @visionArgs @rosArgs
-        } elseif ($script:stage -eq "rough") {
-            Select-Terrain
-            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @armArgs @terrainArgs @curriculumArgs
         } else {
-            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @armArgs @curriculumArgs
+            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @armArgs @terrainArgs @curriculumArgs
         }
         $code = $LASTEXITCODE
         if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
     }
     "6" {
         Write-Host ""
+        Write-Host "比較動画はピック＆プレースだけです。歩行やキャッチの重みは使いません。"
         Select-Arm
         Write-Host "保存済みの時点を同じ配置で再生し、並べた動画を作ります。最新は iteration $script:activeIter です。"
         Select-Terrain
@@ -370,7 +382,8 @@ switch ($choice) {
     "7" {
         Write-Host ""
         Select-Arm
-        Write-Host "保存済みの学習記録から曲線を作り、ブラウザで開きます。"
+        Select-Curriculum -ForPlay
+        Write-Host "保存済みの学習記録から曲線を作り、ブラウザで開きます。保存先: $logDir"
         $curves = Join-Path $out "PickAndCarry_curves.html"
         & $python -u scripts\plot_curves.py --log-dir $logDir --output $curves
         $code = $LASTEXITCODE

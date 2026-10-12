@@ -256,6 +256,42 @@ def find_locomotion_checkpoint(root: Path | None = None) -> Path | None:
     return None
 
 
+def missing_play_checkpoint(args, cfg, root: Path | None = None) -> str | None:
+    """Japanese reason to stop before building a scene, when playback has no weights."""
+    if not getattr(args, "play", False) or not getattr(args, "resume", None):
+        return None
+    from pick_and_carry.arms import get_arm, layouts
+
+    arm = get_arm(cfg.arm)
+    staged = stage_layouts(cfg.curriculum, arm.dof)
+    observation, action = layouts(arm.dof) if staged is None else staged
+    found = resolve_checkpoint(
+        args.log_dir,
+        args.resume,
+        layout_dim(observation),
+        layout_dim(action),
+        cfg.scripted_gait,
+        cfg.arm,
+        cfg.curriculum,
+        cfg.catch_level,
+        root=root,
+        retreat=getattr(args, "retreat", False),
+    )
+    if found is not None:
+        return None
+    looked = [str(Path(args.log_dir))]
+    for stage, level in earlier_stages(cfg.curriculum, cfg.catch_level):
+        looked.append(str(stage_log_dir(stage, level, cfg.arm, root=root)))
+    lines = [
+        "再生できる重みがありません。",
+        "探した場所: " + "、".join(looked),
+        "先にメニューの 2 で、この段階を学習してください。",
+    ]
+    if cfg.curriculum in ("haul", "catch"):
+        lines.append("歩行の脚は別の方策なので、腕と進む速さの代わりにはなりません。")
+    return "\n".join(lines)
+
+
 def save_checkpoint(
     path: Path,
     agent,
@@ -413,7 +449,9 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     )
     if ckpt_path is None:
         if args.play:
-            raise SystemExit(f"No checkpoint in {args.log_dir.resolve()} or an earlier stage. Train once before playing.")
+            raise SystemExit(
+                "再生できる重みがありません。先にメニューの 2 で、この段階を学習してください。"
+            )
         print(f"{args.log_dir.resolve()} にも前の段階にも重みがありません。最初から学習します。", flush=True)
         return 0, None
     blob = _torch_load(ckpt_path, env.device)
@@ -705,6 +743,9 @@ def main() -> None:
     if error:
         raise SystemExit(error)
     cfg = make_config(args)
+    missing = missing_play_checkpoint(args, cfg)
+    if missing:
+        raise SystemExit(missing)
     if args.viewer:
         print("Opening the 3D window. The first launch can take one to three minutes.", flush=True)
     env = PickAndCarryEnv(cfg=cfg)

@@ -202,3 +202,29 @@ class RetreatChoiceTests(unittest.TestCase):
 
     def test_a_missing_score_does_not_move(self):
         self.assertEqual(retreat_choice(None, current=2, target=2, poor_streak=3, good_streak=1), (2, 3, 1))
+
+
+class MissingPlaybackTests(unittest.TestCase):
+    def test_catch_without_weights_names_the_haul_folder(self):
+        import tempfile
+        from argparse import Namespace
+        from pathlib import Path
+
+        from pick_and_carry.config import EnvConfig
+        from pick_and_carry.curriculum import stage_log_dir
+        from pick_and_carry.train_ppo import missing_play_checkpoint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = EnvConfig(curriculum="catch", catch_level="static", arm="z1", scripted_gait=True)
+            args = Namespace(
+                play=True,
+                resume="latest",
+                retreat=False,
+                log_dir=stage_log_dir("catch", "static", "z1", root=root),
+            )
+            message = missing_play_checkpoint(args, cfg, root=root)
+        self.assertIsNotNone(message)
+        self.assertIn("再生できる重みがありません", message)
+        self.assertIn("ppo_curriculum_haul", message)
+        self.assertIn("歩行の脚は別の方策", message)
