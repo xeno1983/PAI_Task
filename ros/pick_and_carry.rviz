@@ -28,7 +28,10 @@ Visualization Manager:
       Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
-    - Class: rviz_default_plugins/RobotModel
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
       Description Source: Topic
       Description Topic:
         Depth: 5
@@ -38,7 +41,10 @@ Visualization Manager:
         Value: /robot_description
       Enabled: true
       Name: RobotModel
+      TF Prefix: ""
+      Update Interval: 0
       Value: true
+      Visual Enabled: true
     - Class: rviz_default_plugins/TF
       Enabled: true
       Frame Timeout: 15
@@ -61,16 +67,29 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /markers
       Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Overview
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /overview/image
+      Transport Hint: raw
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: world
     Frame Rate: 30
   Name: root
+  Current Tool: rviz_default_plugins/PublishPoint
   Tools:
-    - Class: rviz_default_plugins/MoveCamera
-    - Class: rviz_default_plugins/Interact
-      Hide Inactive Objects: true
     - Class: rviz_default_plugins/PublishPoint
       Single click: true
       Topic:
@@ -79,6 +98,9 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /clicked_point
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
   Transformation:
     Current:
       Class: rviz_default_plugins/TF

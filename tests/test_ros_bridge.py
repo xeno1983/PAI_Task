@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
 import time
 import unittest
+
+import numpy as np
 
 from pick_and_carry.ros_bridge import (
     InferenceBridge,
     clamp_goal_xy,
     encode_message,
     goal_from_message,
+    pack_rgb_image,
     quat_wxyz_to_xyzw,
     ros_usage_error,
     split_messages,
@@ -40,6 +44,15 @@ class ProtocolTests(unittest.TestCase):
         messages, rest = split_messages(b"not-json\n" + encode_message({"type": "goal", "x": 1.0, "y": 0.0}))
         self.assertEqual(goal_from_message(messages[0]), (1.0, 0.0))
         self.assertEqual(rest, b"")
+
+    def test_overview_image_is_downsampled_rgb(self):
+        frame = np.zeros((4, 6, 3), dtype=np.uint8)
+        frame[0, 0] = (1, 2, 3)
+        packed = pack_rgb_image(frame, stride=2)
+        raw = base64.b64decode(packed["data"])
+        self.assertEqual((packed["w"], packed["h"]), (3, 2))
+        self.assertEqual(len(raw), 3 * 2 * 3)
+        self.assertEqual(raw[:3], bytes((1, 2, 3)))
 
     def test_ros_is_play_only(self):
         self.assertIsNone(ros_usage_error(enabled=False, play=False, num_envs=16))
@@ -113,3 +126,34 @@ class BridgeTests(unittest.TestCase):
                 client.close()
             server.close()
             bridge.close()
+
+
+class FileBridgeTests(unittest.TestCase):
+    def test_goal_sequence_and_state_without_image(self):
+        import tempfile
+        from pathlib import Path
+
+        from pick_and_carry.ros_bridge import FileBridge
+
+        with tempfile.TemporaryDirectory() as folder:
+            bridge = FileBridge(folder)
+            (Path(folder) / "goal-1.json").write_text(
+                json.dumps({"type": "goal", "x": 100.0, "y": 0.2, "seq": 1}), encoding="utf-8"
+            )
+            self.assertEqual(bridge.poll_goal(), (COURSE_X[1], 0.2))
+            self.assertIsNone(bridge.poll_goal())
+            (Path(folder) / "goal-2.json").write_text(
+                json.dumps({"type": "goal", "x": 1.5, "y": -0.2, "seq": 2}), encoding="utf-8"
+            )
+            self.assertEqual(bridge.poll_goal(), (1.5, -0.2))
+            bridge.publish({"type": "state", "phase": 1, "image": {"data": "skip"}})
+            state = json.loads((Path(folder) / "state-1.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["phase"], 1)
+            self.assertEqual(state["seq"], 1)
+            self.assertNotIn("image", state)
+            held = (Path(folder) / "state-1.json").open("rb")
+            try:
+                bridge.publish({"type": "state", "phase": 2})
+            finally:
+                held.close()
+            self.assertTrue((Path(folder) / "state-2.json").is_file())

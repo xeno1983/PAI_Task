@@ -11,13 +11,14 @@ import argparse
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
 from pick_and_carry.config import EnvConfig
 from pick_and_carry.env import PickAndCarryEnv
-from pick_and_carry.ros_bridge import DEFAULT_HOST, DEFAULT_PORT, InferenceBridge, ros_usage_error
+from pick_and_carry.ros_bridge import DEFAULT_HOST, DEFAULT_PORT, FileBridge, pack_rgb_image, ros_usage_error
 from pick_and_carry.tracking import append_metrics, write_run
 
 
@@ -91,8 +92,14 @@ def parse_args():
         action="store_true",
         help="Inference only. Publish robot state and accept a new drop point while playing.",
     )
-    parser.add_argument("--ros-host", default=DEFAULT_HOST, help="Address the inference bridge listens on.")
-    parser.add_argument("--ros-port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--ros-host", default=DEFAULT_HOST, help="Unused. Kept so older commands still start.")
+    parser.add_argument("--ros-port", type=int, default=DEFAULT_PORT, help="Unused. Kept so older commands still start.")
+    parser.add_argument(
+        "--ros-dir",
+        type=Path,
+        default=Path("logs/ros_ipc"),
+        help="Folder shared with rviz2. Poses and goal clicks are files in here.",
+    )
     return parser.parse_args()
 
 
@@ -194,6 +201,7 @@ def make_config(args) -> EnvConfig:
     if args.play and args.ros:
         # One click session should not snap the robot home on the 20 s training timeout.
         cfg.episode_length_s = max(cfg.episode_length_s, float(args.seconds))
+        cfg.enable_camera = True
     return cfg
 
 
@@ -228,14 +236,67 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     return start_iteration, str(ckpt_path)
 
 
-def _accept_goal(env, obs, bridge: InferenceBridge):
+_live_window_ready = False
+
+
+def _show_live(frame, goal_xy: tuple[float, float]) -> None:
+    """Open a normal window with the overview. The Genesis viewer stays closed."""
+    global _live_window_ready
+    try:
+        import cv2
+
+        image = np.ascontiguousarray(frame[..., ::-1])
+        cv2.putText(
+            image,
+            f"goal {goal_xy[0]:.2f}, {goal_xy[1]:.2f}",
+            (16, 36),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (40, 220, 80),
+            2,
+            cv2.LINE_AA,
+        )
+        if not _live_window_ready:
+            cv2.namedWindow("Pick-and-Carry", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("Pick-and-Carry", 960, 540)
+            _live_window_ready = True
+            print("シミュレーション画面を開きました。", flush=True)
+        cv2.imshow("Pick-and-Carry", image)
+        cv2.waitKey(1)
+    except Exception as exc:
+        if not _live_window_ready:
+            print(f"シミュレーション画面を開けません。{exc}", flush=True)
+            _live_window_ready = True
+
+
+def _close_live() -> None:
+    if not _live_window_ready:
+        return
+    try:
+        import cv2
+
+        cv2.destroyWindow("Pick-and-Carry")
+    except Exception:
+        pass
+
+
+def _accept_goal(env, obs, bridge: FileBridge, step_index: int):
     """Apply a clicked drop point before the policy acts, then queue the current pose."""
     goal = bridge.poll_goal()
     if goal is not None:
-        applied = env.set_goal_xy(*goal)
-        obs = env.obs_buf
-        print(f"運び先を ({applied[0]:.2f}, {applied[1]:.2f}) に更新しました。", flush=True)
-    bridge.publish(env.inference_state())
+        current_x = float(env.goal_pos[0, 0])
+        current_y = float(env.goal_pos[0, 1])
+        if abs(current_x - goal[0]) > 0.02 or abs(current_y - goal[1]) > 0.02:
+            applied = env.set_goal_xy(*goal)
+            obs = env.obs_buf
+            print(f"運び先を ({applied[0]:.2f}, {applied[1]:.2f}) に更新しました。", flush=True)
+    state = env.inference_state()
+    if step_index % 2 == 0:
+        frame = env.overview_rgb()
+        if frame is not None:
+            state["image"] = pack_rgb_image(frame, stride=1)
+            _show_live(frame, (float(env.goal_pos[0, 0]), float(env.goal_pos[0, 1])))
+    bridge.publish(state)
     return obs
 
 
@@ -247,24 +308,23 @@ def play_policy(args, cfg, env, agent, obs) -> None:
     print(f"playing {steps} steps ({args.seconds:.0f}s)", flush=True)
     try:
         if args.ros:
-            bridge = InferenceBridge(args.ros_host, args.ros_port)
-            try:
-                bridge.start()
-            except OSError as exc:
-                raise SystemExit(f"ROS の待ち受けに失敗しました ({args.ros_host}:{args.ros_port}): {exc}") from exc
+            bridge = FileBridge(args.ros_dir)
+            bridge.start()
             print(
-                f"ROS へ接続します {args.ros_host}:{args.ros_port} 。rviz2 の Publish Point で運び先を更新します。",
+                f"rviz2 と {bridge.directory.resolve()} で姿勢と運び先を受け渡します。"
+                "シミュレーション画面が開き、Publish Point で運び先を変えます。",
                 flush=True,
             )
-        for _ in range(steps):
+        for step_index in range(steps):
             if bridge is not None:
-                obs = _accept_goal(env, obs, bridge)
+                obs = _accept_goal(env, obs, bridge, step_index)
             with torch.no_grad():
                 action = agent.act_mean(obs)
             obs, _, _, _ = env.step(action)
         if bridge is not None:
-            _accept_goal(env, obs, bridge)
+            _accept_goal(env, obs, bridge, steps)
     finally:
+        _close_live()
         if bridge is not None:
             bridge.close()
 

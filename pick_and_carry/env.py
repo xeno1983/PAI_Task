@@ -41,7 +41,7 @@ from pick_and_carry.helpers import (
 )
 from pick_and_carry.observation import object_in_base, pack_observation
 from pick_and_carry.reward import task_reward
-from pick_and_carry.ros_bridge import clamp_goal_xy
+from pick_and_carry.ros_bridge import clamp_goal_xy, downsample_rgb
 from pick_and_carry.terrain import make_course, make_supply_yard, make_terrain_bank, paste_tile, sample_height
 
 
@@ -107,6 +107,7 @@ class PickAndCarryEnv:
         self.wrist_camera = None
         self._recording = False
         self._wrist_warning_sent = False
+        self._overview_warning_sent = False
         obs_layout, action_layout = layouts(self.arm.dof)
         self.num_obs = layout_dim(obs_layout)
         self.num_actions = layout_dim(action_layout)
@@ -251,12 +252,12 @@ class PickAndCarryEnv:
         marker = self.cfg.goal_marker_size
         self.goal_marker = self.scene.add_entity(
             morph=gs.morphs.Box(
-                size=marker,
-                pos=(1.0, 0.0, marker[2] * 0.5),
+                size=(marker[0], marker[1], 0.40),
+                pos=(1.0, 0.0, 0.20),
                 fixed=False,
                 collision=False,
             ),
-            surface=gs.surfaces.Default(color=(0.15, 0.75, 0.35, 0.45)),
+            surface=gs.surfaces.Default(color=(0.15, 0.85, 0.30, 0.85)),
         )
         if self.cfg.wrist_camera:
             self.wrist_camera = self.scene.add_camera(
@@ -804,15 +805,25 @@ class PickAndCarryEnv:
         self._release_hold[placed] = False
 
     def _pin_goal(self, envs_idx) -> None:
+        """Place the visible marker. Its center sits above goal_pos so the column is easy to see."""
         if envs_idx is None:
-            self.goal_marker.set_pos(self.goal_pos, zero_velocity=True)
-            self.goal_marker.set_quat(self.init_base_quat.expand(self.num_envs, 4), zero_velocity=True)
+            shown = self.goal_pos
+            quat = self.init_base_quat.expand(self.num_envs, 4)
+            idx = None
+        else:
+            idx = self._index(envs_idx)
+            if idx.numel() == 0:
+                return
+            shown = self.goal_pos[idx]
+            quat = self.init_base_quat.expand(idx.shape[0], 4)
+        shown = shown.clone()
+        shown[:, 2] = shown[:, 2] + 0.20
+        if idx is None:
+            self.goal_marker.set_pos(shown, zero_velocity=True)
+            self.goal_marker.set_quat(quat, zero_velocity=True)
             return
-        idx = self._index(envs_idx)
-        if idx.numel() == 0:
-            return
-        self.goal_marker.set_pos(self.goal_pos[idx], envs_idx=idx, zero_velocity=True)
-        self.goal_marker.set_quat(self.init_base_quat.expand(idx.shape[0], 4), envs_idx=idx, zero_velocity=True)
+        self.goal_marker.set_pos(shown, envs_idx=idx, zero_velocity=True)
+        self.goal_marker.set_quat(quat, envs_idx=idx, zero_velocity=True)
 
     def set_goal_xy(self, x: float, y: float) -> tuple[float, float]:
         """Move the drop point of the single inference environment and refresh the observation.
@@ -855,6 +866,21 @@ class PickAndCarryEnv:
             "phase": int(self.phase[0].item()),
             "cube_size": float(self.cfg.cube_size),
         }
+
+    def overview_rgb(self) -> np.ndarray | None:
+        """One downsampled overview frame. The interactive viewer stays closed."""
+        if self.camera is None:
+            return None
+        try:
+            rgb, *_ = self.camera.render(rgb=True, depth=False, segmentation=False, normal=False, force_render=True)
+        except Exception as exc:
+            if not self._overview_warning_sent:
+                print(f"俯瞰映像を出せません。{exc}", flush=True)
+                self._overview_warning_sent = True
+            return None
+        if hasattr(rgb, "detach"):
+            rgb = rgb.detach().cpu().numpy()
+        return downsample_rgb(rgb, stride=3)
 
     def _write_observation(self) -> None:
         leg = slice(0, len(self.leg_names))

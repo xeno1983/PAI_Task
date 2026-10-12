@@ -173,29 +173,15 @@ function Select-Ros {
 function Start-Rviz {
     $armName = "panda"
     if ($script:logDir -eq "logs/ppo_z1") { $armName = "z1" }
-    Write-Host "WSL の Ubuntu を起動しています。"
-    $raw = & wsl.exe -d Ubuntu -- hostname -I
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "WSL の Ubuntu を起動できませんでした。録画だけ行います。"
-        $script:rosArgs = @()
-        $script:inferSeconds = 20
-        return
-    }
-    $wslIp = ((@($raw) -join " ") -split "\s+" | Where-Object { $_ })[0]
-    if ([string]::IsNullOrWhiteSpace($wslIp)) {
-        Write-Host "WSL のアドレスが分かりません。録画だけ行います。"
-        $script:rosArgs = @()
-        $script:inferSeconds = 20
-        return
-    }
     $root = (Get-Location).Path
     $wslPath = "/mnt/" + $root.Substring(0, 1).ToLower() + ($root.Substring(2) -replace "\\", "/")
-    $script:rosArgs = @("--ros", "--ros-host", $wslIp, "--ros-port", "11411")
+    $script:rosArgs = @("--ros")
     $script:inferSeconds = 60
     $command = "wsl.exe -d Ubuntu -- bash -lc `"cd $wslPath && bash ros/display.sh $armName`""
     Start-Process -FilePath "cmd.exe" -ArgumentList "/k $command"
     Write-Host "rviz2 を開いています。表示まで十数秒かかることがあります。"
-    Write-Host "Publish Point で地面をクリックすると、運び先が動きます。"
+    Write-Host "推論が始まると、シミュレーション画面が Windows に開きます。姿勢は logs\ros_ipc 経由で rviz2 に渡ります。"
+    Write-Host "rviz2 の Publish Point（十字）で、コースの薄い地面をクリックしてください。黄色い球がクリック、緑の柱がシミュレーションの運び先です。"
 }
 
 $code = 0

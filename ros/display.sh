@@ -41,25 +41,38 @@ if [[ -z "${ROS_DISTRO:-}" ]]; then
 fi
 
 python3 - "$URDF" <<'PY'
-import pathlib, sys
-urdf = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+import pathlib, re, sys
+requested = pathlib.Path(sys.argv[1])
+visual = requested.parent / ".visual" / requested.name
+source = visual if visual.is_file() else requested
+text = source.read_text(encoding="utf-8")
+text = text.replace("\\", "/")
+# rviz reads meshes with libcurl, so a plain /mnt/c path is rejected.
+text = re.sub(
+    r"([A-Za-z]):/",
+    lambda match: "file:///mnt/" + match.group(1).lower() + "/",
+    text,
+)
 body = ["  ros__parameters:", "    robot_description: |"]
-for line in urdf.splitlines():
+for line in text.splitlines():
     body.append("      " + line)
 block = "\n".join(body)
-text = "/**:\n" + block + "\nrobot_state_publisher:\n" + block + "\n"
-pathlib.Path("/tmp/pick_and_carry_rsp.yaml").write_text(text, encoding="utf-8")
+dumped = "/**:\n" + block + "\nrobot_state_publisher:\n" + block + "\n"
+pathlib.Path("/tmp/pick_and_carry_rsp.yaml").write_text(dumped, encoding="utf-8")
+print(source)
 PY
 
-SIM_PORT="${SIM_PORT:-11411}"
+LINK="$ROOT/logs/ros_ipc"
+mkdir -p "$LINK"
+rm -f "$LINK"/state.json "$LINK"/state-*.json "$LINK"/goal.json "$LINK"/goal-*.json "$LINK"/*.tmp
 echo "腕: $ARM"
 echo "URDF: $URDF"
 echo "DISPLAY: ${DISPLAY:-未設定}"
-echo "推論からの接続を ${SIM_PORT} 番で待ちます。rviz2 の Publish Point で地面をクリックすると運び先が動きます。"
+echo "姿勢と運び先は logs/ros_ipc のファイルで受け渡します。Publish Point のクリックは黄色い球になり、推論中に緑の柱へ反映されます。"
 
 ros2 run robot_state_publisher robot_state_publisher --ros-args --params-file /tmp/pick_and_carry_rsp.yaml &
 RSP_PID=$!
-python3 "$ROOT/ros/bridge_node.py" --sim-host 0.0.0.0 --sim-port "$SIM_PORT" &
+python3 "$ROOT/ros/bridge_node.py" --link-dir "$LINK" &
 BRIDGE_PID=$!
 
 cleanup() {

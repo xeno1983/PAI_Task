@@ -177,7 +177,7 @@ def main() -> None:
         if args.ros:
             command.extend(["--ros", "--ros-host", args.ros_host, "--ros-port", str(args.ros_port)])
         if args.ros:
-            status.set("推論を実行しています。rviz2 の Publish Point で運び先を動かせます。シーンの作成に数分かかります。")
+            status.set("推論を実行しています。シミュレーション画面が開き、rviz2 の Publish Point で運び先を動かせます。")
         else:
             status.set("推論を実行しています。シーンの作成に数分かかります。")
         start_button.configure(state="disabled")
