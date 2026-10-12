@@ -272,6 +272,74 @@ def render_curve_png(path: Path, rows: list[dict]) -> None:
     image.save(path)
 
 
+def add_curriculum_slide(prs) -> None:
+    """Stages after the original pick-and-place, and how weights move forward."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(12.0), Inches(0.38))
+    write(title, ["段階的な学習"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.48), Inches(12.4), Inches(0.30))
+    write(
+        subtitle,
+        ["箱運びはそのまま残す。前後の段階は、形が同じときだけ重みを引き継ぎ、違うときは覚えた歩行を脚として固定する。"],
+        size=14,
+        color=MUTED,
+        spacing=0,
+    )
+    y = Inches(0.95)
+    h = Inches(6.2)
+    card(
+        slide,
+        Inches(0.28),
+        y,
+        Inches(6.35),
+        h,
+        "5つの段階",
+        [
+            "1  歩行　平地で前後・左右・旋回",
+            "　　観測 41、行動は脚 12。最初から学ぶ",
+            "2  不整地　同じ観測。歩行の重みから続ける",
+            "3  箱運び　いまのピック＆プレース",
+            "　　Panda は 68/20、Z1 は 66/19",
+            "　　歩行のネットワークとは別の保存",
+            "4  歩きながら持つ",
+            "　　脚は覚えた歩行。腕と進む速さを学ぶ",
+            "　　箱は手に固定。落とし方はまだ学ばない",
+            "5  キャッチ　静止 → ゆっくり → ばらす → ノイズ",
+            "　　近いレベルから続ける。1 秒保持で成功",
+            "次の段階へ進むかは、録画を見て決める",
+        ],
+        TEAL,
+    )
+    card(
+        slide,
+        Inches(6.78),
+        y,
+        Inches(6.25),
+        h,
+        "重みの渡し方と、その報酬",
+        [
+            "形が同じとき、重みをそのまま読む",
+            "　　歩行 → 不整地",
+            "　　歩きながら持つ → キャッチの各レベル",
+            "形が違うとき、脚の方策だけを固定する",
+            "　　不整地が無ければ平地の歩行",
+            "　　歩行が無ければ決まったトロット",
+            "箱運びの 68 次元は、歩行の 41 次元へ入らない",
+            "",
+            "歩行の点は、指令した速度への一致",
+            "　　記録の tracking は 0〜1。1 が一致",
+            "キャッチの点は、手をボールへ近づける",
+            "　　速度を揃える、指のあいだで保持する",
+            "人の点数で、この報酬は置き換えていない",
+        ],
+        GREEN,
+    )
+
+
 def add_reward_slide(prs) -> None:
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
@@ -329,6 +397,7 @@ def add_reward_slide(prs) -> None:
             "段階 3　置くとき",
             "　　設置、指を開く",
             "歩行のみの学習では、把持と設置の点は出さない",
+            "歩行の段階は速度の一致。キャッチは接近と保持",
         ],
         CLAY,
     )
@@ -367,6 +436,8 @@ def add_loss_slide(prs, curve_png: Path | None) -> None:
             "　報酬・把持率は上向きが良い",
             "　手先と箱の距離は下向きが良い",
             "　方策 Loss は 0 の近くに落ち着く",
+            "歩行の記録は tracking。1 が指令どおり",
+            "右の4枚は箱運びの曲線",
         ],
         TEAL,
     )
@@ -392,7 +463,7 @@ def main() -> None:
     subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.50), Inches(12.6), Inches(0.28))
     write(
         subtitle,
-        ["Unitree Go2 ＋ 背中の Franka Panda　　PPO　　観測 68 次元・制御 20 次元（この寸法のまま重みを継続）"],
+        ["Unitree Go2 ＋ Franka Panda または Unitree Z1　　PPO　　箱運びは Panda 68/20、Z1 66/19（形が違う重みは継続しない）"],
         size=12,
         color=MUTED,
         spacing=0,
@@ -411,7 +482,7 @@ def main() -> None:
         h,
         "学習条件",
         [
-            "ロボット　Go2 の胴体に Panda を固定",
+            "ロボット　Go2 に Panda、または Z1（6 軸）",
             "方策　256×256 ELU、出力は −1〜1",
             "更新　16 環境 × 128 step / iteration",
             "最適化　Adam 3e-4、clip 0.2",
@@ -424,7 +495,7 @@ def main() -> None:
             "成功　目標の半径 0.28 m、高さ 0.08 m 未満",
             "前進　0.40 m/s を追う。転倒 −5、設置 +10",
             "分け方　歩行のみ／分割／同時 から選択",
-            "継続　logs/ppo_walk の保存重みから再開",
+            "継続　Panda は logs/ppo_walk、Z1 は ppo_z1",
         ],
         TEAL,
     )
@@ -481,6 +552,7 @@ def main() -> None:
         GREEN,
     )
     add_problem_slide(prs)
+    add_curriculum_slide(prs)
     add_reward_slide(prs)
     curve_png = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry_curves.png"
     rows = _load_metrics()

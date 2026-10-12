@@ -41,7 +41,7 @@ Write-Host "   7  学習曲線を開く（追加学習なし）"
 Write-Host "      報酬、把持率、手先の距離、設置率。"
 Write-Host "      ブラウザ: 起動スクリプトフォルダの PickAndCarry_curves.html"
 Write-Host "   8  プレゼン用の動画を作る（追加学習なし）"
-Write-Host "      学習条件のスライドと、フォルダ内の録画を1本につなぐ。説明の音声も入る。"
+Write-Host "      学習条件のスライドを作り直し、フォルダ内の録画を1本につなぐ。説明の音声も入る。"
 Write-Host "      動画: 起動スクリプトフォルダの PickAndCarry_presentation.mp4"
 Write-Host ""
 
@@ -352,7 +352,9 @@ switch ($choice) {
     }
     "8" {
         Write-Host ""
-        Write-Host "学習条件のスライドのあと、このフォルダの録画をつないでプレゼン動画にします。"
+        Write-Host "学習条件のスライドを作り直し、このフォルダの録画をつないでプレゼン動画にします。"
+        & $python -u scripts\make_summary_slide.py
+        if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE; break }
         $video = Join-Path $out "PickAndCarry_presentation.mp4"
         & $python -u scripts\make_presentation.py --pptx (Join-Path $out "PickAndCarry_学習条件.pptx") --videos $out --output $video
         $code = $LASTEXITCODE
