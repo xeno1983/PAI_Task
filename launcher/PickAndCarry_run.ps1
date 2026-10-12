@@ -91,6 +91,55 @@ function Select-Arm {
     }
 }
 
+function Select-Curriculum {
+    Write-Host ""
+    Write-Host " カリキュラム"
+    Write-Host "   1  いまのピック＆プレース。置いてある箱を掴んで運ぶ"
+    Write-Host "   2  歩行。平地で前後進と旋回"
+    Write-Host "   3  不整地の歩行。2 の続きとして同じ観測"
+    Write-Host "   4  歩きながら持つ。脚は決まった歩き、腕と進む速さを学ぶ"
+    Write-Host "   5  転がるボールを掴む"
+    $picked = Read-Host "段階 [1]"
+    if ([string]::IsNullOrWhiteSpace($picked)) { $picked = "1" }
+    $script:stage = "carry"
+    $script:curriculumArgs = @()
+    if ($picked -eq "2") {
+        $script:stage = "walk"
+        $script:curriculumArgs = @("--curriculum", "walk")
+        $script:logDir = "logs/ppo_curriculum_walk"
+        $script:videoName = "PickAndCarry_walk.mp4"
+        Write-Host "平地の歩行です。保存先は logs\ppo_curriculum_walk です。"
+    } elseif ($picked -eq "3") {
+        $script:stage = "rough"
+        $script:curriculumArgs = @("--curriculum", "rough")
+        $script:logDir = "logs/ppo_curriculum_rough"
+        $script:videoName = "PickAndCarry_rough.mp4"
+        Write-Host "不整地の歩行です。平地の重みがあればそこから続けます。保存先は logs\ppo_curriculum_rough です。"
+    } elseif ($picked -eq "4") {
+        $script:stage = "haul"
+        $script:curriculumArgs = @("--curriculum", "haul")
+        $script:logDir = "logs/ppo_curriculum_haul"
+        $script:videoName = "PickAndCarry_haul.mp4"
+        Write-Host "掴んだまま歩く段階です。脚は歩行の重みを使い、腕と進む速さを学習します。保存先は logs\ppo_curriculum_haul です。"
+    } elseif ($picked -eq "5") {
+        $script:stage = "catch"
+        Write-Host "   1  手の前で静止"
+        Write-Host "   2  ゆっくりまっすぐ転がす"
+        Write-Host "   3  速さと方向をばらす"
+        Write-Host "   4  位置に少しノイズを足す"
+        $levelPick = Read-Host "ボール [1]"
+        if ([string]::IsNullOrWhiteSpace($levelPick)) { $levelPick = "1" }
+        $level = @("static", "slow", "random", "noisy")[[Math]::Min(3, [Math]::Max(0, [int]$levelPick - 1))]
+        $script:curriculumArgs = @("--curriculum", "catch", "--catch-level", $level)
+        $script:logDir = "logs/ppo_curriculum_catch_$level"
+        $script:videoName = "PickAndCarry_catch.mp4"
+        Write-Host "キャッチ（$level）です。この段階の重みがなければ、一つ前から続けます。保存先は $script:logDir です。"
+    } else {
+        Write-Host "ピック＆プレースのまま進めます。"
+    }
+    $script:activeIter = Get-LatestIteration ($script:logDir -replace "/", "\")
+}
+
 function Select-Terrain {
     Write-Host ""
     Write-Host " 走行環境"
@@ -199,6 +248,7 @@ switch ($choice) {
         Write-Host ""
         Write-Host "不整地を渡って拾い、もう一度不整地を渡って置く学習を進めます。終わると学習曲線と動画を開きます。"
         Select-Arm
+        Select-Curriculum
         $trainIters = 0
         while ($trainIters -lt 1) {
             $rawIters = Read-Host "学習回数 [1000]"
@@ -225,17 +275,27 @@ switch ($choice) {
         if ($numEnvs -gt 32) {
             Write-Host "この GPU は 8GB です。32 を超えるとメモリ不足で止まることがあります。"
         }
-        Select-Terrain
-        Select-Control
-        Select-Vision
-        & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @armArgs @terrainArgs @controlArgs @visionArgs
+        if ($script:stage -eq "carry") {
+            Select-Terrain
+            Select-Control
+            Select-Vision
+        } elseif ($script:stage -eq "rough") {
+            Select-Terrain
+            $script:controlArgs = @()
+            $script:visionArgs = @()
+        } else {
+            $script:terrainArgs = @()
+            $script:controlArgs = @()
+            $script:visionArgs = @()
+        }
+        & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
         $code = $LASTEXITCODE
         if ($code -eq 0) {
             $curves = Join-Path $out "PickAndCarry_curves.html"
             & $python -u scripts\plot_curves.py --log-dir $logDir --output $curves
             if ($LASTEXITCODE -eq 0 -and (Test-Path $curves)) { Start-Process $curves }
             $video = Join-Path $out $videoName
-            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @armArgs @terrainArgs @controlArgs @visionArgs
+            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
             $code = $LASTEXITCODE
             if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
         }

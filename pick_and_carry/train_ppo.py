@@ -16,7 +16,8 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
-from pick_and_carry.config import EnvConfig
+from pick_and_carry.config import EnvConfig, layout_dim
+from pick_and_carry.curriculum import earlier_stages, stage_layouts, stage_log_dir
 from pick_and_carry.env import PickAndCarryEnv
 from pick_and_carry.ros_bridge import DEFAULT_HOST, DEFAULT_PORT, FileBridge, pack_rgb_image, ros_usage_error
 from pick_and_carry.tracking import append_metrics, write_run
@@ -74,6 +75,18 @@ def parse_args():
         action="store_true",
         help="Detect the cube with a camera on the hand and grasp only when it is seen.",
     )
+    parser.add_argument(
+        "--curriculum",
+        choices=("carry", "walk", "rough", "haul", "catch"),
+        default="carry",
+        help="carry is pick-and-place. walk, rough, haul, and catch are the later stages.",
+    )
+    parser.add_argument(
+        "--catch-level",
+        choices=("static", "slow", "random", "noisy"),
+        default="static",
+        help="How the ball moves in the catch stage.",
+    )
     parser.add_argument("--log-dir", type=Path, default=Path("logs/ppo"))
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument(
@@ -119,37 +132,109 @@ def _torch_load(path: Path, device: torch.device):
         return torch.load(path, map_location=device)
 
 
-def resolve_checkpoint(log_dir: Path, resume: str, obs_dim: int, act_dim: int, scripted_gait: bool, arm: str) -> Path | None:
-    """Return a checkpoint for this task. 'latest' skips a different arm, size, or gait."""
+def _checkpoint_matches(
+    blob: dict,
+    obs_dim: int,
+    act_dim: int,
+    scripted_gait: bool,
+    arm: str,
+    curriculum: str,
+    *,
+    match_arm: bool,
+) -> bool:
+    if int(blob.get("obs_dim", -1)) != obs_dim or int(blob.get("act_dim", -1)) != act_dim:
+        return False
+    if match_arm and str(blob.get("arm", "panda")) != arm:
+        return False
+    # Files saved before the split used the fixed trot.
+    if bool(blob.get("scripted_gait", True)) != scripted_gait:
+        return False
+    # Files saved before the curriculum field are pick-and-place.
+    return str(blob.get("curriculum", "carry")) == curriculum
+
+
+def latest_matching(
+    log_dir: Path,
+    obs_dim: int,
+    act_dim: int,
+    scripted_gait: bool,
+    arm: str,
+    curriculum: str,
+    *,
+    match_arm: bool = True,
+) -> Path | None:
+    """Newest checkpoint in one folder whose network matches this task."""
+    if not log_dir.is_dir():
+        return None
+    compatible: list[Path] = []
+    skipped_arm = 0
+    for path in sorted(log_dir.glob("ppo_*.pt")):
+        blob = _torch_load(path, torch.device("cpu"))
+        saved_arm = str(blob.get("arm", "panda"))
+        if match_arm and saved_arm != arm and int(blob.get("obs_dim", -1)) == obs_dim:
+            skipped_arm += 1
+        if _checkpoint_matches(blob, obs_dim, act_dim, scripted_gait, arm, curriculum, match_arm=match_arm):
+            compatible.append(path)
+    if not compatible and skipped_arm:
+        print(f"skipped {skipped_arm} checkpoint(s) from a different arm.", flush=True)
+    return compatible[-1] if compatible else None
+
+
+def resolve_checkpoint(
+    log_dir: Path,
+    resume: str,
+    obs_dim: int,
+    act_dim: int,
+    scripted_gait: bool,
+    arm: str,
+    curriculum: str = "carry",
+    catch_level: str = "static",
+    root: Path | None = None,
+) -> Path | None:
+    """Own folder first. If it is empty, the previous stage with the same network."""
     if resume != "latest":
         path = Path(resume)
         if not path.is_file():
             raise SystemExit(f"Checkpoint not found: {path}")
         return path
-    compatible: list[Path] = []
-    skipped_gait = 0
-    skipped_arm = 0
-    for path in sorted(log_dir.glob("ppo_*.pt")):
-        blob = _torch_load(path, torch.device("cpu"))
-        if int(blob.get("obs_dim", -1)) != obs_dim or int(blob.get("act_dim", -1)) != act_dim:
-            continue
-        # Files saved before the arm choice are the Franka.
-        saved_arm = str(blob.get("arm", "panda"))
-        if saved_arm != arm:
-            skipped_arm += 1
-            continue
-        # Files saved before the split used the fixed trot.
-        saved_gait = bool(blob.get("scripted_gait", True))
-        if saved_gait != scripted_gait:
-            skipped_gait += 1
-            continue
-        compatible.append(path)
-    if not compatible and skipped_arm:
-        print(f"skipped {skipped_arm} checkpoint(s) from a different arm.", flush=True)
-    if not compatible and skipped_gait:
-        kind = "fixed trot" if not scripted_gait else "learned walk"
-        print(f"skipped {skipped_gait} checkpoint(s) from the {kind}.", flush=True)
-    return compatible[-1] if compatible else None
+    own = latest_matching(log_dir, obs_dim, act_dim, scripted_gait, arm, curriculum)
+    if own is not None:
+        return own
+    # The walk network does not read the arm, so either arm can seed rough.
+    match_arm = curriculum not in ("walk", "rough")
+    for stage, level in earlier_stages(curriculum, catch_level):
+        found = latest_matching(
+            stage_log_dir(stage, level, arm, root=root),
+            obs_dim,
+            act_dim,
+            scripted_gait,
+            arm,
+            stage,
+            match_arm=match_arm,
+        )
+        if found is not None:
+            return found
+    return None
+
+
+def find_locomotion_checkpoint(root: Path | None = None) -> Path | None:
+    """Rough walk if it exists, otherwise the flat walk. The legs stay frozen after that."""
+    observation, action = stage_layouts("walk", 7)
+    obs_dim = layout_dim(observation)
+    act_dim = layout_dim(action)
+    for stage, level in (("rough", "static"), ("walk", "static")):
+        found = latest_matching(
+            stage_log_dir(stage, level, root=root),
+            obs_dim,
+            act_dim,
+            False,
+            "panda",
+            stage,
+            match_arm=False,
+        )
+        if found is not None:
+            return found
+    return None
 
 
 def save_checkpoint(
@@ -161,6 +246,7 @@ def save_checkpoint(
     act_dim: int,
     scripted_gait: bool,
     arm: str,
+    curriculum: str = "carry",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -172,6 +258,7 @@ def save_checkpoint(
             "act_dim": act_dim,
             "scripted_gait": scripted_gait,
             "arm": arm,
+            "curriculum": curriculum,
         },
         path,
     )
@@ -197,7 +284,24 @@ def make_config(args) -> EnvConfig:
         wrist_camera=args.wrist_camera,
         fixed_object_xy=_parse_xy(args.object_xy),
         fixed_goal_xy=_parse_xy(args.goal_xy),
+        curriculum=getattr(args, "curriculum", "carry"),
+        catch_level=getattr(args, "catch_level", "static"),
     )
+    if cfg.curriculum == "walk":
+        cfg.terrain = False
+        cfg.terrain_steps = False
+        cfg.scripted_gait = False
+    elif cfg.curriculum == "rough":
+        cfg.terrain = True
+        cfg.scripted_gait = False
+    elif cfg.curriculum in ("haul", "catch"):
+        cfg.terrain = False
+        cfg.terrain_steps = False
+        cfg.scripted_gait = True
+        cfg.control_split = "both"
+        cfg.catch_hold_steps = max(1, int(round(1.0 / cfg.dt)))
+        legs = find_locomotion_checkpoint()
+        cfg.locomotion_checkpoint = str(legs) if legs is not None else ""
     if args.play and args.ros:
         # One click session should not snap the robot home on the 20 s training timeout.
         cfg.episode_length_s = max(cfg.episode_length_s, float(args.seconds))
@@ -209,18 +313,35 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     """Load a checkpoint when --resume is set. Returns the saved iteration and path."""
     if not args.resume:
         return 0, None
-    ckpt_path = resolve_checkpoint(args.log_dir, args.resume, env.num_obs, env.num_actions, cfg.scripted_gait, cfg.arm)
+    ckpt_path = resolve_checkpoint(
+        args.log_dir,
+        args.resume,
+        env.num_obs,
+        env.num_actions,
+        cfg.scripted_gait,
+        cfg.arm,
+        cfg.curriculum,
+        cfg.catch_level,
+    )
     if ckpt_path is None:
         if args.play:
-            raise SystemExit(f"No checkpoint in {args.log_dir.resolve()}. Train once before playing.")
-        print(f"no checkpoint in {args.log_dir.resolve()}. Starting from scratch.", flush=True)
+            raise SystemExit(f"No checkpoint in {args.log_dir.resolve()} or an earlier stage. Train once before playing.")
+        print(f"{args.log_dir.resolve()} にも前の段階にも重みがありません。最初から学習します。", flush=True)
         return 0, None
     blob = _torch_load(ckpt_path, env.device)
     obs_dim = int(blob.get("obs_dim", -1))
     act_dim = int(blob.get("act_dim", -1))
     saved_gait = bool(blob.get("scripted_gait", True))
     saved_arm = str(blob.get("arm", "panda"))
-    if obs_dim != env.num_obs or act_dim != env.num_actions or saved_gait != cfg.scripted_gait or saved_arm != cfg.arm:
+    saved_stage = str(blob.get("curriculum", "carry"))
+    arm_required = cfg.curriculum not in ("walk", "rough")
+    same_network = (
+        obs_dim == env.num_obs
+        and act_dim == env.num_actions
+        and saved_gait == cfg.scripted_gait
+        and (saved_arm == cfg.arm or not arm_required)
+    )
+    if not same_network:
         print(
             f"checkpoint {ckpt_path} is for arm {saved_arm} obs {obs_dim} act {act_dim} "
             f"scripted_gait {saved_gait}, this task is arm {cfg.arm} obs {env.num_obs} act {env.num_actions} "
@@ -229,6 +350,9 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
         )
         return 0, None
     agent.load_state_dict(blob["model"])
+    if saved_stage != cfg.curriculum:
+        print(f"前の段階 {saved_stage} の重みから始めます: {ckpt_path}", flush=True)
+        return 0, str(ckpt_path)
     if "optimizer" in blob:
         optimizer.load_state_dict(blob["optimizer"])
     start_iteration = int(blob.get("iteration", 0))
@@ -332,7 +456,15 @@ def play_policy(args, cfg, env, agent, obs) -> None:
 def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration: int) -> None:
     if start_iteration == 0:
         save_checkpoint(
-            args.log_dir / "ppo_0000.pt", agent, optimizer, 0, env.num_obs, env.num_actions, cfg.scripted_gait, cfg.arm
+            args.log_dir / "ppo_0000.pt",
+            agent,
+            optimizer,
+            0,
+            env.num_obs,
+            env.num_actions,
+            cfg.scripted_gait,
+            cfg.arm,
+            cfg.curriculum,
         )
     last_iteration = start_iteration + args.iterations
     print(
@@ -346,6 +478,12 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         grasp_sum = 0.0
         dist_sum = 0.0
         grip_sum = 0.0
+        if cfg.curriculum in ("walk", "rough", "haul"):
+            progress_key = "tracking"
+        elif cfg.curriculum == "catch":
+            progress_key = "approach"
+        else:
+            progress_key = "ee_dist"
         for _ in range(args.num_steps):
             with torch.no_grad():
                 action, log_prob, value = agent.act(obs)
@@ -363,8 +501,11 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             done_buf.append(done.to(dtype=reward.dtype))
             obs = next_obs
             grasp_sum += float(env.grasped.float().mean())
-            dist_sum += float(env.reward_terms["ee_dist"].mean())
-            grip_sum += float(env._gripper_opening().mean())
+            progress = env.reward_terms.get(progress_key)
+            if progress is not None:
+                dist_sum += float(progress.mean())
+            if progress_key == "ee_dist":
+                grip_sum += float(env._gripper_opening().mean())
 
         rewards = torch.stack(rew_buf)
         values = torch.stack(val_buf)
@@ -410,24 +551,29 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         grasp_rate = grasp_sum / args.num_steps
         mean_dist = dist_sum / args.num_steps
         writer.add_scalar("rollout/grasp_rate", grasp_rate, iteration)
-        writer.add_scalar("rollout/ee_dist", mean_dist, iteration)
+        writer.add_scalar(f"rollout/{progress_key}", mean_dist, iteration)
         row = {
             "iteration": iteration,
             "reward": mean_reward,
-            "ee_dist": mean_dist,
             "grasp": grasp_rate,
             "fps": fps,
             "policy_loss": float(metrics["policy_loss"]),
+            progress_key: mean_dist,
         }
         if "success_rate" in env.extras:
             row["success"] = float(env.extras["success_rate"])
         append_metrics(args.log_dir / "metrics.jsonl", row)
         step_times.append(elapsed)
         remaining = (last_iteration - iteration) * (sum(step_times) / len(step_times))
+        if progress_key == "ee_dist":
+            detail = f"ee_dist {mean_dist:.3f} grasp {grasp_rate:.2f} grip {grip_sum / args.num_steps:.3f}"
+        elif progress_key == "approach":
+            detail = f"approach {mean_dist:.3f} grasp {grasp_rate:.2f}"
+        else:
+            detail = f"tracking {mean_dist:.3f}"
         print(
             f"iter {iteration}/{last_iteration}  残り {format_remaining(remaining)}  "
-            f"reward {mean_reward:.3f} ee_dist {mean_dist:.3f} "
-            f"grasp {grasp_rate:.2f} grip {grip_sum / args.num_steps:.3f} "
+            f"reward {mean_reward:.3f} {detail} "
             f"policy {metrics['policy_loss']:.3f} fps {fps:.0f}",
             flush=True,
         )
@@ -441,6 +587,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
                 env.num_actions,
                 cfg.scripted_gait,
                 cfg.arm,
+                cfg.curriculum,
             )
 
 
@@ -462,7 +609,8 @@ def main() -> None:
     start_iteration, resumed_from = resume_agent(args, env, cfg, agent, optimizer)
     print(
         f"PPO obs={env.num_obs} act={env.num_actions} envs={env.num_envs} "
-        f"arm={cfg.arm} freeze_legs={cfg.freeze_legs} control_split={cfg.control_split} "
+        f"arm={cfg.arm} curriculum={cfg.curriculum} catch={cfg.catch_level} "
+        f"freeze_legs={cfg.freeze_legs} control_split={cfg.control_split} "
         f"wrist_camera={cfg.wrist_camera} urdf={env.urdf_path} device={device}",
         flush=True,
     )

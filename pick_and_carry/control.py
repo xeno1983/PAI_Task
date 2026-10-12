@@ -82,6 +82,7 @@ def scripted_trot_pose(
     lower: torch.Tensor,
     upper: torch.Tensor,
     yaw_err: torch.Tensor | None = None,
+    speed: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Diagonal trot blended in over one second. Returns the pose and the updated gait state.
 
@@ -103,6 +104,8 @@ def scripted_trot_pose(
     thigh = torch.where(swing, 0.98 + (0.62 - 0.98) * swing_u, 0.62 + (0.98 - 0.62) * stance_u)
     calf = torch.where(swing, -1.5 - 0.40 * torch.sin(math.pi * swing_u), torch.full_like(phase, -1.5))
     mix = gait_blend.unsqueeze(-1)
+    if speed is not None:
+        mix = mix * speed.to(dtype=mix.dtype).unsqueeze(-1).clamp(0.0, 1.0)
     pose[:, 1::3] = pose[:, 1::3] * (1.0 - mix) + thigh * mix
     pose[:, 2::3] = pose[:, 2::3] * (1.0 - mix) + calf * mix
     if yaw_err is not None:

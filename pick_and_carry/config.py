@@ -279,6 +279,12 @@ class EnvConfig:
     reward_scales: RewardScales = field(default_factory=RewardScales)
     max_collision_pairs: int = 512
     seed: int = 0
+    # carry is the original pick-and-place. Later stages use their own observations.
+    curriculum: str = "carry"
+    catch_level: str = "static"
+    catch_hold_steps: int = 50
+    # Set for haul and catch when a walk or rough checkpoint exists. Empty keeps the trot.
+    locomotion_checkpoint: str = ""
 
     @property
     def max_episode_length(self) -> int:
