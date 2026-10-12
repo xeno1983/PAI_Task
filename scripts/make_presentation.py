@@ -36,6 +36,10 @@ PREFERRED = (
     "PickAndCarry_ppo.mp4",
     "PickAndCarry_z1.mp4",
     "PickAndCarry_haul.mp4",
+    "PickAndCarry_catch_static.mp4",
+    "PickAndCarry_catch_slow.mp4",
+    "PickAndCarry_catch_random.mp4",
+    "PickAndCarry_catch_noisy.mp4",
     "PickAndCarry_catch.mp4",
     "PickAndCarry_compare.mp4",
     "PickAndCarry_z1_compare.mp4",
@@ -49,6 +53,10 @@ TITLES = {
     "PickAndCarry_ppo.mp4": ("箱運び", "保存した重みで、拾って目標へ置きます"),
     "PickAndCarry_z1.mp4": ("箱運び（Z1）", "Z1 の重みで、拾って目標へ置きます"),
     "PickAndCarry_haul.mp4": ("歩きながら持つ", "覚えた脚で歩き、腕は箱を持ったままです"),
+    "PickAndCarry_catch_static.mp4": ("キャッチ（静止）", "手の前で止まっているボールを掴みます"),
+    "PickAndCarry_catch_slow.mp4": ("キャッチ（ゆっくり）", "ゆっくり転がるボールを掴みます"),
+    "PickAndCarry_catch_random.mp4": ("キャッチ（ばらす）", "速さと方向がばらつくボールを掴みます"),
+    "PickAndCarry_catch_noisy.mp4": ("キャッチ（ノイズ）", "見ている位置にノイズがあるボールを掴みます"),
     "PickAndCarry_catch.mp4": ("転がるボール", "前の段階から続けた、キャッチの方策です"),
     "PickAndCarry_compare.mp4": ("学習の途中経過", "早い時点と遅い時点を並べます"),
     "PickAndCarry_z1_compare.mp4": ("学習の途中経過（Z1）", "早い時点と遅い時点を並べます"),
@@ -95,6 +103,10 @@ VIDEO_NARRATION = {
     "PickAndCarry_ppo.mp4": "箱運びです。保存した重みで、不整地を渡って箱を拾い、目標へ運ぶ様子です。",
     "PickAndCarry_z1.mp4": "ゼットワンの箱運びです。パンダの重みは使わず、ゼットワンの保存で再生しています。",
     "PickAndCarry_haul.mp4": "歩きながら持つ段階です。脚は覚えた歩行で、腕は箱を持ったまま進みます。",
+    "PickAndCarry_catch_static.mp4": "キャッチの静止です。手の前で止まっているボールを、1秒つかむ様子です。",
+    "PickAndCarry_catch_slow.mp4": "キャッチのゆっくりです。まっすぐ転がってくるボールをつかむ様子です。",
+    "PickAndCarry_catch_random.mp4": "キャッチのばらす段階です。速さと方向が毎回変わるボールをつかむ様子です。",
+    "PickAndCarry_catch_noisy.mp4": "キャッチのノイズ段階です。ボールの位置を少しずらして見せたときの様子です。",
     "PickAndCarry_catch.mp4": "転がるボールを掴む段階です。前の段階の重みから続けた方策です。",
     "PickAndCarry_compare.mp4": "学習の途中経過です。同じ配置で、早い時点と遅い時点を同時に再生しています。",
     "PickAndCarry_z1_compare.mp4": "ゼットワンの途中経過です。同じ配置で、早い時点と遅い時点を同時に再生しています。",
@@ -106,6 +118,29 @@ def presentation_videos(folder: Path) -> list[Path]:
     files = [path for path in folder.glob("*.mp4") if path.name != OUTPUT_NAME]
     rank = {name: index for index, name in enumerate(PREFERRED)}
     return sorted(files, key=lambda path: (rank.get(path.name, len(PREFERRED)), path.name.lower()))
+
+
+STAGE_CLIPS = (
+    ("PickAndCarry_walk.mp4", "平地の歩行"),
+    ("PickAndCarry_rough.mp4", "不整地の歩行"),
+    ("PickAndCarry_ppo.mp4", "箱運び（Panda）"),
+    ("PickAndCarry_z1.mp4", "箱運び（Z1）"),
+    ("PickAndCarry_haul.mp4", "歩きながら持つ"),
+    ("PickAndCarry_catch_static.mp4", "キャッチ（静止）"),
+    ("PickAndCarry_catch_slow.mp4", "キャッチ（ゆっくり）"),
+    ("PickAndCarry_catch_random.mp4", "キャッチ（ばらす）"),
+    ("PickAndCarry_catch_noisy.mp4", "キャッチ（ノイズ）"),
+)
+
+
+def report_stage_clips(folder: Path) -> None:
+    """Say which curriculum recordings the final video can already show."""
+    print("提出動画に入る段階:", flush=True)
+    for name, label in STAGE_CLIPS:
+        if (folder / name).is_file():
+            print(f"  あり  {label}  {name}", flush=True)
+        else:
+            print(f"  まだない  {label}  メニュー 2 でその段階を学習すると {name} が残ります", flush=True)
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -327,6 +362,7 @@ def main() -> None:
     if not args.pptx.is_file():
         raise SystemExit(f"スライドがありません: {args.pptx}")
     videos = presentation_videos(args.videos)
+    report_stage_clips(args.videos)
     if not videos:
         raise SystemExit(f"つなぐ mp4 がありません: {args.videos}")
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()

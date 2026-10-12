@@ -30,6 +30,8 @@ Write-Host "      ピック＆プレースだけ、走行環境・学習の分�
 Write-Host "      不整地の歩行は段差の高さだけ。歩行・持ち歩き・キャッチは追加の選択なし。"
 Write-Host "      ROS 2 は学習では使わない。"
 Write-Host "      Enter だけなら 1000 回、並列 16 体。同じ段階をもう一度選ぶと続きから学習する。"
+Write-Host "      終わるとその段階の録画を残す。8 の提出動画は、残った段階を順に流す。"
+Write-Host "      キャッチは静止、ゆっくり、ばらす、ノイズで別のファイルになる。"
 Write-Host "   3  短い SAC（8 環境、500 ステップ、録画あり、Panda のピック＆プレースのみ）"
 Write-Host "   4  Colab 用 zip を起動スクリプトフォルダに作る"
 Write-Host "   5  推論。段階を選んで、その保存した重みを再生する"
@@ -137,7 +139,7 @@ function Select-Curriculum {
         $level = @("static", "slow", "random", "noisy")[[Math]::Min(3, [Math]::Max(0, [int]$levelPick - 1))]
         $script:curriculumArgs = @("--curriculum", "catch", "--catch-level", $level)
         $script:logDir = "logs/ppo_curriculum_catch_$level"
-        $script:videoName = "PickAndCarry_catch.mp4"
+        $script:videoName = "PickAndCarry_catch_$level.mp4"
         Write-Host "キャッチ（$level）です。平地で、脚は歩行の重み、腕と進む速さを学習します。保存先は $script:logDir です。"
         Write-Host "この段階の重みがなければ、一つ前から続けます。追加で選ぶ項目はありません。"
         if ($level -ne "static") {
@@ -332,7 +334,10 @@ switch ($choice) {
             $video = Join-Path $out $videoName
             & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
             $code = $LASTEXITCODE
-            if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
+            if ($code -eq 0 -and (Test-Path $video)) {
+                Write-Host "提出動画用に残しました: $videoName"
+                Start-Process $video
+            }
         }
     }
     "3" {
@@ -364,7 +369,10 @@ switch ($choice) {
             & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @armArgs @terrainArgs @curriculumArgs
         }
         $code = $LASTEXITCODE
-        if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
+        if ($code -eq 0 -and (Test-Path $video)) {
+            Write-Host "提出動画用に残しました: $videoName"
+            Start-Process $video
+        }
     }
     "6" {
         Write-Host ""
