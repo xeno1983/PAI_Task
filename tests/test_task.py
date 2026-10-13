@@ -29,9 +29,9 @@ from pick_and_carry.helpers import (
 
 class LayoutTests(unittest.TestCase):
     def test_dimensions(self):
-        self.assertEqual(layout_dim(OBS_LAYOUT), 68)
-        self.assertEqual(NUM_OBS, 68)
-        self.assertEqual(NUM_ACTIONS, 20)
+        self.assertEqual(layout_dim(OBS_LAYOUT), 69)
+        self.assertEqual(NUM_OBS, 69)
+        self.assertEqual(NUM_ACTIONS, 19)
 
 
 class GeometryTests(unittest.TestCase):
@@ -165,8 +165,8 @@ class RewardTests(unittest.TestCase):
             base_ang_vel=torch.ones(1, 3),
             base_height=torch.tensor([[0.42]]),
             foot_contact=torch.zeros(1, 4),
-            arm_pos=torch.zeros(1, 7),
-            arm_vel=torch.ones(1, 7),
+            arm_pos=torch.zeros(1, 6),
+            arm_vel=torch.ones(1, 6),
             gripper_pos=torch.tensor([[0.04]]),
             gripper_vel=torch.ones(1, 1),
             ee_pos=torch.zeros(1, 3),
@@ -174,12 +174,13 @@ class RewardTests(unittest.TestCase):
             goal_pos=torch.zeros(1, 3),
             grasped=torch.tensor([False]),
             phase=torch.tensor([2]),
+            command=torch.zeros(1, 3),
         )
         self.assertEqual(obs.shape, (1, NUM_OBS))
         self.assertAlmostEqual(float(obs[0, 12]), 0.05)
         self.assertAlmostEqual(float(obs[0, 27]), 2.0)
         self.assertAlmostEqual(float(obs[0, 30]), 0.25)
-        self.assertEqual(obs[0, 64:68].tolist(), [0.0, 0.0, 1.0, 0.0])
+        self.assertEqual(obs[0, 62:66].tolist(), [0.0, 0.0, 1.0, 0.0])
 
     def test_split_holds_the_arm_while_walking(self):
         arm_act = torch.ones(1, 7)

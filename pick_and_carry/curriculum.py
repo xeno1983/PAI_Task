@@ -1,8 +1,7 @@
-"""Staged tasks on the same robot. The pick-and-carry observation stays unchanged.
+"""Staged tasks on the Unitree Z1. Every stage is observation 69 and action 19.
 
-walk learns the legs. rough continues those weights on bumps. haul and catch
-reuse that walk as a frozen leg controller and train the arm plus a body
-command. Each catch level continues the previous level, then haul.
+The previous stage initializes the next: stand, sit, walk, jump, rough, haul,
+pick-and-place, then the catch levels. Channels a stage does not use stay zero.
 """
 
 from __future__ import annotations
@@ -11,43 +10,60 @@ from pathlib import Path
 
 import torch
 
+from pick_and_carry.arms import layouts
 from pick_and_carry.helpers import fallen_mask, world_to_base
 
-STAGES = ("carry", "walk", "rough", "haul", "catch")
+STAGES = ("carry", "walk", "jump", "stand", "sit", "rough", "haul", "catch")
+POSTURE_STAGES = ("jump", "stand", "sit")
 CATCH_LEVELS = ("static", "slow", "random", "noisy")
 
 WALK_COMMAND_SECONDS = 4.0
 CATCH_HOLD_SECONDS = 1.0
+POSE_HOLD_SECONDS = 1.0
 BALL_RADIUS = 0.035
 PROGRESS_CAP = 0.05
+STAND_HEIGHT = 0.40
+SIT_HEIGHT = 0.28
+JUMP_RISE = 0.08
+
+
+SKILL_ORDER = ("stand", "sit", "walk", "jump", "rough", "haul", "carry")
+
+
+def _prior_skills(stage: str) -> list[tuple[str, str]]:
+    """Earlier stages in the curriculum, nearest first. All share one network per arm."""
+    if stage not in SKILL_ORDER:
+        return []
+    index = SKILL_ORDER.index(stage)
+    return [(name, "static") for name in reversed(SKILL_ORDER[:index])]
 
 
 def earlier_stages(stage: str, catch_level: str = "static") -> list[tuple[str, str]]:
-    """Same-sized policies that can initialize this stage, nearest easier first."""
-    if stage == "rough":
-        return [("walk", "static")]
+    """Same-sized policies that can initialize this stage, nearest previous first."""
     if stage != "catch":
-        return []
+        return _prior_skills(stage)
     if catch_level not in CATCH_LEVELS:
         raise ValueError(f"unknown catch level {catch_level}")
     index = CATCH_LEVELS.index(catch_level)
     priors = [("catch", level) for level in reversed(CATCH_LEVELS[:index])]
-    priors.append(("haul", "static"))
+    priors.append(("carry", "static"))
+    priors.extend(_prior_skills("carry"))
     return priors
 
 
 def later_stages(stage: str, catch_level: str = "static") -> list[tuple[str, str]]:
     """Same-sized policies one step harder, nearest first. Used to practice an easier task again."""
-    if stage == "walk":
-        return [("rough", "static")]
-    if stage == "haul":
-        return [("catch", level) for level in CATCH_LEVELS]
-    if stage != "catch":
+    if stage == "catch":
+        if catch_level not in CATCH_LEVELS:
+            raise ValueError(f"unknown catch level {catch_level}")
+        index = CATCH_LEVELS.index(catch_level)
+        return [("catch", level) for level in CATCH_LEVELS[index + 1 :]]
+    if stage not in SKILL_ORDER:
         return []
-    if catch_level not in CATCH_LEVELS:
-        raise ValueError(f"unknown catch level {catch_level}")
-    index = CATCH_LEVELS.index(catch_level)
-    return [("catch", level) for level in CATCH_LEVELS[index + 1 :]]
+    index = SKILL_ORDER.index(stage)
+    later = [(name, "static") for name in SKILL_ORDER[index + 1 :]]
+    later.extend(("catch", level) for level in CATCH_LEVELS)
+    return later
 
 
 def retreat_choice(
@@ -84,12 +100,19 @@ def retreat_choice(
     return current, 0, 0
 
 
-def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "panda", root: Path | None = None) -> Path:
-    """Folder used by the launcher for this stage. Walk and rough ignore the arm."""
+def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "z1", root: Path | None = None) -> Path:
+    """Folder used by the launcher for this stage. The arm is always the Z1."""
+    del arm
     if stage == "carry":
-        relative = "logs/ppo_z1" if arm == "z1" else "logs/ppo_walk"
+        relative = "logs/ppo_z1"
     elif stage == "walk":
         relative = "logs/ppo_curriculum_walk"
+    elif stage == "jump":
+        relative = "logs/ppo_curriculum_jump"
+    elif stage == "stand":
+        relative = "logs/ppo_curriculum_stand"
+    elif stage == "sit":
+        relative = "logs/ppo_curriculum_sit"
     elif stage == "rough":
         relative = "logs/ppo_curriculum_rough"
     elif stage == "haul":
@@ -104,43 +127,11 @@ def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "panda", r
     return base / relative
 
 
-def stage_layouts(stage: str, arm_dof: int) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str, int], ...]] | None:
-    """Observation and action layout for a stage. None keeps the pick-and-carry layout."""
-    if stage == "carry":
-        return None
-    if stage in ("walk", "rough"):
-        observation = (
-            ("leg_pos", 12),
-            ("leg_vel", 12),
-            ("projected_gravity", 3),
-            ("base_lin_vel", 3),
-            ("base_ang_vel", 3),
-            ("base_height", 1),
-            ("foot_contact", 4),
-            ("command", 3),
-        )
-        return observation, (("leg", 12),)
-    if stage not in ("haul", "catch"):
+def stage_layouts(stage: str, arm_dof: int) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str, int], ...]]:
+    """Observation and action layout shared by every stage of this arm."""
+    if stage not in STAGES:
         raise ValueError(f"unknown curriculum stage {stage}")
-    observation = (
-        ("leg_pos", 12),
-        ("leg_vel", 12),
-        ("projected_gravity", 3),
-        ("base_lin_vel", 3),
-        ("base_ang_vel", 3),
-        ("base_height", 1),
-        ("foot_contact", 4),
-        ("arm_pos", arm_dof),
-        ("arm_vel", arm_dof),
-        ("gripper_pos", 1),
-        ("gripper_vel", 1),
-        ("ee_pos", 3),
-        ("object_pos", 3),
-        ("object_vel", 3),
-        ("command", 3),
-        ("grasped", 1),
-    )
-    return observation, (("arm", arm_dof), ("gripper", 1), ("base", 3))
+    return layouts(arm_dof)
 
 
 def sample_command(count: int, device: torch.device | None = None) -> torch.Tensor:
@@ -310,6 +301,81 @@ def locomotion_reward(
     terms = {"track": 4.0 * track * upright * dt, "alive": alive, "effort": effort, "fall": fall}
     reward = torch.stack(tuple(terms.values()), dim=0).sum(dim=0)
     terms["tracking"] = track.detach()
+    return reward, terms, fallen
+
+
+def posture_achieved(
+    task: str,
+    *,
+    base_height: torch.Tensor,
+    base_lin_vel: torch.Tensor,
+    base_ang_vel: torch.Tensor,
+    foot_contact: torch.Tensor,
+    fallen: torch.Tensor,
+    was_airborne: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Whether this step holds the pose, and whether the feet are off the ground.
+
+    Jump counts a landing only after a previous step left the ground. Stand and
+    sit are a steady height with little horizontal speed.
+    """
+    speed = base_lin_vel[:, 0].square() + base_lin_vel[:, 1].square() + base_ang_vel[:, 2].square()
+    contacts = foot_contact.sum(dim=-1)
+    still = speed < 0.02
+    upright = ~fallen
+    airborne = upright & (contacts <= 0.5) & (base_height > STAND_HEIGHT + 0.03)
+    if task == "jump":
+        landed = was_airborne & upright & (contacts >= 2.0) & (base_height < STAND_HEIGHT + JUMP_RISE)
+        return landed, airborne
+    if task == "stand":
+        held = upright & still & ((base_height - STAND_HEIGHT).abs() < 0.06)
+        return held, airborne
+    if task == "sit":
+        held = upright & still & (contacts >= 3.0) & ((base_height - SIT_HEIGHT).abs() < 0.04)
+        return held, airborne
+    raise ValueError(f"unknown posture task {task}")
+
+
+def pose_reward(
+    task: str,
+    *,
+    base_height: torch.Tensor,
+    base_lin_vel: torch.Tensor,
+    base_lin_vel_world: torch.Tensor,
+    base_ang_vel: torch.Tensor,
+    projected_gravity: torch.Tensor,
+    foot_contact: torch.Tensor,
+    actions: torch.Tensor,
+    max_tilt_deg: float,
+    min_base_height: float,
+    dt: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]:
+    """Dense score for a jump, a stand, or a sit. ``tracking`` is the 0–1 pose score."""
+    fallen = fallen_mask(projected_gravity, base_height, max_tilt_deg, min_base_height)
+    upright = (~fallen).to(dtype=base_height.dtype)
+    speed = base_lin_vel[:, 0].square() + base_lin_vel[:, 1].square() + base_ang_vel[:, 2].square()
+    still = torch.exp(-speed / 0.08)
+    contacts = foot_contact.clamp(0.0, 1.0).mean(dim=-1)
+    if task == "stand":
+        height = torch.exp(-(base_height - STAND_HEIGHT).square() / 0.008)
+        pose = height * still
+    elif task == "sit":
+        height = torch.exp(-(base_height - SIT_HEIGHT).square() / 0.004)
+        pose = height * still * contacts
+    elif task == "jump":
+        rise = (base_lin_vel_world[:, 2].clamp(min=0.0) / 1.2).clamp(max=1.0)
+        clearance = ((base_height - STAND_HEIGHT) / JUMP_RISE).clamp(0.0, 1.0)
+        pose = torch.maximum(rise, clearance)
+    else:
+        raise ValueError(f"unknown posture task {task}")
+    terms = {
+        "pose": 4.0 * pose * upright * dt,
+        "alive": upright * 0.4 * dt,
+        "effort": -0.01 * actions.square().sum(dim=-1) * dt,
+        "fall": -5.0 * fallen.to(dtype=base_height.dtype),
+    }
+    reward = torch.stack(tuple(terms.values()), dim=0).sum(dim=0)
+    terms["tracking"] = pose.detach()
     return reward, terms, fallen
 
 

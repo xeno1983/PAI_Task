@@ -105,8 +105,8 @@ OBS_LAYOUT = (
     ("base_ang_vel", 3),
     ("base_height", 1),
     ("foot_contact", 4),
-    ("arm_pos", 7),
-    ("arm_vel", 7),
+    ("arm_pos", 6),
+    ("arm_vel", 6),
     ("gripper_pos", 1),
     ("gripper_vel", 1),
     ("ee_pos", 3),
@@ -114,11 +114,12 @@ OBS_LAYOUT = (
     ("goal_pos", 3),
     ("grasped", 1),
     ("phase", 4),
+    ("command", 3),
 )
-# [12 leg positions | 7 arm positions | 1 gripper open/close]
+# [12 leg positions | 6 Z1 arm positions | 1 gripper open/close]
 ACTION_LAYOUT = (
     ("leg", 12),
-    ("arm", 7),
+    ("arm", 6),
     ("gripper", 1),
 )
 
@@ -217,9 +218,8 @@ class EnvConfig:
     # walk: legs the whole time, arm held still, reward is travel and not falling.
     # both: legs and arm together for the whole episode.
     control_split: str = "split"
-    # panda keeps the 7-DoF Franka and the existing 68-dimensional checkpoints.
-    # z1 is the Unitree Z1 (6 DoF, about 5 kg) and needs its own training run.
-    arm: str = "panda"
+    # The arm is the Unitree Z1 (6 DoF, about 5.2 kg). Observation 69, action 19.
+    arm: str = "z1"
     # Wrist camera on the hand. Grasp uses the segmented cube, not the simulator position.
     wrist_camera: bool = False
     wrist_camera_res: tuple[int, int] = (64, 48)

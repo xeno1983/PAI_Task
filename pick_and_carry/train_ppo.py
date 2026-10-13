@@ -60,9 +60,9 @@ def parse_args():
     parser.add_argument("--terrain-steps", action="store_true", help="Add flat treads on the travel strips.")
     parser.add_argument(
         "--arm",
-        choices=("panda", "z1"),
-        default="panda",
-        help="panda keeps the saved 68-dimensional weights. z1 is the lighter arm and starts a new run.",
+        choices=("z1",),
+        default="z1",
+        help="Unitree Z1. Observation 69, action 19.",
     )
     parser.add_argument(
         "--control-split",
@@ -77,9 +77,9 @@ def parse_args():
     )
     parser.add_argument(
         "--curriculum",
-        choices=("carry", "walk", "rough", "haul", "catch"),
+        choices=("carry", "walk", "jump", "stand", "sit", "rough", "haul", "catch"),
         default="carry",
-        help="carry is pick-and-place. walk, rough, haul, and catch are the later stages.",
+        help="carry is pick-and-place. walk, then jump, stand, sit, then rough, haul, and catch.",
     )
     parser.add_argument(
         "--catch-level",
@@ -149,6 +149,7 @@ def _checkpoint_matches(
 ) -> bool:
     if int(blob.get("obs_dim", -1)) != obs_dim or int(blob.get("act_dim", -1)) != act_dim:
         return False
+    # Files written before the Z1-only layout have no arm field and do not load.
     if match_arm and str(blob.get("arm", "panda")) != arm:
         return False
     # Files saved before the split used the fixed trot.
@@ -203,8 +204,8 @@ def resolve_checkpoint(
         if not path.is_file():
             raise SystemExit(f"Checkpoint not found: {path}")
         return path
-    # The walk network does not read the arm, so either arm can seed the other.
-    match_arm = curriculum not in ("walk", "rough")
+    # Old Panda checkpoints name a different arm and do not load.
+    match_arm = True
     if retreat:
         for stage, level in later_stages(curriculum, catch_level):
             found = latest_matching(
@@ -237,19 +238,22 @@ def resolve_checkpoint(
 
 
 def find_locomotion_checkpoint(root: Path | None = None) -> Path | None:
-    """Rough walk if it exists, otherwise the flat walk. The legs stay frozen after that."""
-    observation, action = stage_layouts("walk", 7)
+    """Flat walk if it exists, otherwise the rough walk. The legs stay frozen after that.
+
+    Stand, sit, and jump are not velocity trackers, so they are not used here.
+    """
+    observation, action = stage_layouts("walk", 6)
     obs_dim = layout_dim(observation)
     act_dim = layout_dim(action)
-    for stage, level in (("rough", "static"), ("walk", "static")):
+    for stage, level in (("walk", "static"), ("rough", "static")):
         found = latest_matching(
             stage_log_dir(stage, level, root=root),
             obs_dim,
             act_dim,
             False,
-            "panda",
+            "z1",
             stage,
-            match_arm=False,
+            match_arm=True,
         )
         if found is not None:
             return found
@@ -287,8 +291,6 @@ def missing_play_checkpoint(args, cfg, root: Path | None = None) -> str | None:
         "探した場所: " + "、".join(looked),
         "先にメニューの 2 で、この段階を学習してください。",
     ]
-    if cfg.curriculum in ("haul", "catch"):
-        lines.append("歩行の脚は別の方策なので、腕と進む速さの代わりにはなりません。")
     return "\n".join(lines)
 
 
@@ -342,21 +344,16 @@ def make_config(args) -> EnvConfig:
         curriculum=getattr(args, "curriculum", "carry"),
         catch_level=getattr(args, "catch_level", "static"),
     )
-    if cfg.curriculum == "walk":
+    if cfg.curriculum != "carry":
+        cfg.scripted_gait = False
+        cfg.control_split = "both"
+    if cfg.curriculum in ("walk", "jump", "stand", "sit", "haul", "catch"):
         cfg.terrain = False
         cfg.terrain_steps = False
-        cfg.scripted_gait = False
     elif cfg.curriculum == "rough":
         cfg.terrain = True
-        cfg.scripted_gait = False
-    elif cfg.curriculum in ("haul", "catch"):
-        cfg.terrain = False
-        cfg.terrain_steps = False
-        cfg.scripted_gait = True
-        cfg.control_split = "both"
+    if cfg.curriculum in ("haul", "catch"):
         cfg.catch_hold_steps = max(1, int(round(1.0 / cfg.dt)))
-        legs = find_locomotion_checkpoint()
-        cfg.locomotion_checkpoint = str(legs) if legs is not None else ""
     if args.play and args.ros:
         # One click session should not snap the robot home on the 20 s training timeout.
         cfg.episode_length_s = max(cfg.episode_length_s, float(args.seconds))
@@ -374,14 +371,20 @@ def _level_from_path(path: Path) -> str:
 
 def _stage_rank(stage: str, catch_level: str) -> int:
     """Higher means a harder task on the same ladder. Carry stays at zero."""
-    if stage == "walk":
+    if stage == "stand":
         return 1
-    if stage == "rough":
+    if stage == "sit":
         return 2
-    if stage == "haul":
+    if stage == "walk":
         return 3
+    if stage == "jump":
+        return 4
+    if stage == "rough":
+        return 5
+    if stage == "haul":
+        return 6
     if stage == "catch" and catch_level in ("static", "slow", "random", "noisy"):
-        return 4 + ("static", "slow", "random", "noisy").index(catch_level)
+        return 7 + ("static", "slow", "random", "noisy").index(catch_level)
     return 0
 
 
@@ -460,7 +463,7 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     saved_gait = bool(blob.get("scripted_gait", True))
     saved_arm = str(blob.get("arm", "panda"))
     saved_stage = str(blob.get("curriculum", "carry"))
-    arm_required = cfg.curriculum not in ("walk", "rough")
+    arm_required = True
     same_network = (
         obs_dim == env.num_obs
         and act_dim == env.num_actions
@@ -612,7 +615,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         grip_sum = 0.0
         success_sum = 0.0
         success_count = 0
-        if cfg.curriculum in ("walk", "rough", "haul"):
+        if cfg.curriculum in ("walk", "rough", "haul", "jump", "stand", "sit"):
             progress_key = "tracking"
         elif cfg.curriculum == "catch":
             progress_key = "approach"

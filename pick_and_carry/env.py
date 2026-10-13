@@ -22,7 +22,6 @@ from pick_and_carry.config import (
     FOOT_LINKS,
     LEG_JOINTS,
     EnvConfig,
-    default_urdf_path,
     layout_dim,
     layout_slices,
     leg_limit,
@@ -30,13 +29,16 @@ from pick_and_carry.config import (
 from pick_and_carry.control import arm_gripper_command, gripper_open_amount, learned_leg_target, scripted_trot_pose
 from pick_and_carry.curriculum import (
     BALL_RADIUS,
+    POSTURE_STAGES,
+    POSE_HOLD_SECONDS,
     apply_lateral,
     ball_in_base,
     decode_base_action,
     locomotion_reward,
     manipulation_reward,
-    pack_body_observation,
     pack_walk_observation,
+    pose_reward,
+    posture_achieved,
     sample_ball,
     sample_command,
     stage_layouts,
@@ -103,21 +105,22 @@ class PickAndCarryEnv:
             self.cfg.show_viewer = show_viewer
         if self.cfg.num_envs < 1:
             raise ValueError("num_envs must be >= 1 so every tensor keeps a batch dimension.")
-        if self.cfg.curriculum not in ("carry", "walk", "rough", "haul", "catch"):
-            raise ValueError(f"curriculum must be carry, walk, rough, haul, or catch, got {self.cfg.curriculum}.")
+        if self.cfg.curriculum not in ("carry", "walk", "jump", "stand", "sit", "rough", "haul", "catch"):
+            raise ValueError(
+                f"curriculum must be carry, walk, jump, stand, sit, rough, haul, or catch, got {self.cfg.curriculum}."
+            )
         if self.cfg.catch_level not in ("static", "slow", "random", "noisy"):
             raise ValueError(f"catch_level must be static, slow, random, or noisy, got {self.cfg.catch_level}.")
 
         self.num_envs = self.cfg.num_envs
         self.arm = get_arm(self.cfg.arm)
-        if self.arm.name != "panda":
-            self.cfg.arm_action_scale = self.arm.action_scale
-            self.cfg.arm_kp = self.arm.kp
-            self.cfg.arm_kd = self.arm.kd
-            self.cfg.gripper_kp = self.arm.gripper_kp
-            self.cfg.gripper_kd = self.arm.gripper_kd
-            self.cfg.gripper_open = abs(self.arm.joint_open - self.arm.joint_closed)
-            self.cfg.gripper_closed = self.arm.closed_threshold
+        self.cfg.arm_action_scale = self.arm.action_scale
+        self.cfg.arm_kp = self.arm.kp
+        self.cfg.arm_kd = self.arm.kd
+        self.cfg.gripper_kp = self.arm.gripper_kp
+        self.cfg.gripper_kd = self.arm.gripper_kd
+        self.cfg.gripper_open = abs(self.arm.joint_open - self.arm.joint_closed)
+        self.cfg.gripper_closed = self.arm.closed_threshold
         self.camera = None
         self.wrist_camera = None
         self._recording = False
@@ -165,8 +168,6 @@ class PickAndCarryEnv:
 
         if self.cfg.urdf_path:
             self.urdf_path = self.cfg.urdf_path
-        elif self.arm.name == "panda":
-            self.urdf_path = str(default_urdf_path())
         else:
             self.urdf_path = str(self.arm.urdf_path)
         self.scene = gs.Scene(
@@ -331,7 +332,7 @@ class PickAndCarryEnv:
 
     def _load_leg_policy(self):
         """Frozen walk used by haul and catch. Missing weights keep the scripted trot."""
-        if self.cfg.curriculum not in ("haul", "catch"):
+        if "leg" in self.action_slices or self.cfg.curriculum not in ("haul", "catch"):
             return None
         path = self.cfg.locomotion_checkpoint
         if not path:
@@ -451,6 +452,7 @@ class PickAndCarryEnv:
         self.ball_vel = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
         self.base_lin_vel_world = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
         self.hold_steps = torch.zeros((n,), dtype=torch.int32, device=self.device)
+        self.was_airborne = torch.zeros((n,), dtype=torch.bool, device=self.device)
         self.command_timer = torch.zeros((n,), dtype=torch.int32, device=self.device)
         self._ball_velocity_warning = False
         self.gravity = torch.tensor((0.0, 0.0, -1.0), dtype=torch.float32, device=self.device)
@@ -498,6 +500,9 @@ class PickAndCarryEnv:
         if self.cfg.curriculum in ("walk", "rough"):
             success = timeout & ~fallen
             done = fallen | timeout
+        elif self.cfg.curriculum in POSTURE_STAGES:
+            success = self._posture_success(fallen)
+            done = fallen | timeout | success
         elif self.cfg.curriculum == "haul":
             dropped = ~self.grasped
             success = timeout & ~fallen & self.grasped
@@ -545,6 +550,21 @@ class PickAndCarryEnv:
                 command=self.command,
                 projected_gravity=self.projected_gravity,
                 base_height=self.base_pos[:, 2],
+                actions=self.actions,
+                max_tilt_deg=self.cfg.max_tilt_deg,
+                min_base_height=self.cfg.min_base_height,
+                dt=self.cfg.dt,
+            )
+            return reward, terms, torch.zeros_like(fallen), fallen
+        if self.cfg.curriculum in POSTURE_STAGES:
+            reward, terms, fallen = pose_reward(
+                self.cfg.curriculum,
+                base_height=self.base_pos[:, 2],
+                base_lin_vel=self.base_lin_vel,
+                base_lin_vel_world=self.base_lin_vel_world,
+                base_ang_vel=self.base_ang_vel,
+                projected_gravity=self.projected_gravity,
+                foot_contact=self.foot_contact,
                 actions=self.actions,
                 max_tilt_deg=self.cfg.max_tilt_deg,
                 min_base_height=self.cfg.min_base_height,
@@ -625,7 +645,7 @@ class PickAndCarryEnv:
         )
         if self.cfg.curriculum == "haul":
             self.phase.fill_(2)
-        elif self.cfg.curriculum in ("walk", "rough", "catch"):
+        elif self.cfg.curriculum in ("walk", "rough", "catch", *POSTURE_STAGES):
             self.phase.zero_()
         if self.cfg.cycle_supplies:
             # The hand reaches forward of the body, so pick up and set down only
@@ -1090,61 +1110,40 @@ class PickAndCarryEnv:
         fingers = self._finger_slice()
         gripper_pos = self.dof_pos[:, fingers].mean(dim=-1, keepdim=True)
         gripper_vel = self.dof_vel[:, fingers].mean(dim=-1, keepdim=True)
-        if self.cfg.curriculum in ("walk", "rough"):
-            self.obs_buf = pack_walk_observation(
-                leg_pos=self.dof_pos[:, leg],
-                leg_vel=self.dof_vel[:, leg],
-                projected_gravity=self.projected_gravity,
-                base_lin_vel=self.base_lin_vel,
-                base_ang_vel=self.base_ang_vel,
-                base_height=self.base_pos[:, 2:3],
-                foot_contact=self.foot_contact,
-                command=self.command,
+        zeros3 = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        if self.cfg.curriculum == "carry":
+            obj_b = object_in_base(
+                self.obj_pos,
+                self.base_pos,
+                self.base_quat,
+                use_wrist=self.cfg.wrist_camera,
+                wrist_pos=self.wrist_pos,
+                wrist_visible=self.wrist_visible,
             )
-            if self.obs_buf.shape[-1] != self.num_obs:
-                raise RuntimeError(
-                    f"Observation dim {self.obs_buf.shape[-1]} does not match {self.num_obs} for {self.cfg.curriculum}."
-                )
-            return
-        if self.cfg.curriculum in ("haul", "catch"):
-            if self.cfg.curriculum == "catch":
-                obj_b, obj_v = ball_in_base(
-                    self.ball_pos, self.ball_vel, self.base_pos, self.base_quat, self.cfg.catch_level
-                )
-            else:
-                obj_b = world_to_base(self.obj_pos, self.base_pos, self.base_quat)
-                obj_v = torch.zeros_like(obj_b)
-            self.obs_buf = pack_body_observation(
-                leg_pos=self.dof_pos[:, leg],
-                leg_vel=self.dof_vel[:, leg],
-                projected_gravity=self.projected_gravity,
-                base_lin_vel=self.base_lin_vel,
-                base_ang_vel=self.base_ang_vel,
-                base_height=self.base_pos[:, 2:3],
-                foot_contact=self.foot_contact,
-                arm_pos=self.dof_pos[:, arm],
-                arm_vel=self.dof_vel[:, arm],
-                gripper_pos=gripper_pos,
-                gripper_vel=gripper_vel,
-                ee_pos=world_to_base(self.ee_pos, self.base_pos, self.base_quat),
-                object_pos=obj_b,
-                object_vel=obj_v,
-                command=self.command,
-                grasped=self.grasped,
+            goal_b = world_to_base(self.goal_pos, self.base_pos, self.base_quat)
+            command = zeros3
+            phase = self.phase
+            grasped = self.grasped
+        elif self.cfg.curriculum == "catch":
+            obj_b, _obj_v = ball_in_base(
+                self.ball_pos, self.ball_vel, self.base_pos, self.base_quat, self.cfg.catch_level
             )
-            if self.obs_buf.shape[-1] != self.num_obs:
-                raise RuntimeError(
-                    f"Observation dim {self.obs_buf.shape[-1]} does not match {self.num_obs} for {self.cfg.curriculum}."
-                )
-            return
-        obj_b = object_in_base(
-            self.obj_pos,
-            self.base_pos,
-            self.base_quat,
-            use_wrist=self.cfg.wrist_camera,
-            wrist_pos=self.wrist_pos,
-            wrist_visible=self.wrist_visible,
-        )
+            goal_b = zeros3
+            command = zeros3
+            phase = self.phase
+            grasped = self.grasped
+        elif self.cfg.curriculum == "haul":
+            obj_b = world_to_base(self.obj_pos, self.base_pos, self.base_quat)
+            goal_b = zeros3
+            command = self.command
+            phase = self.phase
+            grasped = self.grasped
+        else:
+            obj_b = zeros3
+            goal_b = zeros3
+            command = self.command if self.cfg.curriculum in ("walk", "rough") else zeros3
+            phase = self.phase
+            grasped = torch.zeros_like(self.grasped)
         self.obs_buf = pack_observation(
             leg_pos=self.dof_pos[:, leg],
             leg_vel=self.dof_vel[:, leg],
@@ -1159,12 +1158,15 @@ class PickAndCarryEnv:
             gripper_vel=gripper_vel,
             ee_pos=world_to_base(self.ee_pos, self.base_pos, self.base_quat),
             object_pos=obj_b,
-            goal_pos=world_to_base(self.goal_pos, self.base_pos, self.base_quat),
-            grasped=self.grasped,
-            phase=self.phase,
+            goal_pos=goal_b,
+            grasped=grasped,
+            phase=phase,
+            command=command,
         )
         if self.obs_buf.shape[-1] != self.num_obs:
-            raise RuntimeError(f"Observation dim {self.obs_buf.shape[-1]} does not match {self.num_obs} for arm {self.arm.name}.")
+            raise RuntimeError(
+                f"Observation dim {self.obs_buf.shape[-1]} does not match {self.num_obs} for {self.cfg.curriculum}."
+            )
 
     def _reset_idx(self, envs_idx) -> None:
         idx = None if envs_idx is None else self._index(envs_idx)
@@ -1233,6 +1235,47 @@ class PickAndCarryEnv:
         self._pin_goal(idx)
         self._reset_curriculum(idx, base_pos)
 
+    def _posture_success(self, fallen: torch.Tensor) -> torch.Tensor:
+        """Hold a stand or a sit for one second. A jump succeeds on the landing."""
+        achieved, airborne = posture_achieved(
+            self.cfg.curriculum,
+            base_height=self.base_pos[:, 2],
+            base_lin_vel=self.base_lin_vel,
+            base_ang_vel=self.base_ang_vel,
+            foot_contact=self.foot_contact,
+            fallen=fallen,
+            was_airborne=self.was_airborne,
+        )
+        self.was_airborne = self.was_airborne | airborne
+        if self.cfg.curriculum == "jump":
+            return achieved
+        self.hold_steps = torch.where(achieved, self.hold_steps + 1, torch.zeros_like(self.hold_steps))
+        need = max(1, int(round(POSE_HOLD_SECONDS / self.cfg.dt)))
+        return self.hold_steps >= need
+
+    def _spawn_crouched(self, idx, count: int, base_pos: torch.Tensor) -> None:
+        """Start the stand-up task folded, inside the same joint range the policy can reach."""
+        leg = self.default_leg.expand(count, -1).clone()
+        leg[:, 1::3] = leg[:, 1::3] + 0.45
+        leg[:, 2::3] = leg[:, 2::3] - 0.45
+        lower = self.leg_lower.expand(count, -1)
+        upper = self.leg_upper.expand(count, -1)
+        leg = torch.maximum(torch.minimum(leg, upper), lower)
+        arm = self.default_arm.expand(count, -1)
+        fingers = torch.full(
+            (count, len(self.finger_names)),
+            0.5 * self.cfg.gripper_open,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        dof_pos = torch.cat((leg, arm, fingers), dim=-1)
+        posed = base_pos.clone()
+        posed[:, 2] = 0.30
+        self.robot.set_pos(posed, envs_idx=idx, zero_velocity=True)
+        self.robot.set_dofs_position(dof_pos, self.dof_idx, envs_idx=idx, zero_velocity=True)
+        self._write_rows(self.base_pos, posed, idx)
+        self._write_rows(self.dof_pos, dof_pos, idx)
+
     def _reset_curriculum(self, idx, base_pos: torch.Tensor) -> None:
         count = base_pos.shape[0]
         if self.cfg.curriculum in ("walk", "rough", "haul"):
@@ -1240,6 +1283,12 @@ class PickAndCarryEnv:
             self._write_rows(self.command, command, idx)
         if self.cfg.curriculum in ("walk", "rough"):
             self._park_cube(idx, count)
+        if self.cfg.curriculum in POSTURE_STAGES:
+            self._park_cube(idx, count)
+            self._write_rows(self.command, torch.zeros((count, 3), dtype=torch.float32, device=self.device), idx)
+            self._write_rows(self.was_airborne, torch.zeros(count, dtype=torch.bool, device=self.device), idx)
+        if self.cfg.curriculum == "stand":
+            self._spawn_crouched(idx, count, base_pos)
         if self.cfg.curriculum == "haul":
             held = base_pos.clone()
             held[:, 0] = held[:, 0] + 0.32

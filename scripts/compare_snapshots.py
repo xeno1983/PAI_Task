@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--terrain-amplitude", type=float, default=None)
     parser.add_argument("--terrain-steps", action="store_true")
-    parser.add_argument("--arm", choices=("panda", "z1"), default="panda")
+    parser.add_argument("--arm", choices=("z1",), default="z1")
     parser.add_argument("--control-split", choices=("split", "walk", "both"), default="split")
     parser.add_argument("--wrist-camera", action="store_true")
     return parser.parse_args()

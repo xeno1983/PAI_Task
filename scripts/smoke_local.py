@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument("--record", type=str, default=None, help="Save an mp4 of the run to this path.")
     parser.add_argument("--seconds", type=float, default=None, help="How long to hold the standing pose.")
     parser.add_argument("--steps", type=int, default=None, help="Step count. Overrides --seconds.")
-    parser.add_argument("--arm", choices=("panda", "z1"), default="panda")
+    parser.add_argument("--arm", choices=("z1",), default="z1")
     args = parser.parse_args()
     if args.steps is not None:
         steps = args.steps

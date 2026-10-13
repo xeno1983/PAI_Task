@@ -31,9 +31,11 @@ WHITE = (255, 255, 255)
 PREFERRED = (
     "PickAndCarry_smoke.mp4",
     "PickAndCarry_z1_smoke.mp4",
+    "PickAndCarry_stand.mp4",
+    "PickAndCarry_sit.mp4",
     "PickAndCarry_walk.mp4",
+    "PickAndCarry_jump.mp4",
     "PickAndCarry_rough.mp4",
-    "PickAndCarry_ppo.mp4",
     "PickAndCarry_z1.mp4",
     "PickAndCarry_haul.mp4",
     "PickAndCarry_catch_static.mp4",
@@ -48,11 +50,14 @@ PREFERRED = (
 TITLES = {
     "PickAndCarry_smoke.mp4": ("起動確認", "ロボットが足場に立つかを見ます"),
     "PickAndCarry_z1_smoke.mp4": ("起動確認（Z1）", "軽い腕でも足場に立つかを見ます"),
+    "PickAndCarry_stand.mp4": ("立つ", "しゃがんだ姿勢から立ち上がります"),
+    "PickAndCarry_sit.mp4": ("座る", "体を下げて静止します"),
     "PickAndCarry_walk.mp4": ("平地の歩行", "速度の指令に合わせて歩く方策です"),
-    "PickAndCarry_rough.mp4": ("不整地の歩行", "平地の重みから続けた歩行です"),
+    "PickAndCarry_jump.mp4": ("ジャンプ", "歩行の続きで、足を離して着地します"),
+    "PickAndCarry_rough.mp4": ("不整地の歩行", "ジャンプの重みから続けた歩行です"),
     "PickAndCarry_ppo.mp4": ("箱運び", "保存した重みで、拾って目標へ置きます"),
     "PickAndCarry_z1.mp4": ("箱運び（Z1）", "Z1 の重みで、拾って目標へ置きます"),
-    "PickAndCarry_haul.mp4": ("歩きながら持つ", "覚えた脚で歩き、腕は箱を持ったままです"),
+    "PickAndCarry_haul.mp4": ("歩きながら持つ", "不整地の重みから、箱を持ったまま歩きます"),
     "PickAndCarry_catch_static.mp4": ("キャッチ（静止）", "手の前で止まっているボールを掴みます"),
     "PickAndCarry_catch_slow.mp4": ("キャッチ（ゆっくり）", "ゆっくり転がるボールを掴みます"),
     "PickAndCarry_catch_random.mp4": ("キャッチ（ばらす）", "速さと方向がばらつくボールを掴みます"),
@@ -64,21 +69,21 @@ TITLES = {
 }
 OUTPUT_NAME = "PickAndCarry_presentation.mp4"
 SLIDE_NARRATION = (
-    "学習条件です。ユニットリーのゴーツーに、フランカのパンダ、またはゼットワンを載せます。"
-    "学習はピーピーオーです。箱運びは、パンダなら観測68、制御20。ゼットワンなら観測66、制御19です。"
-    "形が違う重みは続きに使いません。パンダは ppo walk、ゼットワンは ppo z1 から再開します。"
+    "学習条件です。ユニットリーのゴーツーに、ユニットリーのゼットワンを載せます。"
+    "学習はピーピーオーです。全段階が観測69、制御19です。"
+    "腕が違う古い保存は続きに使いません。"
     "脚と腕と指は位置で動かし、箱運びの段階は、歩く、拾う、運ぶ、置く、の4つです。",
     "問題設定です。平らな場所から出発し、不整地を渡って箱を拾います。"
     "もう一度不整地を渡り、目標に置きます。箱と目標の下は平らです。"
     "茶色の段は、段差を選んだときだけで、箱の前に1段、置く前に2段です。"
     "1試行は20秒です。目標の近くに低く置くと成功で、大きく傾くと転倒です。",
-    "段階的な学習です。最初は平地で、前後、左右、旋回の指令に合わせて歩きます。"
-    "次の不整地は、その重みから続けます。箱運びは別のネットワークで、今までの保存を使います。"
-    "歩きながら持つ段階では、覚えた脚を固定し、腕と進む速さを学びます。箱は手に固定しています。"
-    "最後は転がるボールです。静止、ゆっくり、ばらす、ノイズ、の順で、近いレベルの重みから続けます。"
+    "段階的な学習です。最初はしゃがんだ姿勢から立ち上がり、次に体を下げて座ります。"
+    "そのあと、歩行、ジャンプ、不整地、歩きながら持つ、箱運び、転がるボールの順です。"
+    "同じ大きさの観測と行動なので、直前の段階の重みを初期値にします。"
+    "箱運びは、歩きながら持つ段階の重みから続けます。キャッチは箱運びの重みから続けます。"
     "1秒保持すると成功です。次の段階へ進むかは、録画を見て決めます。人の点数で報酬は置き換えていません。",
     "学習の工夫です。歩行と把持を一度に覚えさせず、段階に分けています。"
-    "形が同じ段階だけ、前の重みを引き継ぎます。形が違うときは、覚えた歩行を脚として固定し、腕と進む速さだけを新しく学びます。"
+    "同じ観測と行動です。直前の段階の重みを初期値にします。"
     "報酬は、成功した瞬間だけではなく、毎ステップの接近と、速度の一致でも点を出します。"
     "不整地で成績が低いあいだは平地に戻し、キャッチで成功が少ないあいだは易しいボールに戻します。"
     "8回続いて回復したら、選んだ課題まで上げます。メニューからは、上の段階の重みで易しい課題を学び直すこともできます。",
@@ -98,11 +103,14 @@ OPENING_SLIDES = 4
 VIDEO_NARRATION = {
     "PickAndCarry_smoke.mp4": "起動確認です。ロボットが足場に立つかを見ます。",
     "PickAndCarry_z1_smoke.mp4": "ゼットワンでの起動確認です。軽い腕でも足場に立つかを見ます。",
-    "PickAndCarry_walk.mp4": "平地の歩行です。速度の指令に合わせて歩く方策を再生しています。",
-    "PickAndCarry_rough.mp4": "不整地の歩行です。平地で覚えた重みから続けた方策です。",
+    "PickAndCarry_stand.mp4": "立つ段階です。しゃがんだ姿勢から立ち上がる様子です。",
+    "PickAndCarry_sit.mp4": "座る段階です。立つの重みから続けて、体を下げて静止する様子です。",
+    "PickAndCarry_walk.mp4": "平地の歩行です。座るの重みから続けた方策を再生しています。",
+    "PickAndCarry_jump.mp4": "ジャンプです。平地の歩行から続け、足を離して着地する様子です。",
+    "PickAndCarry_rough.mp4": "不整地の歩行です。ジャンプの重みから続けた方策です。",
     "PickAndCarry_ppo.mp4": "箱運びです。保存した重みで、不整地を渡って箱を拾い、目標へ運ぶ様子です。",
-    "PickAndCarry_z1.mp4": "ゼットワンの箱運びです。パンダの重みは使わず、ゼットワンの保存で再生しています。",
-    "PickAndCarry_haul.mp4": "歩きながら持つ段階です。脚は覚えた歩行で、腕は箱を持ったまま進みます。",
+    "PickAndCarry_z1.mp4": "ゼットワンの箱運びです。歩きながら持つ段階の重みから続けた方策です。",
+    "PickAndCarry_haul.mp4": "歩きながら持つ段階です。不整地の重みから、箱を持ったまま歩きます。",
     "PickAndCarry_catch_static.mp4": "キャッチの静止です。手の前で止まっているボールを、1秒つかむ様子です。",
     "PickAndCarry_catch_slow.mp4": "キャッチのゆっくりです。まっすぐ転がってくるボールをつかむ様子です。",
     "PickAndCarry_catch_random.mp4": "キャッチのばらす段階です。速さと方向が毎回変わるボールをつかむ様子です。",
@@ -121,10 +129,12 @@ def presentation_videos(folder: Path) -> list[Path]:
 
 
 STAGE_CLIPS = (
+    ("PickAndCarry_stand.mp4", "立つ"),
+    ("PickAndCarry_sit.mp4", "座る"),
     ("PickAndCarry_walk.mp4", "平地の歩行"),
+    ("PickAndCarry_jump.mp4", "ジャンプ"),
     ("PickAndCarry_rough.mp4", "不整地の歩行"),
-    ("PickAndCarry_ppo.mp4", "箱運び（Panda）"),
-    ("PickAndCarry_z1.mp4", "箱運び（Z1）"),
+    ("PickAndCarry_z1.mp4", "箱運び"),
     ("PickAndCarry_haul.mp4", "歩きながら持つ"),
     ("PickAndCarry_catch_static.mp4", "キャッチ（静止）"),
     ("PickAndCarry_catch_slow.mp4", "キャッチ（ゆっくり）"),

@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument("--seconds", type=float, default=20.0)
     parser.add_argument("--terrain-amplitude", type=float, default=None)
     parser.add_argument("--terrain-steps", action="store_true")
-    parser.add_argument("--arm", choices=("panda", "z1"), default="panda")
+    parser.add_argument("--arm", choices=("z1",), default="z1")
     parser.add_argument("--control-split", choices=("split", "walk", "both"), default="split")
     parser.add_argument("--wrist-camera", action="store_true")
     parser.add_argument("--ros", action="store_true", help="While playing, accept rviz2 clicks as the drop point.")

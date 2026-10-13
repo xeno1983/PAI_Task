@@ -1,7 +1,9 @@
-"""Pack the 68-dimensional observation. Independent of Genesis.
+"""Pack the shared observation. Independent of Genesis.
 
-The object channel is the cube in the base frame. With the wrist camera it is
-the detected centroid, or ``(0, 0, -1)`` when the cube is not in view.
+Every curriculum stage uses this vector. Tasks that have no box or no speed
+target leave those channels at zero. The object channel is the cube in the
+base frame. With the wrist camera it is the detected centroid, or ``(0, 0, -1)``
+when the cube is not in view.
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ def pack_observation(
     goal_pos: torch.Tensor,
     grasped: torch.Tensor,
     phase: torch.Tensor,
+    command: torch.Tensor,
 ) -> torch.Tensor:
     """Concatenate one observation row per environment. ``phase`` is an integer 0..3."""
     return torch.cat(
@@ -76,6 +79,7 @@ def pack_observation(
             goal_pos,
             grasped.to(dtype=torch.float32).unsqueeze(-1),
             torch.nn.functional.one_hot(phase.long(), num_classes=4).to(dtype=torch.float32),
+            command,
         ),
         dim=-1,
     )
