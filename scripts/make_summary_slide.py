@@ -203,7 +203,7 @@ def add_problem_slide(prs) -> None:
 
 
 def _load_metrics() -> list[dict]:
-    path = Path(__file__).resolve().parents[1] / "logs" / "ppo_walk" / "metrics.jsonl"
+    path = Path(__file__).resolve().parents[1] / "logs" / "ppo_z1" / "metrics.jsonl"
     if not path.is_file():
         return []
     rows = []

@@ -31,7 +31,7 @@ SKILL_ORDER = ("stand", "sit", "walk", "jump", "rough", "haul", "carry")
 
 
 def _prior_skills(stage: str) -> list[tuple[str, str]]:
-    """Earlier stages in the curriculum, nearest first. All share one network per arm."""
+    """Earlier stages in the curriculum, nearest first."""
     if stage not in SKILL_ORDER:
         return []
     index = SKILL_ORDER.index(stage)
@@ -101,8 +101,9 @@ def retreat_choice(
 
 
 def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "z1", root: Path | None = None) -> Path:
-    """Folder used by the launcher for this stage. The arm is always the Z1."""
-    del arm
+    """Folder used by the launcher for this stage."""
+    if arm != "z1":
+        raise ValueError(f"the arm is z1, got {arm}.")
     if stage == "carry":
         relative = "logs/ppo_z1"
     elif stage == "walk":
@@ -128,7 +129,7 @@ def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "z1", root
 
 
 def stage_layouts(stage: str, arm_dof: int) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str, int], ...]]:
-    """Observation and action layout shared by every stage of this arm."""
+    """Observation and action layout. Every stage uses the same one."""
     if stage not in STAGES:
         raise ValueError(f"unknown curriculum stage {stage}")
     return layouts(arm_dof)
@@ -142,12 +143,6 @@ def sample_command(count: int, device: torch.device | None = None) -> torch.Tens
     left = torch.empty(count, device=device).uniform_(-0.20, 0.20)
     yaw = torch.empty(count, device=device).uniform_(-0.60, 0.60)
     return torch.stack((forward, left, yaw), dim=-1)
-
-
-def decode_base_action(raw: torch.Tensor) -> torch.Tensor:
-    """Map policy outputs in [-1, 1] to forward, left, and yaw rates."""
-    scales = raw.new_tensor((0.45, 0.25, 0.80))
-    return raw.clamp(-1.0, 1.0) * scales
 
 
 def sample_ball(
@@ -195,85 +190,6 @@ def obscure_motion(position: torch.Tensor, velocity: torch.Tensor, level: str) -
     if level != "noisy":
         return position, velocity
     return position + torch.randn_like(position) * 0.03, velocity + torch.randn_like(velocity) * 0.05
-
-
-def apply_lateral(pose: torch.Tensor, left_speed: torch.Tensor) -> torch.Tensor:
-    """Small hip bias so a sideways command is not only a reward."""
-    steered = pose.clone()
-    lean = (left_speed * 0.35).clamp(-0.18, 0.18)
-    steered[:, 0] = steered[:, 0] + lean
-    steered[:, 3] = steered[:, 3] - lean
-    steered[:, 6] = steered[:, 6] + lean
-    steered[:, 9] = steered[:, 9] - lean
-    return steered
-
-
-def pack_walk_observation(
-    *,
-    leg_pos: torch.Tensor,
-    leg_vel: torch.Tensor,
-    projected_gravity: torch.Tensor,
-    base_lin_vel: torch.Tensor,
-    base_ang_vel: torch.Tensor,
-    base_height: torch.Tensor,
-    foot_contact: torch.Tensor,
-    command: torch.Tensor,
-) -> torch.Tensor:
-    return torch.cat(
-        (
-            leg_pos,
-            leg_vel * 0.05,
-            projected_gravity,
-            base_lin_vel * 2.0,
-            base_ang_vel * 0.25,
-            base_height,
-            foot_contact,
-            command,
-        ),
-        dim=-1,
-    )
-
-
-def pack_body_observation(
-    *,
-    leg_pos: torch.Tensor,
-    leg_vel: torch.Tensor,
-    projected_gravity: torch.Tensor,
-    base_lin_vel: torch.Tensor,
-    base_ang_vel: torch.Tensor,
-    base_height: torch.Tensor,
-    foot_contact: torch.Tensor,
-    arm_pos: torch.Tensor,
-    arm_vel: torch.Tensor,
-    gripper_pos: torch.Tensor,
-    gripper_vel: torch.Tensor,
-    ee_pos: torch.Tensor,
-    object_pos: torch.Tensor,
-    object_vel: torch.Tensor,
-    command: torch.Tensor,
-    grasped: torch.Tensor,
-) -> torch.Tensor:
-    return torch.cat(
-        (
-            leg_pos,
-            leg_vel * 0.05,
-            projected_gravity,
-            base_lin_vel * 2.0,
-            base_ang_vel * 0.25,
-            base_height,
-            foot_contact,
-            arm_pos,
-            arm_vel * 0.05,
-            gripper_pos,
-            gripper_vel * 0.05,
-            ee_pos,
-            object_pos,
-            object_vel * 0.5,
-            command,
-            grasped.to(dtype=torch.float32).unsqueeze(-1),
-        ),
-        dim=-1,
-    )
 
 
 def locomotion_reward(

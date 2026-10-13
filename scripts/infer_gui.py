@@ -2,7 +2,7 @@
 
 The Genesis viewer is not opened. After both clicks, inference records an mp4.
 
-    .venv\\Scripts\\python scripts\\infer_gui.py --log-dir logs/ppo_walk --record out.mp4
+    .venv\\Scripts\\python scripts\\infer_gui.py --log-dir logs/ppo_z1 --record out.mp4
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def latest_iteration(log_dir: Path) -> int:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Click supply and drop points, then run inference.")
-    parser.add_argument("--log-dir", type=Path, default=Path("logs/ppo_walk"))
+    parser.add_argument("--log-dir", type=Path, default=Path("logs/ppo_z1"))
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--seconds", type=float, default=20.0)
     parser.add_argument("--terrain-amplitude", type=float, default=None)

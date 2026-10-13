@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from pick_and_carry.arms import get_arm, layouts
+from pick_and_carry.arms import get_arm
 from pick_and_carry.config import (
     DEFAULT_LEG_ANGLES,
     FOOT_LINKS,
@@ -31,12 +31,9 @@ from pick_and_carry.curriculum import (
     BALL_RADIUS,
     POSTURE_STAGES,
     POSE_HOLD_SECONDS,
-    apply_lateral,
     ball_in_base,
-    decode_base_action,
     locomotion_reward,
     manipulation_reward,
-    pack_walk_observation,
     pose_reward,
     posture_achieved,
     sample_ball,
@@ -126,10 +123,7 @@ class PickAndCarryEnv:
         self._recording = False
         self._wrist_warning_sent = False
         self._overview_warning_sent = False
-        obs_layout, action_layout = layouts(self.arm.dof)
-        staged = stage_layouts(self.cfg.curriculum, self.arm.dof)
-        if staged is not None:
-            obs_layout, action_layout = staged
+        obs_layout, action_layout = stage_layouts(self.cfg.curriculum, self.arm.dof)
         self.num_obs = layout_dim(obs_layout)
         self.num_actions = layout_dim(action_layout)
         self.obs_slices = layout_slices(obs_layout)
@@ -327,34 +321,7 @@ class PickAndCarryEnv:
         self._configure_pd()
         self._allocate_buffers()
         self.extras: dict = {}
-        self.leg_policy = self._load_leg_policy()
         self.reset()
-
-    def _load_leg_policy(self):
-        """Frozen walk used by haul and catch. Missing weights keep the scripted trot."""
-        if "leg" in self.action_slices or self.cfg.curriculum not in ("haul", "catch"):
-            return None
-        path = self.cfg.locomotion_checkpoint
-        if not path:
-            print(
-                "歩行の重みがまだないので、脚は決まったトロットです。先に歩行を学習すると、その脚を使います。",
-                flush=True,
-            )
-            return None
-        from pick_and_carry.agents import ActorCritic
-
-        try:
-            blob = torch.load(path, map_location=self.device, weights_only=False)
-        except TypeError:
-            blob = torch.load(path, map_location=self.device)
-        observation, action = stage_layouts("walk", self.arm.dof)
-        policy = ActorCritic(layout_dim(observation), layout_dim(action)).to(self.device)
-        policy.load_state_dict(blob["model"])
-        policy.eval()
-        for parameter in policy.parameters():
-            parameter.requires_grad_(False)
-        print(f"脚は {path} の歩行を使います。", flush=True)
-        return policy
 
     def _has_joint(self, name: str) -> bool:
         try:
@@ -447,7 +414,6 @@ class PickAndCarryEnv:
         self.wrist_pos = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
         self.wrist_visible = torch.zeros((n,), dtype=torch.bool, device=self.device)
         self.command = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
-        self.body_command = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
         self.ball_pos = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
         self.ball_vel = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
         self.base_lin_vel_world = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
@@ -692,46 +658,6 @@ class PickAndCarryEnv:
         self.prev_base_dist[idx] = dist_base[idx]
 
     def _apply_action(self, action: torch.Tensor) -> None:
-        if "leg" not in self.action_slices:
-            self.body_command = decode_base_action(action[:, self.action_slices["base"]])
-            if self.leg_policy is not None:
-                leg_act = self._frozen_leg_action()
-            else:
-                leg_act = torch.zeros((self.num_envs, 12), dtype=torch.float32, device=self.device)
-            leg_target = self._leg_command(leg_act)
-            arm_act = action[:, self.action_slices["arm"]]
-            grip_act = action[:, self.action_slices["gripper"]]
-            arm_target, opening = arm_gripper_command(
-                arm_act,
-                grip_act,
-                self.default_arm,
-                torch.ones_like(self.phase),
-                control_split="both",
-                arm_scale=self.cfg.arm_action_scale,
-                gripper_open=self.arm.joint_open,
-                gripper_closed=self.arm.joint_closed,
-                lower=self.arm_lower,
-                upper=self.arm_upper,
-            )
-            finger_target = opening.unsqueeze(-1).expand(-1, len(self.finger_names))
-            target = torch.cat((leg_target, arm_target, finger_target), dim=-1)
-            if self.cfg.control_mode == "position":
-                self.robot.control_dofs_position(target, self.dof_idx)
-            return
-        if "arm" not in self.action_slices:
-            leg_act = action[:, self.action_slices["leg"]]
-            leg_target = self._leg_command(leg_act)
-            arm_target = self.default_arm.expand(self.num_envs, -1)
-            fingers = torch.full(
-                (self.num_envs, len(self.finger_names)),
-                self.arm.joint_open,
-                dtype=torch.float32,
-                device=self.device,
-            )
-            target = torch.cat((leg_target, arm_target, fingers), dim=-1)
-            if self.cfg.control_mode == "position":
-                self.robot.control_dofs_position(target, self.dof_idx)
-            return
         leg_act = action[:, self.action_slices["leg"]]
         arm_act = action[:, self.action_slices["arm"]]
         grip_act = action[:, self.action_slices["gripper"]]
@@ -759,36 +685,10 @@ class PickAndCarryEnv:
         force = torch.cat((leg_torque, arm_torque, finger_torque), dim=-1)
         self.robot.control_dofs_force(force, self.dof_idx)
 
-    def _frozen_leg_action(self) -> torch.Tensor:
-        """Leg joints from the walk that was already learned. The command is this stage's body velocity."""
-        leg = slice(0, len(self.leg_names))
-        observation = pack_walk_observation(
-            leg_pos=self.dof_pos[:, leg],
-            leg_vel=self.dof_vel[:, leg],
-            projected_gravity=self.projected_gravity,
-            base_lin_vel=self.base_lin_vel,
-            base_ang_vel=self.base_ang_vel,
-            base_height=self.base_pos[:, 2:3],
-            foot_contact=self.foot_contact,
-            command=self.body_command,
-        )
-        with torch.no_grad():
-            return self.leg_policy.act_mean(observation)
-
     def _leg_command(self, leg_act: torch.Tensor) -> torch.Tensor:
         """Legs while walking. Learned by default; a fixed trot only if scripted_gait is set."""
         if self.cfg.freeze_legs:
             return self.default_leg.expand(leg_act.shape[0], -1).clone()
-        if self.leg_policy is not None:
-            return learned_leg_target(
-                leg_act,
-                self.default_leg,
-                torch.ones_like(self.phase, dtype=torch.bool),
-                control_split="both",
-                action_scale=self.cfg.leg_action_scale,
-                lower=self.leg_lower,
-                upper=self.leg_upper,
-            )
         walk = (self.phase == 0) | (self.phase == 2)
         if not self.cfg.scripted_gait:
             return learned_leg_target(
@@ -802,11 +702,7 @@ class PickAndCarryEnv:
             )
         yaw_err = None
         speed = None
-        if self.cfg.curriculum in ("haul", "catch"):
-            yaw_err = self.body_command[:, 2]
-            speed = (self.body_command[:, 0] / 0.45).clamp(0.0, 1.0)
-            walk = self.body_command[:, 0] > 0.08
-        elif self.cfg.cycle_supplies:
+        if self.cfg.cycle_supplies:
             target = torch.where(self.grasped[:, None], self.goal_pos, self.obj_pos)
             _, _, yaw_err = self._aim_error(target)
         pose, self.gait_blend, self.gait_time = scripted_trot_pose(
@@ -823,8 +719,6 @@ class PickAndCarryEnv:
             yaw_err=yaw_err,
             speed=speed,
         )
-        if self.cfg.curriculum in ("haul", "catch"):
-            pose = apply_lateral(pose, self.body_command[:, 1])
         return pose
 
     def _base_yaw(self) -> torch.Tensor:

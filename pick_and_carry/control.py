@@ -32,7 +32,7 @@ def learned_leg_target(
 
 
 def gripper_open_amount(joint: torch.Tensor, joint_open: float, joint_closed: float) -> torch.Tensor:
-    """How far the gripper is from closed. Zero is closed. Panda is metres, Z1 is radians."""
+    """How far the gripper is from closed. Zero is closed. The Z1 joint is in radians."""
     direction = 1.0 if joint_open >= joint_closed else -1.0
     return (joint - joint_closed) * direction
 
@@ -53,8 +53,7 @@ def arm_gripper_command(
     """Arm joint targets and the gripper joint position.
 
     ``gripper_open`` and ``gripper_closed`` are joint positions, not the reward width.
-    Action -1 closes and action +1 opens. For the Panda both fingers use metres and
-    closed is 0, so this matches the previous mapping.
+    Action -1 closes and action +1 opens.
     """
     walk = (phase == 0) | (phase == 2)
     arm_target = (default_arm + arm_act * arm_scale).clamp(lower, upper)

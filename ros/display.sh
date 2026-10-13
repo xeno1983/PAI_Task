@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Open rviz2 for inference. The Windows launcher starts this in WSL.
-#   bash ros/display.sh panda
-#   bash ros/display.sh z1
+#   bash ros/display.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -10,12 +9,11 @@ if [[ -z "${DISPLAY:-}" && -S /mnt/wslg/.X11-unix/X0 ]]; then
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/mnt/wslg/runtime-dir}"
   export PULSE_SERVER="${PULSE_SERVER:-/mnt/wslg/PulseServer}"
 fi
-ARM="${1:-panda}"
+ARM="${1:-z1}"
 case "$ARM" in
   z1) URDF="$ROOT/assets/urdf/quadruped_z1.urdf" ;;
-  panda) URDF="$ROOT/assets/urdf/quadruped_arm.urdf" ;;
   *)
-    echo "腕は panda または z1 です: $ARM" >&2
+    echo "腕は z1 です: $ARM" >&2
     exit 1
     ;;
 esac

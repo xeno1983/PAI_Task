@@ -10,7 +10,6 @@ from pick_and_carry.config import layout_dim
 from pick_and_carry.curriculum import (
     SIT_HEIGHT,
     STAND_HEIGHT,
-    decode_base_action,
     earlier_stages,
     later_stages,
     locomotion_reward,
@@ -37,13 +36,6 @@ class LayoutTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
-    def test_base_action_stays_inside_the_gait(self):
-        raw = torch.tensor([[1.0, -1.0, 1.0], [-1.0, 1.0, -1.0]])
-        command = decode_base_action(raw)
-        self.assertTrue(torch.all(command[:, 0].abs() <= 0.45 + 1e-5))
-        self.assertTrue(torch.all(command[:, 1].abs() <= 0.25 + 1e-5))
-        self.assertTrue(torch.all(command[:, 2].abs() <= 0.80 + 1e-5))
-
     def test_slow_ball_rolls_toward_the_robot(self):
         base = torch.tensor([[0.0, 0.0, 0.4]])
         position, linear, _ = sample_ball("slow", base)
@@ -220,7 +212,7 @@ class TransferTests(unittest.TestCase):
 
         import torch
 
-        from pick_and_carry.train_ppo import find_locomotion_checkpoint, resolve_checkpoint
+        from pick_and_carry.train_ppo import resolve_checkpoint
 
         def save(directory: Path, name: str, stage: str, gait: bool, obs: int = 69, act: int = 19, arm: str = "z1") -> None:
             directory.mkdir(parents=True, exist_ok=True)
@@ -247,8 +239,6 @@ class TransferTests(unittest.TestCase):
             save(haul, "ppo_0001.pt", "haul", False)
             found = resolve_checkpoint(slow, "latest", 69, 19, False, "z1", "catch", "slow", root=root)
             self.assertEqual(found, haul / "ppo_0001.pt")
-            legs = find_locomotion_checkpoint(root)
-            self.assertEqual(legs, walk / "ppo_0002.pt")
             found = resolve_checkpoint(
                 walk, "latest", 69, 19, False, "z1", "walk", root=root, retreat=True
             )

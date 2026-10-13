@@ -237,38 +237,14 @@ def resolve_checkpoint(
     return None
 
 
-def find_locomotion_checkpoint(root: Path | None = None) -> Path | None:
-    """Flat walk if it exists, otherwise the rough walk. The legs stay frozen after that.
-
-    Stand, sit, and jump are not velocity trackers, so they are not used here.
-    """
-    observation, action = stage_layouts("walk", 6)
-    obs_dim = layout_dim(observation)
-    act_dim = layout_dim(action)
-    for stage, level in (("walk", "static"), ("rough", "static")):
-        found = latest_matching(
-            stage_log_dir(stage, level, root=root),
-            obs_dim,
-            act_dim,
-            False,
-            "z1",
-            stage,
-            match_arm=True,
-        )
-        if found is not None:
-            return found
-    return None
-
-
 def missing_play_checkpoint(args, cfg, root: Path | None = None) -> str | None:
     """Japanese reason to stop before building a scene, when playback has no weights."""
     if not getattr(args, "play", False) or not getattr(args, "resume", None):
         return None
-    from pick_and_carry.arms import get_arm, layouts
+    from pick_and_carry.arms import get_arm
 
     arm = get_arm(cfg.arm)
-    staged = stage_layouts(cfg.curriculum, arm.dof)
-    observation, action = layouts(arm.dof) if staged is None else staged
+    observation, action = stage_layouts(cfg.curriculum, arm.dof)
     found = resolve_checkpoint(
         args.log_dir,
         args.resume,
