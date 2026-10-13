@@ -55,9 +55,12 @@ def parse_args():
     parser.add_argument("--seconds", type=float, default=20.0)
     parser.add_argument("--terrain-amplitude", type=float, default=None)
     parser.add_argument("--terrain-steps", action="store_true")
-    parser.add_argument("--arm", choices=("panda", "z1"), default="panda")
+    parser.add_argument("--arm", choices=("z1",), default="z1")
     parser.add_argument("--control-split", choices=("split", "walk", "both"), default="split")
     parser.add_argument("--wrist-camera", action="store_true")
+    parser.add_argument("--ros", action="store_true", help="While playing, accept rviz2 clicks as the drop point.")
+    parser.add_argument("--ros-host", default="127.0.0.1")
+    parser.add_argument("--ros-port", type=int, default=11411)
     return parser.parse_args()
 
 
@@ -171,7 +174,12 @@ def main() -> None:
             command.extend(["--terrain-amplitude", str(args.terrain_amplitude)])
         if args.wrist_camera:
             command.append("--wrist-camera")
-        status.set("推論を実行しています。シーンの作成に数分かかります。")
+        if args.ros:
+            command.extend(["--ros", "--ros-host", args.ros_host, "--ros-port", str(args.ros_port)])
+        if args.ros:
+            status.set("推論を実行しています。シミュレーション画面が開き、rviz2 の Publish Point で運び先を動かせます。")
+        else:
+            status.set("推論を実行しています。シーンの作成に数分かかります。")
         start_button.configure(state="disabled")
         root.update()
         result = subprocess.run(command, cwd=ROOT)

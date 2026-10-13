@@ -272,6 +272,132 @@ def render_curve_png(path: Path, rows: list[dict]) -> None:
     image.save(path)
 
 
+def add_curriculum_slide(prs) -> None:
+    """Stages after the original pick-and-place, and how weights move forward."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(12.0), Inches(0.38))
+    write(title, ["段階的な学習"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.48), Inches(12.4), Inches(0.30))
+    write(
+        subtitle,
+        ["箱運びはそのまま残す。前後の段階は、形が同じときだけ重みを引き継ぎ、違うときは覚えた歩行を脚として固定する。"],
+        size=14,
+        color=MUTED,
+        spacing=0,
+    )
+    y = Inches(0.95)
+    h = Inches(6.2)
+    card(
+        slide,
+        Inches(0.28),
+        y,
+        Inches(6.35),
+        h,
+        "段階",
+        [
+            "1  立つ　しゃがみから。最初の学習",
+            "2  座る　立つの重みから",
+            "3  歩行　座るの重みから",
+            "4  ジャンプ　歩行の重みから",
+            "5  不整地　ジャンプの重みから",
+            "6  歩きながら持つ　不整地の重みから",
+            "7  箱運び　持ち歩きの重みから",
+            "8  キャッチ　箱運びの重みから",
+            "次の段階へ進むかは、録画を見て決める",
+        ],
+        TEAL,
+    )
+    card(
+        slide,
+        Inches(6.78),
+        y,
+        Inches(6.25),
+        h,
+        "重みの渡し方と、その報酬",
+        [
+            "同じ観測と行動で、直前の重みを初期値にする",
+            "　　立つ → 座る → 歩行 → ジャンプ",
+            "　　→ 不整地 → 持ち歩き → 箱運び",
+            "　　箱運び → キャッチ",
+            "腕は Unitree Z1 だけ",
+            "今までの Panda の保存は使えない",
+            "",
+            "歩行の点は、指令した速度への一致",
+            "　　記録の tracking は 0〜1。1 が一致",
+            "キャッチの点は、手をボールへ近づける",
+            "　　速度を揃える、指のあいだで保持する",
+            "人の点数で、この報酬は置き換えていない",
+        ],
+        GREEN,
+    )
+
+
+def add_technique_slide(prs) -> None:
+    """How training is staged, rewarded, and allowed to step back."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(12.0), Inches(0.38))
+    write(title, ["学習の工夫"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.48), Inches(12.4), Inches(0.30))
+    write(
+        subtitle,
+        ["一度に全部を覚えさせない。できた能力は次へ渡し、成績が落ちたら易しい課題へ戻してから上げる。"],
+        size=14,
+        color=MUTED,
+        spacing=0,
+    )
+    y = Inches(0.95)
+    h = Inches(6.2)
+    card(
+        slide,
+        Inches(0.28),
+        y,
+        Inches(6.35),
+        h,
+        "覚え方",
+        [
+            "歩行と把持を同時にゼロから学ばせない",
+            "段階は、立つ → 座る → 歩行 → ジャンプ",
+            "　　→ 不整地 → 持ち歩き → 箱運び → キャッチ",
+            "同じ観測と行動です",
+            "　　直前の段階の重みを初期値にする",
+            "腕は Unitree Z1 だけ",
+            "今までの Panda や 41・68 の保存は使えない",
+        ],
+        TEAL,
+    )
+    card(
+        slide,
+        Inches(6.78),
+        y,
+        Inches(6.25),
+        h,
+        "報酬と、難しさの戻し方",
+        [
+            "成功の瞬間だけでは学ばない",
+            "毎ステップ、接近・速度の一致・生存で点を出す",
+            "箱運びは段階で出す点を変える",
+            "　　歩くときは前進、拾うときは把持、置くときは設置",
+            "歩行の記録は tracking。1 が指令どおり",
+            "",
+            "8 回続けて成績が低いと、一段易しくする",
+            "　　不整地 → 半分の段差 → 平地",
+            "　　ノイズ → ばらす → ゆっくり → 静止",
+            "8 回続けて回復すると、選んだ課題まで上げる",
+            "メニューでは、上の段階の重みで",
+            "　　易しい課題を学び直せる",
+        ],
+        GREEN,
+    )
+
+
 def add_reward_slide(prs) -> None:
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
@@ -329,6 +455,7 @@ def add_reward_slide(prs) -> None:
             "段階 3　置くとき",
             "　　設置、指を開く",
             "歩行のみの学習では、把持と設置の点は出さない",
+            "歩行の段階は速度の一致。キャッチは接近と保持",
         ],
         CLAY,
     )
@@ -367,6 +494,8 @@ def add_loss_slide(prs, curve_png: Path | None) -> None:
             "　報酬・把持率は上向きが良い",
             "　手先と箱の距離は下向きが良い",
             "　方策 Loss は 0 の近くに落ち着く",
+            "歩行の記録は tracking。1 が指令どおり",
+            "右の4枚は箱運びの曲線",
         ],
         TEAL,
     )
@@ -392,7 +521,7 @@ def main() -> None:
     subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.50), Inches(12.6), Inches(0.28))
     write(
         subtitle,
-        ["Unitree Go2 ＋ 背中の Franka Panda　　PPO　　観測 68 次元・制御 20 次元（この寸法のまま重みを継続）"],
+        ["Unitree Go2 ＋ Unitree Z1　　PPO　　全段階 69/19"],
         size=12,
         color=MUTED,
         spacing=0,
@@ -411,7 +540,7 @@ def main() -> None:
         h,
         "学習条件",
         [
-            "ロボット　Go2 の胴体に Panda を固定",
+            "ロボット　Go2 に Z1（6 軸、約 5.2 kg）",
             "方策　256×256 ELU、出力は −1〜1",
             "更新　16 環境 × 128 step / iteration",
             "最適化　Adam 3e-4、clip 0.2",
@@ -424,7 +553,7 @@ def main() -> None:
             "成功　目標の半径 0.28 m、高さ 0.08 m 未満",
             "前進　0.40 m/s を追う。転倒 −5、設置 +10",
             "分け方　歩行のみ／分割／同時 から選択",
-            "継続　logs/ppo_walk の保存重みから再開",
+            "継続　箱運びは logs/ppo_z1",
         ],
         TEAL,
     )
@@ -434,7 +563,7 @@ def main() -> None:
         y,
         w,
         h,
-        "観測　68",
+        "観測　69",
         [
             "位置は胴体基準。前が +X、上が +Z",
             "脚の角度　　　　12",
@@ -444,12 +573,13 @@ def main() -> None:
             "胴体の角速度　　3　×0.25",
             "胴体の高さ　　　1　世界座標の z",
             "足の接地　　　　4　接触力 1 N 超",
-            "腕の角度　　　　7",
-            "腕の角速度　　　7　×0.05",
-            "指の開き　　　　1　0〜0.04 m",
+            "腕の角度　　　　6",
+            "腕の角速度　　　6　×0.05",
+            "指の開き　　　　1　−90度が開き、0が閉じ",
             "指の速度　　　　1　×0.05",
             "手先・物資・目標　各 3",
             "把持フラグ 1、段階 one-hot 4",
+            "速度指令　　　　3　使わない段階は 0",
             "カメラ時は物資の 3 つだけ検知位置",
             "見えない物資は (0, 0, −1)",
         ],
@@ -461,18 +591,18 @@ def main() -> None:
         y,
         w,
         h,
-        "制御　20",
+        "制御　19",
         [
             "位置制御。PD で目標角度へ追従",
             "脚 12　立ち姿勢 + 出力 × 0.50 rad",
             "　　hip 0、thigh 0.8、calf −1.5",
             "　　kp 80 / kd 4",
-            "腕 7　初期姿勢 + 出力 × 1.2 rad",
-            "　　(0, 0.9, 0, −1.4, 0, 1.8, 0.7)",
-            "　　kp 120 / kd 12",
-            "指 1　−1 で閉じ、+1 で開き 0.04 m",
-            "　　kp 40 / kd 4",
-            "把持　開き 0.012 m 未満、距離 0.12 m",
+            "腕 6　初期姿勢 + 出力 × 1.0 rad",
+            "　　(0, 1.76, −1.0, 0, 0, 0)",
+            "　　kp 80 / kd 8",
+            "指 1　−1 で閉じ、+1 で開き −90 度",
+            "　　kp 20 / kd 2",
+            "把持　閉じ側へ 0.20 rad 以内、距離 0.12 m",
             "段階　0 歩く　1 拾う　2 運ぶ　3 置く",
             "分割　0・2 は脚、1・3 は腕",
             "歩行のみ　脚だけ。腕は固定、指は開く",
@@ -481,6 +611,8 @@ def main() -> None:
         GREEN,
     )
     add_problem_slide(prs)
+    add_curriculum_slide(prs)
+    add_technique_slide(prs)
     add_reward_slide(prs)
     curve_png = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry_curves.png"
     rows = _load_metrics()

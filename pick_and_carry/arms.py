@@ -1,8 +1,6 @@
-"""Selectable arms on the Go2.
+"""The Unitree Z1 on the Go2.
 
-Panda is the default: 7 arm joints, observation 68, action 20. Existing
-checkpoints load only with that arm. The Unitree Z1 has 6 arm joints, so its
-observation is 66 and its action is 19. Those runs are stored separately.
+Six arm joints: observation 69, action 19. Every curriculum stage uses that layout.
 """
 
 from __future__ import annotations
@@ -12,16 +10,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pick_and_carry.config import (
-    ARM_JOINTS,
-    ARM_LIMITS,
-    DEFAULT_ARM_ANGLES,
-    FINGER_JOINTS,
-    URDF_DIR,
-    layout_dim,
-)
+from pick_and_carry.config import URDF_DIR, layout_dim
 
-PANDA_DOF = 7
 Z1_DOF = 6
 
 
@@ -44,6 +34,7 @@ def layouts(arm_dof: int) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str,
         ("goal_pos", 3),
         ("grasped", 1),
         ("phase", 4),
+        ("command", 3),
     )
     action = (("leg", 12), ("arm", arm_dof), ("gripper", 1))
     return observation, action
@@ -97,33 +88,6 @@ class ArmSpec:
         return offset
 
 
-def _panda() -> ArmSpec:
-    limits = {name: ARM_LIMITS[name] for name in ARM_JOINTS}
-    limits["panda_finger_joint1"] = (0.0, 0.04, 20.0)
-    limits["panda_finger_joint2"] = (0.0, 0.04, 20.0)
-    return ArmSpec(
-        name="panda",
-        joints=ARM_JOINTS,
-        fingers=FINGER_JOINTS,
-        limits=limits,
-        default_angles=dict(DEFAULT_ARM_ANGLES),
-        ee_links=("panda_hand_tcp", "panda_grasptarget", "panda_hand", "panda_link8"),
-        tcp_link="panda_hand_tcp",
-        joint_open=0.04,
-        joint_closed=0.0,
-        closed_threshold=0.012,
-        action_scale=1.2,
-        kp=120.0,
-        kd=12.0,
-        gripper_kp=40.0,
-        gripper_kd=4.0,
-        urdf_name="quadruped_arm.urdf",
-        wrist_rotation=((1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, -1.0)),
-        wrist_translation=(0.0, 0.0, 0.045 - 0.1034),
-        log_dir_name="ppo_walk",
-    )
-
-
 def _z1() -> ArmSpec:
     """Unitree Z1. Joint ranges and the 5.2 kg mass budget come from the official description."""
     deg = math.pi / 180.0
@@ -169,7 +133,7 @@ def _z1() -> ArmSpec:
     )
 
 
-ARMS = {"panda": _panda(), "z1": _z1()}
+ARMS = {"z1": _z1()}
 
 
 def get_arm(name: str) -> ArmSpec:
