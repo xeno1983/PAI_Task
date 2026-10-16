@@ -21,6 +21,7 @@ from pick_and_carry.algorithms import (
     ALGO_LABELS,
     augment_symmetric,
     group_relative_advantages,
+    monte_carlo_returns,
     normalize_algo,
 )
 from pick_and_carry.checkpoints import (
@@ -421,14 +422,19 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             progress_key = "approach"
         else:
             progress_key = "ee_dist"
+        algo = normalize_algo(getattr(args, "algo", "ppo"))
         for _ in range(args.num_steps):
             with torch.no_grad():
                 action, log_prob, value = agent.act(obs)
                 next_obs, reward, done, info = env.step(action)
-                # Approximate V(s') with V(s) on timeout, because step() already reset.
-                reward = reward + args.gamma * value * info["time_outs"]
-                next_value = agent.value(next_obs)
-                bootstrap = next_value * (~done).to(dtype=reward.dtype)
+                if algo == "grpo":
+                    # Critic-free: no value bootstrap into the reward or the return.
+                    bootstrap = torch.zeros_like(reward)
+                else:
+                    # Approximate V(s') with V(s) on timeout, because step() already reset.
+                    reward = reward + args.gamma * value * info["time_outs"]
+                    next_value = agent.value(next_obs)
+                    bootstrap = next_value * (~done).to(dtype=reward.dtype)
             obs_buf.append(obs)
             act_buf.append(action)
             logp_buf.append(log_prob)
@@ -461,19 +467,23 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
 
         rewards = torch.stack(rew_buf)
         values = torch.stack(val_buf)
-        advantages, returns = compute_gae(
-            rewards,
-            values,
-            torch.stack(boot_buf),
-            torch.stack(done_buf),
-            args.gamma,
-            args.lam,
-        )
+        dones = torch.stack(done_buf)
+        if algo == "grpo":
+            returns = monte_carlo_returns(rewards, dones, args.gamma)
+            advantages = returns
+        else:
+            advantages, returns = compute_gae(
+                rewards,
+                values,
+                torch.stack(boot_buf),
+                dones,
+                args.gamma,
+                args.lam,
+            )
 
         def flat(items):
             return torch.cat(items, dim=0)
 
-        algo = normalize_algo(getattr(args, "algo", "ppo"))
         flat_returns = returns.reshape(-1)
         flat_advantages = advantages.reshape(-1)
         flat_obs = flat(obs_buf)
@@ -481,13 +491,24 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         flat_logp = flat(logp_buf)
         flat_values = flat(val_buf)
         value_coef = args.value_coef
+        normalize_advantages = True
         if algo == "grpo":
             group = int(args.group_size) if int(args.group_size) > 0 else int(args.num_envs)
             flat_advantages = group_relative_advantages(flat_returns, group)
             value_coef = 0.0
+            normalize_advantages = False
         if algo == "sym_ppo":
+            # Walk stores [vx, vy, yaw] in the command slot; catch stores a predicted [x, y, z].
+            command_has_yaw = cfg.curriculum in LOCOMOTION_STAGES
             flat_obs, flat_act, flat_logp, flat_returns, flat_advantages, flat_values = augment_symmetric(
-                flat_obs, flat_act, flat_logp, flat_returns, flat_advantages, flat_values
+                flat_obs,
+                flat_act,
+                flat_logp,
+                flat_returns,
+                flat_advantages,
+                flat_values,
+                agent=agent,
+                command_has_yaw=command_has_yaw,
             )
         metrics = ppo_update(
             agent,
@@ -505,6 +526,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             max_grad_norm=args.max_grad_norm,
             old_values=None if algo == "grpo" else flat_values,
             desired_kl=args.desired_kl if args.desired_kl > 0 else None,
+            normalize_advantages=normalize_advantages,
         )
         elapsed = time.perf_counter() - started
         fps = args.num_envs * args.num_steps / max(elapsed, 1e-6)

@@ -155,13 +155,16 @@ def ppo_update(
     max_grad_norm: float,
     old_values: torch.Tensor | None = None,
     desired_kl: float | None = None,
+    normalize_advantages: bool = True,
 ) -> dict[str, float]:
     """One PPO update.
 
     ``old_values`` turns on the clipped value loss. ``desired_kl`` turns on the
     adaptive learning rate, which changes the optimizer's rate between minibatches.
+    Set ``normalize_advantages`` False when advantages are already group-normalized (GRPO).
     """
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    if normalize_advantages:
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     n = obs.shape[0]
     with torch.no_grad():
         old_mean, old_std = agent.actor.distribution_params(obs)
