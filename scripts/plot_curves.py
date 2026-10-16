@@ -28,7 +28,7 @@ def parse_args():
 
 
 def default_output() -> Path:
-    folder = Path.home() / "Desktop" / "起動スクリプト"
+    folder = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry"
     if folder.is_dir():
         return folder / "PickAndCarry_curves.html"
     desktop = Path.home() / "Desktop"

@@ -1,8 +1,8 @@
-"""Record the stand and sit poses against the heights those tasks ask for.
+"""Record the standing pose against the body height the walk stage asks for.
 
-The viewer stays closed. One mp4 shows four beats: the crouch as placed, the
-same crouch after the feet meet the ground, the legs extended as far as the
-action range allows, then the standing placement and the idle crouch used by sit.
+The viewer stays closed. One mp4 shows two beats: the standing pose as placed,
+then the same pose once the feet meet the ground and the PD gains hold it. The
+gauge marks the walk stage's target height (``base_height_target``).
 
     .venv\\Scripts\\python scripts\\show_pose_heights.py
 """
@@ -42,7 +42,7 @@ def _font(size: int) -> ImageFont.ImageFont:
 
 
 def _output_path() -> Path:
-    desktop = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry_pose.mp4"
+    desktop = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry" / "PickAndCarry_pose.mp4"
     if desktop.parent.is_dir():
         return desktop
     path = ROOT / "logs" / "PickAndCarry_pose.mp4"
@@ -57,28 +57,16 @@ def _pack(env: PickAndCarryEnv, leg: torch.Tensor) -> torch.Tensor:
     return pose.clamp(env.dof_lower, env.dof_upper) if hasattr(env, "dof_lower") else pose
 
 
-def _leg_target(env: PickAndCarryEnv, kind: str) -> torch.Tensor:
-    if kind == "crouch":
-        leg = env.crouch_leg.clone()
-    elif kind == "stand":
-        leg = env.default_leg.clone()
-    elif kind == "extend":
-        leg = env.crouch_leg.clone()
-        leg[1::3] = leg[1::3] - env.cfg.leg_action_scale
-        leg[2::3] = leg[2::3] + env.cfg.leg_action_scale
-    else:
-        raise ValueError(kind)
-    return leg.clamp(env.leg_lower, env.leg_upper)
+def _stand_target(env: PickAndCarryEnv) -> torch.Tensor:
+    return _pack(env, env.default_leg.clone().clamp(env.leg_lower, env.leg_upper))
 
 
-def _hold(env: PickAndCarryEnv, kind: str) -> None:
-    target = _pack(env, _leg_target(env, kind))
-    env.robot.control_dofs_position(target, env.dof_idx)
+def _hold(env: PickAndCarryEnv) -> None:
+    env.robot.control_dofs_position(_stand_target(env), env.dof_idx)
 
 
-def _place(env: PickAndCarryEnv, kind: str, height: float) -> None:
-    leg = _leg_target(env, kind)
-    target = _pack(env, leg)
+def _place(env: PickAndCarryEnv, height: float) -> None:
+    target = _stand_target(env)
     base = env.init_base_pos.view(1, 3).clone()
     base[:, 2] = height
     quat = env.init_base_quat.view(1, 4).expand(1, 4)
@@ -94,7 +82,7 @@ def _frame(env: PickAndCarryEnv) -> np.ndarray:
     return _rgb_uint8(rgb)
 
 
-def _compose(image: np.ndarray, title: str, detail: str, height: float) -> np.ndarray:
+def _compose(image: np.ndarray, title: str, detail: str, height: float, target: float) -> np.ndarray:
     picture = Image.fromarray(image)
     width, pic_h = picture.size
     bar_h = 118
@@ -118,16 +106,15 @@ def _compose(image: np.ndarray, title: str, detail: str, height: float) -> np.nd
         draw.line((gauge_x - 6, y, gauge_x + 16, y), fill=color, width=2)
         draw.text((gauge_x + 22, y - 12), label, font=_font(16), fill=color)
 
-    mark(0.40, "0.40 立つ", (120, 190, 255))
-    mark(0.28, "0.28 座る", (140, 220, 160))
+    mark(target, f"{target:.2f} 歩行の目標", (120, 190, 255))
     span = gauge_bot - gauge_top
     y = gauge_bot - int(round(np.clip(height, 0.0, 0.50) / 0.50 * span))
     draw.line((gauge_x - 8, y, gauge_x + 18, y), fill=(255, 214, 120), width=3)
     return np.ascontiguousarray(np.asarray(canvas))
 
 
-def _write(writer, env: PickAndCarryEnv, title: str, detail: str) -> float:
-    image = _compose(_frame(env), title, detail, float(env.base_pos[0, 2]))
+def _write(writer, env: PickAndCarryEnv, title: str, detail: str, target: float) -> float:
+    image = _compose(_frame(env), title, detail, float(env.base_pos[0, 2]), target)
     import av
 
     frame = av.VideoFrame.from_ndarray(image, format="rgb24")
@@ -138,15 +125,15 @@ def _write(writer, env: PickAndCarryEnv, title: str, detail: str) -> float:
     return float(env.base_pos[0, 2])
 
 
-def _still(writer, env: PickAndCarryEnv, kind: str, height: float, title: str, detail: str, seconds: float) -> None:
+def _still(writer, env: PickAndCarryEnv, height: float, title: str, detail: str, seconds: float, target: float) -> None:
     frames = max(1, int(round(seconds * FPS)))
     for _ in range(frames):
-        _place(env, kind, height)
-        _write(writer, env, title, detail)
+        _place(env, height)
+        _write(writer, env, title, detail, target)
 
 
-def _simulate(writer, env: PickAndCarryEnv, kind: str, title: str, detail: str, seconds: float) -> float:
-    _hold(env, kind)
+def _simulate(writer, env: PickAndCarryEnv, title: str, detail: str, seconds: float, target: float) -> float:
+    _hold(env)
     steps = max(1, int(round(seconds / DT)))
     stride = max(1, int(round(1.0 / (FPS * DT))))
     last = float(env.base_pos[0, 2])
@@ -155,7 +142,7 @@ def _simulate(writer, env: PickAndCarryEnv, kind: str, title: str, detail: str, 
         env._read_state()
         last = float(env.base_pos[0, 2])
         if step % stride == 0:
-            _write(writer, env, title, detail)
+            _write(writer, env, title, detail, target)
     return last
 
 
@@ -172,12 +159,13 @@ def main() -> None:
             show_viewer=False,
             enable_camera=True,
             terrain=False,
-            curriculum="stand",
+            curriculum="walk",
             control_split="both",
             seed=0,
             arm="z1",
         )
     )
+    target = float(env.cfg.locomotion_scales.base_height_target)
     env.camera.set_pose(pos=(1.5, -1.7, 0.62), lookat=(0.0, 0.0, 0.22))
     far = torch.tensor([[40.0, 40.0, 0.5]], dtype=torch.float32, device=env.device)
     env.cube.set_pos(far, zero_velocity=True)
@@ -194,57 +182,21 @@ def main() -> None:
         _still(
             writer,
             env,
-            "crouch",
-            0.30,
-            "立つ　置いた瞬間のしゃがみ",
-            "プログラムは胴体を 0.30 m に置く。足はまだ地面についていない。",
+            0.42,
+            "歩行　置いた瞬間の立ち姿勢",
+            "プログラムは胴体を 0.42 m に置く。足はまだ地面についていない。",
             1.5,
+            target,
         )
         settled = _simulate(
             writer,
             env,
-            "crouch",
-            "立つ　同じしゃがみのまま足が着く",
-            "操作 0 はこのしゃがみ。足が着くと胴体は 0.23 m。",
-            2.5,
-        )
-        print(f"crouch settled {settled:.3f}", flush=True)
-        extended = _simulate(
-            writer,
-            env,
-            "extend",
-            "立つ　操作を一杯まで伸ばす",
-            "届いたのは 0.32 m。立つ成功は 0.34〜0.46 m。",
+            "歩行　同じ姿勢のまま足が着く",
+            f"操作 0 の立ち姿勢。足が着いて落ち着いた高さが、目標 {target:.2f} m に近いかを見る。",
             3.0,
+            target,
         )
-        print(f"extend settled {extended:.3f}", flush=True)
-        _still(
-            writer,
-            env,
-            "stand",
-            0.42,
-            "座る　置いた瞬間の立位",
-            "プログラムは胴体を 0.42 m に置く。足はまだ地面についていない。",
-            1.5,
-        )
-        stood = _simulate(
-            writer,
-            env,
-            "stand",
-            "座る　同じ立位のまま足が着く",
-            "この関節が支えられる高さは 0.31 m。",
-            2.5,
-        )
-        print(f"stand settled {stood:.3f}", flush=True)
-        sat = _simulate(
-            writer,
-            env,
-            "crouch",
-            "座る　操作 0 のしゃがみ",
-            "足が着くと 0.23 m。座る成功は 0.24〜0.32 m。",
-            3.0,
-        )
-        print(f"sit idle settled {sat:.3f}", flush=True)
+        print(f"stand settled {settled:.3f} (target {target:.2f})", flush=True)
     finally:
         for packet in stream.encode(None):
             container.mux(packet)

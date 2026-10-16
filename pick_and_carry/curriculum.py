@@ -1,7 +1,9 @@
 """Staged tasks on the Unitree Z1. Every stage is observation 81 and action 19.
 
-The previous stage initializes the next: stand, sit, walk, jump, rough, haul,
-pick-and-place, then the catch levels. Channels a stage does not use stay zero.
+Walk learns to stand, walk and turn on bumpy ground while the environment moves the arm
+at random. Reach follows: the hand goes to a point in front of the body. Haul and carry
+(the box task) and catch (a ball that rolls or flies) build on reach. Channels a stage does
+not use stay zero.
 """
 
 from __future__ import annotations
@@ -14,25 +16,37 @@ from pick_and_carry.arms import layouts
 from pick_and_carry.config import LocomotionScales
 from pick_and_carry.helpers import fallen_mask, world_to_base
 
-STAGES = ("carry", "walk", "jump", "stand", "sit", "rough", "haul", "catch")
-POSTURE_STAGES = ("jump", "stand", "sit")
-CATCH_LEVELS = ("static", "slow", "random", "noisy")
-# Haul, pick-and-place, and catch move the hand. The earlier stages hold the reset pose.
-ARM_STAGES = ("haul", "carry", "catch")
+STAGES = ("walk", "reach", "haul", "carry", "catch")
+# Static, rolling slowly, rolling at random, thrown through the air, thrown with a noisy view.
+CATCH_LEVELS = ("static", "slow", "random", "fly", "noisy")
+FLYING_LEVELS = ("fly", "noisy")
+LOCOMOTION_STAGES = ("walk",)
+# The ball entity exists in these stages. In reach it is a ghost marker for the target point.
+BALL_STAGES = ("reach", "catch")
+# These stages drive the hand. Walk does not: the environment holds or moves the arm for it.
+ARM_STAGES = ("reach", "haul", "carry", "catch")
 
 WALK_COMMAND_SECONDS = 4.0
+# Share of walk commands that ask the robot to stand still.
+STAND_STILL_SHARE = 0.20
 CATCH_HOLD_SECONDS = 1.0
-POSE_HOLD_SECONDS = 1.0
 BALL_RADIUS = 0.035
 PROGRESS_CAP = 0.05
-STAND_HEIGHT = 0.40
-SIT_HEIGHT = 0.28
-JUMP_RISE = 0.08
-# Fold from the standing pose.
-CROUCH_FOLD = 0.45
+GRAVITY = 9.81
+# The ball is predicted this far ahead. The prediction goes in the command slot, scaled down
+# so a walking policy does not read it as a speed command.
+PREDICT_SECONDS = 0.30
+PREDICTION_SCALE = 0.10
+BALL_VELOCITY_SCALE = 0.50
+
+# Box in front of the body, in the base frame, where the hand is sent in reach and where
+# a thrown ball is aimed. z is height above the ground.
+REACH_X = (0.28, 0.50)
+REACH_Y = (-0.20, 0.20)
+REACH_Z = (0.30, 0.60)
 
 
-SKILL_ORDER = ("stand", "sit", "walk", "jump", "rough", "haul", "carry")
+SKILL_ORDER = ("walk", "reach", "haul", "carry")
 
 
 def _prior_skills(stage: str) -> list[tuple[str, str]]:
@@ -51,8 +65,8 @@ def earlier_stages(stage: str, catch_level: str = "static") -> list[tuple[str, s
         raise ValueError(f"unknown catch level {catch_level}")
     index = CATCH_LEVELS.index(catch_level)
     priors = [("catch", level) for level in reversed(CATCH_LEVELS[:index])]
-    priors.append(("carry", "static"))
-    priors.extend(_prior_skills("carry"))
+    priors.append(("reach", "static"))
+    priors.extend(_prior_skills("reach"))
     return priors
 
 
@@ -113,14 +127,8 @@ def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "z1", root
         relative = "logs/ppo_z1"
     elif stage == "walk":
         relative = "logs/ppo_curriculum_walk"
-    elif stage == "jump":
-        relative = "logs/ppo_curriculum_jump"
-    elif stage == "stand":
-        relative = "logs/ppo_curriculum_stand"
-    elif stage == "sit":
-        relative = "logs/ppo_curriculum_sit"
-    elif stage == "rough":
-        relative = "logs/ppo_curriculum_rough"
+    elif stage == "reach":
+        relative = "logs/ppo_curriculum_reach"
     elif stage == "haul":
         relative = "logs/ppo_curriculum_haul"
     elif stage == "catch":
@@ -134,7 +142,7 @@ def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "z1", root
 
 
 def holds_arm_pose(stage: str) -> bool:
-    """Whether this stage keeps the arm and gripper at the pose from reset."""
+    """Whether the policy leaves the arm alone. The environment holds it, or moves it at random in walk."""
     if stage not in STAGES:
         raise ValueError(f"unknown curriculum stage {stage}")
     return stage not in ARM_STAGES
@@ -147,22 +155,32 @@ def stage_layouts(stage: str, arm_dof: int) -> tuple[tuple[tuple[str, int], ...]
     return layouts(arm_dof)
 
 
-def crouch_legs(standing: torch.Tensor) -> torch.Tensor:
-    """Thighs and calves folded down from the standing pose. Hips stay put."""
-    folded = standing.clone()
-    folded[..., 1::3] = folded[..., 1::3] + CROUCH_FOLD
-    folded[..., 2::3] = folded[..., 2::3] - CROUCH_FOLD
-    return folded
+def sample_command(count: int, device: torch.device | None = None, stand_share: float = 0.0) -> torch.Tensor:
+    """Body-frame targets: forward m/s, left m/s, yaw rad/s.
 
-
-def sample_command(count: int, device: torch.device | None = None) -> torch.Tensor:
-    """Body-frame targets: forward m/s, left m/s, yaw rad/s."""
+    ``stand_share`` of the rows are zero, which asks the robot to stand still.
+    """
     if device is None:
         device = torch.device("cpu")
     forward = torch.empty(count, device=device).uniform_(-0.25, 0.50)
     left = torch.empty(count, device=device).uniform_(-0.20, 0.20)
     yaw = torch.empty(count, device=device).uniform_(-0.60, 0.60)
-    return torch.stack((forward, left, yaw), dim=-1)
+    command = torch.stack((forward, left, yaw), dim=-1)
+    if stand_share > 0.0:
+        still = torch.rand(count, device=device) < stand_share
+        command = torch.where(still[:, None], torch.zeros_like(command), command)
+    return command
+
+
+def sample_reach_target(base_pos: torch.Tensor) -> torch.Tensor:
+    """World points in the reach box in front of a robot that starts facing +x."""
+    count = base_pos.shape[0]
+    device = base_pos.device
+    target = base_pos.clone()
+    target[:, 0] = base_pos[:, 0] + torch.empty(count, device=device).uniform_(*REACH_X)
+    target[:, 1] = base_pos[:, 1] + torch.empty(count, device=device).uniform_(*REACH_Y)
+    target[:, 2] = torch.empty(count, device=device).uniform_(*REACH_Z)
+    return target
 
 
 def sample_ball(
@@ -184,7 +202,17 @@ def sample_ball(
         position[:, 0] = base_pos[:, 0] + 1.15
         position[:, 1] = base_pos[:, 1] + torch.empty(count, device=device).uniform_(-0.10, 0.10)
         linear[:, 0] = -0.28
-    elif level in ("random", "noisy"):
+    elif level in FLYING_LEVELS:
+        start_distance = torch.empty(count, device=device).uniform_(1.60, 2.40)
+        angle = torch.empty(count, device=device).uniform_(-0.50, 0.50)
+        position[:, 0] = base_pos[:, 0] + start_distance * torch.cos(angle)
+        position[:, 1] = base_pos[:, 1] + start_distance * torch.sin(angle)
+        position[:, 2] = torch.empty(count, device=device).uniform_(0.50, 0.90)
+        aim = sample_reach_target(base_pos)
+        flight = torch.empty(count, device=device).uniform_(0.80, 1.20)
+        linear = (aim - position) / flight[:, None]
+        linear[:, 2] = linear[:, 2] + 0.5 * GRAVITY * flight
+    elif level == "random":
         distance = torch.empty(count, device=device).uniform_(0.70, 1.50)
         angle = torch.empty(count, device=device).uniform_(-0.90, 0.90)
         position[:, 0] = base_pos[:, 0] + distance * torch.cos(angle)
@@ -202,11 +230,13 @@ def sample_ball(
         (linear[:, 1] / radius, -linear[:, 0] / radius, torch.zeros(count, device=device)),
         dim=-1,
     )
+    if level in FLYING_LEVELS:
+        angular = torch.zeros_like(angular)
     return position, linear, angular
 
 
 def obscure_motion(position: torch.Tensor, velocity: torch.Tensor, level: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """Stage 6 starts here: the policy sees a noisy position instead of the exact one."""
+    """The noisy level shows a noisy position and speed instead of the exact ones."""
     if level != "noisy":
         return position, velocity
     return position + torch.randn_like(position) * 0.03, velocity + torch.randn_like(velocity) * 0.05
@@ -237,6 +267,36 @@ def feet_air_time_reward(
     return reward, air_time, touching
 
 
+MOVE_LIN = 0.10
+MOVE_YAW = 0.20
+STILL_SIGMA = 0.01
+
+
+def walk_score(command: torch.Tensor, base_lin_vel: torch.Tensor, base_ang_vel: torch.Tensor) -> torch.Tensor:
+    """0 to 1: how much of the commanded motion the body achieved. A log and the difficulty score.
+
+    A moving command scores by the share of the commanded speed made along the command:
+    1 at the commanded speed, 0 when standing still or at twice the speed or more, 0 when going
+    the wrong way. Forward and yaw are scored separately and averaged when both are asked for.
+    A near-zero command scores by staying still. Standing still on a moving command therefore
+    scores about 0, unlike ``tracking``, which gives it more than half.
+    """
+    lin_command = command[:, :2]
+    lin_sq = lin_command.square().sum(dim=-1)
+    lin_ratio = (base_lin_vel[:, :2] * lin_command).sum(dim=-1) / lin_sq.clamp(min=1e-6)
+    lin_score = (1.0 - (1.0 - lin_ratio).abs()).clamp(0.0, 1.0)
+    yaw_command = command[:, 2]
+    yaw_ratio = base_ang_vel[:, 2] * yaw_command / yaw_command.square().clamp(min=1e-6)
+    yaw_score = (1.0 - (1.0 - yaw_ratio).abs()).clamp(0.0, 1.0)
+    lin_on = (lin_sq.sqrt() > MOVE_LIN).to(dtype=lin_score.dtype)
+    yaw_on = (yaw_command.abs() > MOVE_YAW).to(dtype=lin_score.dtype)
+    asked = lin_on + yaw_on
+    moving = (lin_on * lin_score + yaw_on * yaw_score) / asked.clamp(min=1.0)
+    drift = base_lin_vel[:, :2].square().sum(dim=-1) + base_ang_vel[:, 2].square()
+    still = torch.exp(-drift / STILL_SIGMA)
+    return torch.where(asked > 0, moving, still).detach()
+
+
 def locomotion_reward(
     *,
     base_lin_vel: torch.Tensor,
@@ -263,7 +323,7 @@ def locomotion_reward(
     The weights are in ``LocomotionScales``. The positive terms and penalties are summed and
     clipped at zero (``only_positive_rewards``), then the fall penalty is added. Only the
     legs count: the arm is held or driven by the stage, so its action never enters a penalty.
-    ``tracking``, ``gait_score``, ``steady``, and ``jerk`` are logs and are not added to the reward.
+    ``tracking``, ``walk_score``, ``gait_score``, ``steady``, and ``jerk`` are logs and are not added to the reward.
     """
     scales = scales or LocomotionScales()
     fallen = fallen_mask(projected_gravity, base_height, max_tilt_deg, min_base_height) | body_contact
@@ -291,6 +351,7 @@ def locomotion_reward(
 
     error = lin_error + ang_error
     terms["tracking"] = torch.exp(-error / sigma).detach()
+    terms["walk_score"] = walk_score(command, base_lin_vel, base_ang_vel)
     level = (-projected_gravity[:, 2]).clamp(0.0, 1.0)
     height = torch.exp(-(base_height - scales.base_height_target).square() / 0.008)
     terms["steady"] = (height * level).detach()
@@ -303,81 +364,6 @@ def locomotion_reward(
     moving = (command[:, :2].norm(dim=-1) > 0.1).to(dtype=trot.dtype)
     terms["gait_score"] = (trot * moving).detach()
     terms["jerk"] = (leg_actions - prev_leg_actions).abs().mean(dim=-1).detach()
-    return reward, terms, fallen
-
-
-def posture_achieved(
-    task: str,
-    *,
-    base_height: torch.Tensor,
-    base_lin_vel: torch.Tensor,
-    base_ang_vel: torch.Tensor,
-    foot_contact: torch.Tensor,
-    fallen: torch.Tensor,
-    was_airborne: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Whether this step holds the pose, and whether the feet are off the ground.
-
-    Jump counts a landing only after a previous step left the ground. Stand and
-    sit are a steady height with little horizontal speed.
-    """
-    speed = base_lin_vel[:, 0].square() + base_lin_vel[:, 1].square() + base_ang_vel[:, 2].square()
-    contacts = foot_contact.sum(dim=-1)
-    still = speed < 0.02
-    upright = ~fallen
-    airborne = upright & (contacts <= 0.5) & (base_height > STAND_HEIGHT + 0.03)
-    if task == "jump":
-        landed = was_airborne & upright & (contacts >= 2.0) & (base_height < STAND_HEIGHT + JUMP_RISE)
-        return landed, airborne
-    if task == "stand":
-        held = upright & still & ((base_height - STAND_HEIGHT).abs() < 0.06)
-        return held, airborne
-    if task == "sit":
-        held = upright & still & (contacts >= 3.0) & ((base_height - SIT_HEIGHT).abs() < 0.04)
-        return held, airborne
-    raise ValueError(f"unknown posture task {task}")
-
-
-def pose_reward(
-    task: str,
-    *,
-    base_height: torch.Tensor,
-    base_lin_vel: torch.Tensor,
-    base_lin_vel_world: torch.Tensor,
-    base_ang_vel: torch.Tensor,
-    projected_gravity: torch.Tensor,
-    foot_contact: torch.Tensor,
-    actions: torch.Tensor,
-    max_tilt_deg: float,
-    min_base_height: float,
-    dt: float,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]:
-    """Dense score for a jump, a stand, or a sit. ``tracking`` is the 0–1 pose score."""
-    fallen = fallen_mask(projected_gravity, base_height, max_tilt_deg, min_base_height)
-    upright = (~fallen).to(dtype=base_height.dtype)
-    speed = base_lin_vel[:, 0].square() + base_lin_vel[:, 1].square() + base_ang_vel[:, 2].square()
-    still = torch.exp(-speed / 0.08)
-    contacts = foot_contact.clamp(0.0, 1.0).mean(dim=-1)
-    if task == "stand":
-        height = torch.exp(-(base_height - STAND_HEIGHT).square() / 0.008)
-        pose = height * still
-    elif task == "sit":
-        height = torch.exp(-(base_height - SIT_HEIGHT).square() / 0.004)
-        pose = height * still * contacts
-    elif task == "jump":
-        rise = (base_lin_vel_world[:, 2].clamp(min=0.0) / 1.2).clamp(max=1.0)
-        clearance = ((base_height - STAND_HEIGHT) / JUMP_RISE).clamp(0.0, 1.0)
-        pose = torch.maximum(rise, clearance)
-    else:
-        raise ValueError(f"unknown posture task {task}")
-    terms = {
-        "pose": 4.0 * pose * upright * dt,
-        "alive": upright * 0.4 * dt,
-        "effort": -0.01 * actions.square().sum(dim=-1) * dt,
-        "fall": -5.0 * fallen.to(dtype=base_height.dtype),
-    }
-    reward = torch.stack(tuple(terms.values()), dim=0).sum(dim=0)
-    terms["tracking"] = pose.detach()
     return reward, terms, fallen
 
 
@@ -401,7 +387,10 @@ def manipulation_reward(
     min_base_height: float,
     dt: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Hold a carried box, or meet a rolling ball. Returns reward, terms, caught, fallen, distance."""
+    """Hold a carried box, or put the hand on a point or a ball (reach and catch).
+
+    Returns reward, terms, caught, fallen, distance.
+    """
     fallen = fallen_mask(projected_gravity, base_height, max_tilt_deg, min_base_height)
     upright = (~fallen).to(dtype=ee_pos.dtype)
     distance = torch.linalg.norm(ee_pos - object_pos, dim=-1)
@@ -427,6 +416,7 @@ def manipulation_reward(
             "drop": -2.0 * (~grasped & ~fallen).to(dtype=ee_pos.dtype),
         }
         terms["tracking"] = track.detach()
+        terms["walk_score"] = walk_score(command, base_lin_vel, base_ang_vel)
     else:
         to_object = object_pos - ee_pos
         direction = to_object / distance.clamp(min=1e-4).unsqueeze(-1)
@@ -442,8 +432,10 @@ def manipulation_reward(
             "alive": upright * 0.2 * dt,
             "effort": effort,
             "fall": fall,
+            # The legs hold still while the hand works.
+            "still": -1.0 * (base_lin_vel[:, :2].square().sum(dim=-1) + base_ang_vel[:, 2].square()) * dt,
         }
-    scored = {name: value for name, value in terms.items() if name != "tracking"}
+    scored = {name: value for name, value in terms.items() if name not in ("tracking", "walk_score")}
     reward = torch.stack(tuple(scored.values()), dim=0).sum(dim=0)
     return reward, terms, caught, fallen, distance.detach()
 
@@ -454,10 +446,21 @@ def ball_in_base(
     base_pos: torch.Tensor,
     base_quat: torch.Tensor,
     level: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    seen_pos, seen_vel = obscure_motion(
-        world_to_base(ball_pos, base_pos, base_quat),
-        world_to_base(ball_vel, torch.zeros_like(base_pos), base_quat),
-        level,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Ball position, velocity, and where it will be PREDICT_SECONDS from now, all in the base frame.
+
+    The prediction follows a ballistic path while the ball is off the ground and a straight
+    line while it rolls. The noisy level perturbs the position and velocity first.
+    """
+    seen_pos, seen_vel = obscure_motion(ball_pos, ball_vel, level)
+    horizon = PREDICT_SECONDS
+    future = seen_pos + seen_vel * horizon
+    airborne = seen_pos[:, 2] > BALL_RADIUS + 0.03
+    drop = 0.5 * GRAVITY * horizon * horizon
+    future[:, 2] = torch.where(airborne, future[:, 2] - drop, torch.full_like(future[:, 2], BALL_RADIUS))
+    future[:, 2] = future[:, 2].clamp(min=BALL_RADIUS)
+    return (
+        world_to_base(seen_pos, base_pos, base_quat),
+        world_to_base(seen_vel, torch.zeros_like(base_pos), base_quat),
+        world_to_base(future, base_pos, base_quat),
     )
-    return seen_pos, seen_vel
