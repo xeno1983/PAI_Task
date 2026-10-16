@@ -150,7 +150,7 @@ def report_stage_clips(folder: Path) -> None:
         if (folder / name).is_file():
             print(f"  あり  {label}  {name}", flush=True)
         else:
-            print(f"  まだない  {label}  メニュー 2 でその段階を学習すると {name} が残ります", flush=True)
+            print(f"  まだない  {label}  メニュー 1 でその段階を学習すると {name} が残ります", flush=True)
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:

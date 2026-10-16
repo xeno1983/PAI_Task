@@ -17,10 +17,24 @@ from torch.utils.tensorboard import SummaryWriter
 
 from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
 from pick_and_carry.config import EnvConfig, layout_dim
-from pick_and_carry.curriculum import earlier_stages, later_stages, retreat_choice, stage_layouts, stage_log_dir
+from pick_and_carry.curriculum import (
+    earlier_stages,
+    holds_arm_pose,
+    later_stages,
+    retreat_choice,
+    stage_layouts,
+    stage_log_dir,
+)
 from pick_and_carry.env import PickAndCarryEnv
 from pick_and_carry.ros_bridge import DEFAULT_HOST, DEFAULT_PORT, FileBridge, pack_rgb_image, ros_usage_error
+from pick_and_carry.mlflow_log import LocalTracker
 from pick_and_carry.tracking import append_metrics, write_run
+
+
+def format_gpu_memory(free_bytes: int, total_bytes: int) -> str:
+    """Used and total GPU memory. Task Manager's process memory does not show this."""
+    used = max(0, total_bytes - free_bytes)
+    return f"GPU {used / 1024**3:.1f}/{total_bytes / 1024**3:.1f} GB"
 
 
 def format_remaining(seconds: float) -> str:
@@ -33,19 +47,59 @@ def format_remaining(seconds: float) -> str:
     return f"{minutes}分{secs:02d}秒"
 
 
+def minibatch_size_for(args, batch: int) -> int:
+    """Samples per minibatch: the explicit size, else the batch split into --num-mini-batches."""
+    if args.minibatch_size > 0:
+        return int(args.minibatch_size)
+    return max(1, batch // max(1, int(args.num_mini_batches)))
+
+
+def initial_action_std(num_actions: int, leg_std: float, arm_std: float, leg_count: int = 12):
+    """Exploration noise per action: wide on the legs, narrow on the arm and gripper."""
+    std = torch.full((num_actions,), float(arm_std))
+    std[:leg_count] = float(leg_std)
+    return std
+
+
+def archive_incompatible_logs(log_dir: Path, obs_dim: int, act_dim: int, scripted_gait: bool, arm: str, curriculum: str) -> Path | None:
+    """Move weights and curves of another network shape aside so a new run cannot overwrite them.
+
+    Nothing moves when a compatible checkpoint exists or the folder holds no checkpoint.
+    """
+    weights = sorted(log_dir.glob("ppo_*.pt")) if log_dir.is_dir() else []
+    if not weights:
+        return None
+    if latest_matching(log_dir, obs_dim, act_dim, scripted_gait, arm, curriculum) is not None:
+        return None
+    target = log_dir / f"old_{time.strftime('%Y%m%d_%H%M%S')}"
+    target.mkdir(parents=True, exist_ok=True)
+    moving = [*weights, *log_dir.glob("events.out.tfevents*")]
+    metrics = log_dir / "metrics.jsonl"
+    if metrics.exists():
+        moving.append(metrics)
+    for path in moving:
+        path.replace(target / path.name)
+    return target
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train pick-and-carry with PPO on Genesis.")
     parser.add_argument("--num-envs", type=int, default=16)
     parser.add_argument("--iterations", type=int, default=60)
     parser.add_argument("--num-steps", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    # Defaults follow rsl_rl / legged_gym: lr starts at 1e-3 and follows the KL target.
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--desired-kl", type=float, default=0.01, help="Adaptive learning rate target. 0 keeps --lr fixed.")
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--lam", type=float, default=0.95)
     parser.add_argument("--clip", type=float, default=0.2)
-    parser.add_argument("--epochs", type=int, default=4)
-    parser.add_argument("--minibatch-size", type=int, default=512)
-    parser.add_argument("--entropy-coef", type=float, default=0.005)
-    parser.add_argument("--value-coef", type=float, default=0.5)
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--num-mini-batches", type=int, default=4)
+    parser.add_argument("--minibatch-size", type=int, default=0, help="Samples per minibatch. 0 uses batch / --num-mini-batches.")
+    parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--value-coef", type=float, default=1.0)
+    parser.add_argument("--leg-init-std", type=float, default=1.0)
+    parser.add_argument("--arm-init-std", type=float, default=0.4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--control", choices=("position", "torque"), default="position")
@@ -62,7 +116,7 @@ def parse_args():
         "--arm",
         choices=("z1",),
         default="z1",
-        help="Unitree Z1. Observation 69, action 19.",
+        help="Unitree Z1. Observation 81, action 19.",
     )
     parser.add_argument(
         "--control-split",
@@ -237,38 +291,14 @@ def resolve_checkpoint(
     return None
 
 
-def find_locomotion_checkpoint(root: Path | None = None) -> Path | None:
-    """Flat walk if it exists, otherwise the rough walk. The legs stay frozen after that.
-
-    Stand, sit, and jump are not velocity trackers, so they are not used here.
-    """
-    observation, action = stage_layouts("walk", 6)
-    obs_dim = layout_dim(observation)
-    act_dim = layout_dim(action)
-    for stage, level in (("walk", "static"), ("rough", "static")):
-        found = latest_matching(
-            stage_log_dir(stage, level, root=root),
-            obs_dim,
-            act_dim,
-            False,
-            "z1",
-            stage,
-            match_arm=True,
-        )
-        if found is not None:
-            return found
-    return None
-
-
 def missing_play_checkpoint(args, cfg, root: Path | None = None) -> str | None:
     """Japanese reason to stop before building a scene, when playback has no weights."""
     if not getattr(args, "play", False) or not getattr(args, "resume", None):
         return None
-    from pick_and_carry.arms import get_arm, layouts
+    from pick_and_carry.arms import get_arm
 
     arm = get_arm(cfg.arm)
-    staged = stage_layouts(cfg.curriculum, arm.dof)
-    observation, action = layouts(arm.dof) if staged is None else staged
+    observation, action = stage_layouts(cfg.curriculum, arm.dof)
     found = resolve_checkpoint(
         args.log_dir,
         args.resume,
@@ -289,7 +319,7 @@ def missing_play_checkpoint(args, cfg, root: Path | None = None) -> str | None:
     lines = [
         "再生できる重みがありません。",
         "探した場所: " + "、".join(looked),
-        "先にメニューの 2 で、この段階を学習してください。",
+        "先にメニューの 1 で、この段階を学習してください。",
     ]
     return "\n".join(lines)
 
@@ -346,6 +376,9 @@ def make_config(args) -> EnvConfig:
     )
     if cfg.curriculum != "carry":
         cfg.scripted_gait = False
+    if holds_arm_pose(cfg.curriculum):
+        cfg.control_split = "walk"
+    elif cfg.curriculum != "carry":
         cfg.control_split = "both"
     if cfg.curriculum in ("walk", "jump", "stand", "sit", "haul", "catch"):
         cfg.terrain = False
@@ -354,10 +387,16 @@ def make_config(args) -> EnvConfig:
         cfg.terrain = True
     if cfg.curriculum in ("haul", "catch"):
         cfg.catch_hold_steps = max(1, int(round(1.0 / cfg.dt)))
+    if cfg.curriculum in ("walk", "rough") and not args.play:
+        # Pushes and per-robot friction, as in legged_gym. Playback stays undisturbed.
+        cfg.push_robots = True
+        cfg.randomize_friction = True
     if args.play and args.ros:
         # One click session should not snap the robot home on the 20 s training timeout.
         cfg.episode_length_s = max(cfg.episode_length_s, float(args.seconds))
         cfg.enable_camera = True
+    if not args.play and args.num_envs > 1 and not cfg.wrist_camera:
+        cfg.fleet_snapshot = str(Path(args.log_dir) / "fleet.png")
     return cfg
 
 
@@ -453,7 +492,7 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     if ckpt_path is None:
         if args.play:
             raise SystemExit(
-                "再生できる重みがありません。先にメニューの 2 で、この段階を学習してください。"
+                "再生できる重みがありません。先にメニューの 1 で、この段階を学習してください。"
             )
         print(f"{args.log_dir.resolve()} にも前の段階にも重みがありません。最初から学習します。", flush=True)
         return 0, None
@@ -564,6 +603,7 @@ def play_policy(args, cfg, env, agent, obs) -> None:
     bridge = None
     steps = max(1, int(round(args.seconds / cfg.dt)))
     print(f"playing {steps} steps ({args.seconds:.0f}s)", flush=True)
+    env.record_initial_pose()
     try:
         if args.ros:
             bridge = FileBridge(args.ros_dir)
@@ -587,10 +627,11 @@ def play_policy(args, cfg, env, agent, obs) -> None:
             bridge.close()
 
 
-def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration: int) -> None:
+def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration: int, tracker: LocalTracker) -> None:
     if start_iteration == 0:
+        first = args.log_dir / "ppo_0000.pt"
         save_checkpoint(
-            args.log_dir / "ppo_0000.pt",
+            first,
             agent,
             optimizer,
             0,
@@ -600,6 +641,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             cfg.arm,
             cfg.curriculum,
         )
+        tracker.log_checkpoint(first)
     last_iteration = start_iteration + args.iterations
     print(
         f"学習 {start_iteration}/{last_iteration} から開始します。1回終わるたびに残り時間を出します。",
@@ -612,6 +654,9 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         obs_buf, act_buf, logp_buf, val_buf, rew_buf, boot_buf, done_buf = [], [], [], [], [], [], []
         grasp_sum = 0.0
         dist_sum = 0.0
+        gait_sum = 0.0
+        steady_sum = 0.0
+        jerk_sum = 0.0
         grip_sum = 0.0
         success_sum = 0.0
         success_count = 0
@@ -644,6 +689,15 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             progress = env.reward_terms.get(progress_key)
             if progress is not None:
                 dist_sum += float(progress.mean())
+            gait_score = env.reward_terms.get("gait_score")
+            if gait_score is not None:
+                gait_sum += float(gait_score.mean())
+            steady_score = env.reward_terms.get("steady")
+            if steady_score is not None:
+                steady_sum += float(steady_score.mean())
+            jerk_score = env.reward_terms.get("jerk")
+            if jerk_score is not None:
+                jerk_sum += float(jerk_score.mean())
             if progress_key == "ee_dist":
                 grip_sum += float(env._gripper_opening().mean())
 
@@ -671,10 +725,12 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             advantages.reshape(-1),
             clip=args.clip,
             epochs=args.epochs,
-            minibatch_size=args.minibatch_size,
+            minibatch_size=minibatch_size_for(args, args.num_envs * args.num_steps),
             entropy_coef=args.entropy_coef,
             value_coef=args.value_coef,
             max_grad_norm=args.max_grad_norm,
+            old_values=flat(val_buf),
+            desired_kl=args.desired_kl if args.desired_kl > 0 else None,
         )
         elapsed = time.perf_counter() - started
         fps = args.num_envs * args.num_steps / max(elapsed, 1e-6)
@@ -702,7 +758,6 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         }
         if "success_rate" in env.extras:
             row["success"] = float(env.extras["success_rate"])
-        append_metrics(args.log_dir / "metrics.jsonl", row)
         step_times.append(elapsed)
         remaining = (last_iteration - iteration) * (sum(step_times) / len(step_times))
         if progress_key == "ee_dist":
@@ -711,6 +766,20 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             detail = f"approach {mean_dist:.3f} grasp {grasp_rate:.2f}"
         else:
             detail = f"tracking {mean_dist:.3f}"
+            if cfg.curriculum in ("walk", "rough"):
+                detail = (
+                    f"{detail} gait {gait_sum / args.num_steps:.3f} "
+                    f"steady {steady_sum / args.num_steps:.3f} "
+                    f"jerk {jerk_sum / args.num_steps:.3f}"
+                )
+                row["gait"] = gait_sum / args.num_steps
+                row["steady"] = steady_sum / args.num_steps
+                row["jerk"] = jerk_sum / args.num_steps
+        row["kl"] = float(metrics["kl"])
+        row["lr"] = float(metrics["lr"])
+        row["entropy"] = float(metrics["entropy"])
+        append_metrics(args.log_dir / "metrics.jsonl", row)
+        tracker.log_row(row)
         if cfg.curriculum == "rough":
             live_score = mean_dist
         elif cfg.curriculum == "catch" and success_count:
@@ -727,8 +796,9 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             flush=True,
         )
         if iteration % args.save_interval == 0 or iteration == last_iteration:
+            saved = args.log_dir / f"ppo_{iteration:04d}.pt"
             save_checkpoint(
-                args.log_dir / f"ppo_{iteration:04d}.pt",
+                saved,
                 agent,
                 optimizer,
                 iteration,
@@ -738,6 +808,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
                 cfg.arm,
                 cfg.curriculum,
             )
+            tracker.log_checkpoint(saved)
 
 
 def main() -> None:
@@ -753,47 +824,69 @@ def main() -> None:
         print("Opening the 3D window. The first launch can take one to three minutes.", flush=True)
     env = PickAndCarryEnv(cfg=cfg)
     device = env.device
-    agent = ActorCritic(env.num_obs, env.num_actions).to(device)
+    init_std = initial_action_std(env.num_actions, args.leg_init_std, args.arm_init_std)
+    agent = ActorCritic(env.num_obs, env.num_actions, init_std=init_std).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
+    if not args.play:
+        archived = archive_incompatible_logs(
+            args.log_dir, env.num_obs, env.num_actions, cfg.scripted_gait, cfg.arm, cfg.curriculum
+        )
+        if archived is not None:
+            print(f"形の違う古い重みと記録を {archived} に移しました。", flush=True)
     args.log_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(args.log_dir))
     obs = env.reset()
+    env.save_fleet_snapshot()
     start_iteration, resumed_from = resume_agent(args, env, cfg, agent, optimizer)
+    gpu = ""
+    if device.type == "cuda" and torch.cuda.is_available():
+        free, total = torch.cuda.mem_get_info(device)
+        gpu = "  " + format_gpu_memory(free, total)
     print(
         f"PPO obs={env.num_obs} act={env.num_actions} envs={env.num_envs} "
         f"arm={cfg.arm} curriculum={cfg.curriculum} catch={cfg.catch_level} "
         f"freeze_legs={cfg.freeze_legs} control_split={cfg.control_split} "
-        f"wrist_camera={cfg.wrist_camera} urdf={env.urdf_path} device={device}",
+        f"wrist_camera={cfg.wrist_camera} urdf={env.urdf_path} device={device}{gpu}",
         flush=True,
     )
+    print(
+        f"同時に動かすロボットは {env.num_envs} 台です。状態は GPU 上に複製されるので、"
+        "タスクマネージャーのメモリ欄はほとんど変わりません。",
+        flush=True,
+    )
+    tracker = LocalTracker()
     if not args.play:
-        write_run(
-            args.log_dir / "run.json",
-            {
-                "algorithm": "ppo",
-                "resumed_from": resumed_from,
-                "start_iteration": start_iteration,
-                "iterations_requested": args.iterations,
-                "num_envs": env.num_envs,
-                "num_steps": args.num_steps,
-                "learning_rate": args.lr,
-                "seed": args.seed,
-                "obs_dim": env.num_obs,
-                "act_dim": env.num_actions,
-                "terrain": cfg.terrain,
-                "terrain_amplitude_m": cfg.terrain_amplitude,
-                "terrain_steps": cfg.terrain_steps,
-                "freeze_legs": cfg.freeze_legs,
-                "scripted_gait": cfg.scripted_gait,
-                "arm": cfg.arm,
-                "control_split": cfg.control_split,
-                "wrist_camera": cfg.wrist_camera,
-            },
-        )
-    if args.play:
-        play_policy(args, cfg, env, agent, obs)
-    else:
-        run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration)
+        info = {
+            "algorithm": "ppo",
+            "resumed_from": resumed_from,
+            "start_iteration": start_iteration,
+            "iterations_requested": args.iterations,
+            "num_envs": env.num_envs,
+            "num_steps": args.num_steps,
+            "learning_rate": args.lr,
+            "seed": args.seed,
+            "obs_dim": env.num_obs,
+            "act_dim": env.num_actions,
+            "terrain": cfg.terrain,
+            "terrain_amplitude_m": cfg.terrain_amplitude,
+            "terrain_steps": cfg.terrain_steps,
+            "freeze_legs": cfg.freeze_legs,
+            "scripted_gait": cfg.scripted_gait,
+            "arm": cfg.arm,
+            "control_split": cfg.control_split,
+            "wrist_camera": cfg.wrist_camera,
+            "curriculum": cfg.curriculum,
+            "catch_level": cfg.catch_level,
+        }
+        write_run(args.log_dir / "run.json", info)
+        tracker.start(args.log_dir, info)
+    try:
+        if args.play:
+            play_policy(args, cfg, env, agent, obs)
+        else:
+            run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration, tracker)
+    finally:
+        tracker.close()
     writer.close()
     env.close()
     print(f"logs: {args.log_dir.resolve()}")

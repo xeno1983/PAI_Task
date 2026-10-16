@@ -1,4 +1,4 @@
-"""Staged tasks on the Unitree Z1. Every stage is observation 69 and action 19.
+"""Staged tasks on the Unitree Z1. Every stage is observation 81 and action 19.
 
 The previous stage initializes the next: stand, sit, walk, jump, rough, haul,
 pick-and-place, then the catch levels. Channels a stage does not use stay zero.
@@ -11,11 +11,14 @@ from pathlib import Path
 import torch
 
 from pick_and_carry.arms import layouts
+from pick_and_carry.config import LocomotionScales
 from pick_and_carry.helpers import fallen_mask, world_to_base
 
 STAGES = ("carry", "walk", "jump", "stand", "sit", "rough", "haul", "catch")
 POSTURE_STAGES = ("jump", "stand", "sit")
 CATCH_LEVELS = ("static", "slow", "random", "noisy")
+# Haul, pick-and-place, and catch move the hand. The earlier stages hold the reset pose.
+ARM_STAGES = ("haul", "carry", "catch")
 
 WALK_COMMAND_SECONDS = 4.0
 CATCH_HOLD_SECONDS = 1.0
@@ -25,13 +28,15 @@ PROGRESS_CAP = 0.05
 STAND_HEIGHT = 0.40
 SIT_HEIGHT = 0.28
 JUMP_RISE = 0.08
+# Fold from the standing pose.
+CROUCH_FOLD = 0.45
 
 
 SKILL_ORDER = ("stand", "sit", "walk", "jump", "rough", "haul", "carry")
 
 
 def _prior_skills(stage: str) -> list[tuple[str, str]]:
-    """Earlier stages in the curriculum, nearest first. All share one network per arm."""
+    """Earlier stages in the curriculum, nearest first."""
     if stage not in SKILL_ORDER:
         return []
     index = SKILL_ORDER.index(stage)
@@ -101,8 +106,9 @@ def retreat_choice(
 
 
 def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "z1", root: Path | None = None) -> Path:
-    """Folder used by the launcher for this stage. The arm is always the Z1."""
-    del arm
+    """Folder used by the launcher for this stage."""
+    if arm != "z1":
+        raise ValueError(f"the arm is z1, got {arm}.")
     if stage == "carry":
         relative = "logs/ppo_z1"
     elif stage == "walk":
@@ -127,11 +133,26 @@ def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "z1", root
     return base / relative
 
 
+def holds_arm_pose(stage: str) -> bool:
+    """Whether this stage keeps the arm and gripper at the pose from reset."""
+    if stage not in STAGES:
+        raise ValueError(f"unknown curriculum stage {stage}")
+    return stage not in ARM_STAGES
+
+
 def stage_layouts(stage: str, arm_dof: int) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str, int], ...]]:
-    """Observation and action layout shared by every stage of this arm."""
+    """Observation and action layout. Every stage uses the same one."""
     if stage not in STAGES:
         raise ValueError(f"unknown curriculum stage {stage}")
     return layouts(arm_dof)
+
+
+def crouch_legs(standing: torch.Tensor) -> torch.Tensor:
+    """Thighs and calves folded down from the standing pose. Hips stay put."""
+    folded = standing.clone()
+    folded[..., 1::3] = folded[..., 1::3] + CROUCH_FOLD
+    folded[..., 2::3] = folded[..., 2::3] - CROUCH_FOLD
+    return folded
 
 
 def sample_command(count: int, device: torch.device | None = None) -> torch.Tensor:
@@ -142,12 +163,6 @@ def sample_command(count: int, device: torch.device | None = None) -> torch.Tens
     left = torch.empty(count, device=device).uniform_(-0.20, 0.20)
     yaw = torch.empty(count, device=device).uniform_(-0.60, 0.60)
     return torch.stack((forward, left, yaw), dim=-1)
-
-
-def decode_base_action(raw: torch.Tensor) -> torch.Tensor:
-    """Map policy outputs in [-1, 1] to forward, left, and yaw rates."""
-    scales = raw.new_tensor((0.45, 0.25, 0.80))
-    return raw.clamp(-1.0, 1.0) * scales
 
 
 def sample_ball(
@@ -197,83 +212,29 @@ def obscure_motion(position: torch.Tensor, velocity: torch.Tensor, level: str) -
     return position + torch.randn_like(position) * 0.03, velocity + torch.randn_like(velocity) * 0.05
 
 
-def apply_lateral(pose: torch.Tensor, left_speed: torch.Tensor) -> torch.Tensor:
-    """Small hip bias so a sideways command is not only a reward."""
-    steered = pose.clone()
-    lean = (left_speed * 0.35).clamp(-0.18, 0.18)
-    steered[:, 0] = steered[:, 0] + lean
-    steered[:, 3] = steered[:, 3] - lean
-    steered[:, 6] = steered[:, 6] + lean
-    steered[:, 9] = steered[:, 9] - lean
-    return steered
-
-
-def pack_walk_observation(
-    *,
-    leg_pos: torch.Tensor,
-    leg_vel: torch.Tensor,
-    projected_gravity: torch.Tensor,
-    base_lin_vel: torch.Tensor,
-    base_ang_vel: torch.Tensor,
-    base_height: torch.Tensor,
-    foot_contact: torch.Tensor,
+def feet_air_time_reward(
+    air_time: torch.Tensor,
+    last_contact: torch.Tensor,
+    contact: torch.Tensor,
     command: torch.Tensor,
-) -> torch.Tensor:
-    return torch.cat(
-        (
-            leg_pos,
-            leg_vel * 0.05,
-            projected_gravity,
-            base_lin_vel * 2.0,
-            base_ang_vel * 0.25,
-            base_height,
-            foot_contact,
-            command,
-        ),
-        dim=-1,
-    )
+    dt: float,
+    target: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """legged_gym ``feet_air_time``. Returns the reward, the new air time, and the new contact flags.
 
-
-def pack_body_observation(
-    *,
-    leg_pos: torch.Tensor,
-    leg_vel: torch.Tensor,
-    projected_gravity: torch.Tensor,
-    base_lin_vel: torch.Tensor,
-    base_ang_vel: torch.Tensor,
-    base_height: torch.Tensor,
-    foot_contact: torch.Tensor,
-    arm_pos: torch.Tensor,
-    arm_vel: torch.Tensor,
-    gripper_pos: torch.Tensor,
-    gripper_vel: torch.Tensor,
-    ee_pos: torch.Tensor,
-    object_pos: torch.Tensor,
-    object_vel: torch.Tensor,
-    command: torch.Tensor,
-    grasped: torch.Tensor,
-) -> torch.Tensor:
-    return torch.cat(
-        (
-            leg_pos,
-            leg_vel * 0.05,
-            projected_gravity,
-            base_lin_vel * 2.0,
-            base_ang_vel * 0.25,
-            base_height,
-            foot_contact,
-            arm_pos,
-            arm_vel * 0.05,
-            gripper_pos,
-            gripper_vel * 0.05,
-            ee_pos,
-            object_pos,
-            object_vel * 0.5,
-            command,
-            grasped.to(dtype=torch.float32).unsqueeze(-1),
-        ),
-        dim=-1,
-    )
+    A foot that touches down after ``target`` seconds in the air earns the excess. A shorter
+    step costs the shortfall. Nothing is paid while the speed command is near zero.
+    ``air_time``, ``last_contact`` and ``contact`` are per foot, shape (envs, 4).
+    """
+    touching = contact > 0.5
+    filtered = touching | last_contact
+    first_contact = (air_time > 0.0) & filtered
+    air_time = air_time + dt
+    reward = ((air_time - target) * first_contact.to(dtype=air_time.dtype)).sum(dim=-1)
+    moving = command[:, :2].norm(dim=-1) > 0.1
+    reward = reward * moving.to(dtype=reward.dtype)
+    air_time = air_time * (~filtered).to(dtype=air_time.dtype)
+    return reward, air_time, touching
 
 
 def locomotion_reward(
@@ -283,24 +244,65 @@ def locomotion_reward(
     command: torch.Tensor,
     projected_gravity: torch.Tensor,
     base_height: torch.Tensor,
-    actions: torch.Tensor,
+    leg_actions: torch.Tensor,
+    prev_leg_actions: torch.Tensor,
+    leg_vel: torch.Tensor,
+    prev_leg_vel: torch.Tensor,
+    leg_torque: torch.Tensor,
+    foot_contact: torch.Tensor,
+    air_time_reward: torch.Tensor,
+    collisions: torch.Tensor,
+    body_contact: torch.Tensor,
     max_tilt_deg: float,
     min_base_height: float,
     dt: float,
+    scales: LocomotionScales | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]:
-    """Track a speed command. Falling ends the positive terms."""
-    fallen = fallen_mask(projected_gravity, base_height, max_tilt_deg, min_base_height)
-    upright = (~fallen).to(dtype=base_lin_vel.dtype)
-    error = (base_lin_vel[:, 0] - command[:, 0]).square()
-    error = error + (base_lin_vel[:, 1] - command[:, 1]).square()
-    error = error + (base_ang_vel[:, 2] - command[:, 2]).square()
-    track = torch.exp(-error / 0.25)
-    alive = upright * 0.4 * dt
-    effort = -0.01 * actions.square().sum(dim=-1) * dt
-    fall = -5.0 * fallen.to(dtype=base_lin_vel.dtype)
-    terms = {"track": 4.0 * track * upright * dt, "alive": alive, "effort": effort, "fall": fall}
-    reward = torch.stack(tuple(terms.values()), dim=0).sum(dim=0)
-    terms["tracking"] = track.detach()
+    """Velocity tracking with the legged_gym penalties.
+
+    The weights are in ``LocomotionScales``. The positive terms and penalties are summed and
+    clipped at zero (``only_positive_rewards``), then the fall penalty is added. Only the
+    legs count: the arm is held or driven by the stage, so its action never enters a penalty.
+    ``tracking``, ``gait_score``, ``steady``, and ``jerk`` are logs and are not added to the reward.
+    """
+    scales = scales or LocomotionScales()
+    fallen = fallen_mask(projected_gravity, base_height, max_tilt_deg, min_base_height) | body_contact
+    sigma = scales.tracking_sigma
+    lin_error = (command[:, :2] - base_lin_vel[:, :2]).square().sum(dim=-1)
+    ang_error = (command[:, 2] - base_ang_vel[:, 2]).square()
+    terms = {
+        "tracking_lin_vel": scales.tracking_lin_vel * torch.exp(-lin_error / sigma) * dt,
+        "tracking_ang_vel": scales.tracking_ang_vel * torch.exp(-ang_error / sigma) * dt,
+        "lin_vel_z": scales.lin_vel_z * base_lin_vel[:, 2].square() * dt,
+        "ang_vel_xy": scales.ang_vel_xy * base_ang_vel[:, :2].square().sum(dim=-1) * dt,
+        "orientation": scales.orientation * projected_gravity[:, :2].square().sum(dim=-1) * dt,
+        "base_height": scales.base_height * (base_height - scales.base_height_target).square() * dt,
+        "torques": scales.torques * leg_torque.square().sum(dim=-1) * dt,
+        "dof_acc": scales.dof_acc * ((prev_leg_vel - leg_vel) / dt).square().sum(dim=-1) * dt,
+        "action_rate": scales.action_rate * (prev_leg_actions - leg_actions).square().sum(dim=-1) * dt,
+        "feet_air_time": scales.feet_air_time * air_time_reward * dt,
+        "collision": scales.collision * collisions * dt,
+    }
+    total = torch.stack(tuple(terms.values()), dim=0).sum(dim=0)
+    if scales.only_positive_rewards:
+        total = total.clamp(min=0.0)
+    terms["termination"] = scales.termination * fallen.to(dtype=total.dtype)
+    reward = total + terms["termination"]
+
+    error = lin_error + ang_error
+    terms["tracking"] = torch.exp(-error / sigma).detach()
+    level = (-projected_gravity[:, 2]).clamp(0.0, 1.0)
+    height = torch.exp(-(base_height - scales.base_height_target).square() / 0.008)
+    terms["steady"] = (height * level).detach()
+    contact = foot_contact.clamp(0.0, 1.0)
+    front_left = contact[:, 0] * contact[:, 3]
+    front_right = contact[:, 1] * contact[:, 2]
+    rear_swing = (1.0 - contact[:, 0]) * (1.0 - contact[:, 3])
+    front_swing = (1.0 - contact[:, 1]) * (1.0 - contact[:, 2])
+    trot = front_left * front_swing + front_right * rear_swing
+    moving = (command[:, :2].norm(dim=-1) > 0.1).to(dtype=trot.dtype)
+    terms["gait_score"] = (trot * moving).detach()
+    terms["jerk"] = (leg_actions - prev_leg_actions).abs().mean(dim=-1).detach()
     return reward, terms, fallen
 
 

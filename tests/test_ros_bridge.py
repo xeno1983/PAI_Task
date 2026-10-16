@@ -78,7 +78,7 @@ class ProtocolTests(unittest.TestCase):
             seed=0,
             terrain_steps=False,
             control_split="split",
-            arm="panda",
+            arm="z1",
             wrist_camera=False,
             object_xy=None,
             goal_xy=None,

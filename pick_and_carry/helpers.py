@@ -14,6 +14,40 @@ import torch
 from pick_and_carry.config import RewardScales
 
 
+def fleet_camera_height(offsets_xy: np.ndarray, spacing: float, fov_deg: float = 50.0) -> float:
+    """Height above the block that fits it in a vertical field of view.
+
+    Genesis cameras are created with a far plane of 20 m. A 6 by 6 block at
+    the default 3 m spacing already needs to sit higher than that, and anything
+    past the far plane is dropped, leaving the background color only.
+    """
+    if len(offsets_xy) == 0:
+        return 8.0
+    span = float(np.ptp(np.asarray(offsets_xy, dtype=np.float64), axis=0).max()) + float(spacing)
+    half = math.radians(fov_deg * 0.5)
+    return 0.5 * span / math.tan(half) * 1.15
+
+
+def fleet_view_indices(num_envs: int, side: int = 6) -> list[int]:
+    """Corner block of the environment grid, at most ``side`` by ``side``.
+
+    Genesis lays environments out with ``ceil(sqrt(n))`` columns. The first
+    ``side`` columns of the first ``side`` rows stay in frame. The rest are simulated
+    but not drawn.
+    """
+    if num_envs < 1:
+        return []
+    per_row = math.ceil(math.sqrt(num_envs))
+    span = min(side, per_row, num_envs)
+    indices: list[int] = []
+    for row in range(span):
+        for col in range(span):
+            index = row * per_row + col
+            if index < num_envs:
+                indices.append(index)
+    return indices
+
+
 def quat_conjugate(q: torch.Tensor) -> torch.Tensor:
     """Inverse of a unit quaternion in wxyz order."""
     out = q.clone()

@@ -18,6 +18,8 @@ from pick_and_carry.helpers import (
     compute_stage_reward,
     detect_wrist_target,
     fallen_mask,
+    fleet_camera_height,
+    fleet_view_indices,
     grasp_mask,
     place_mask,
     quat_apply,
@@ -29,8 +31,8 @@ from pick_and_carry.helpers import (
 
 class LayoutTests(unittest.TestCase):
     def test_dimensions(self):
-        self.assertEqual(layout_dim(OBS_LAYOUT), 69)
-        self.assertEqual(NUM_OBS, 69)
+        self.assertEqual(layout_dim(OBS_LAYOUT), 81)
+        self.assertEqual(NUM_OBS, 81)
         self.assertEqual(NUM_ACTIONS, 19)
 
 
@@ -49,6 +51,26 @@ class GeometryTests(unittest.TestCase):
     def test_yaw_quat_norm(self):
         q = yaw_quat(torch.tensor([0.3, -1.2]))
         self.assertTrue(torch.allclose(q.norm(dim=-1), torch.ones(2), atol=1e-5))
+
+    def test_fleet_view_is_a_corner_block(self):
+        self.assertEqual(fleet_view_indices(1), [0])
+        self.assertEqual(fleet_view_indices(4), [0, 1, 2, 3])
+        seen = fleet_view_indices(5096)
+        self.assertEqual(len(seen), 36)
+        self.assertEqual(seen[0], 0)
+        self.assertIn(72, seen)
+        self.assertNotIn(6, seen)
+
+    def test_fleet_camera_clears_the_default_far_plane(self):
+        """A 6 by 6 block is higher than Genesis's default 20 m far plane, so the shot would be empty."""
+        spacing = 3.0
+        per_row = math.ceil(math.sqrt(32))
+        index = np.arange(32)
+        offsets = np.stack(((index // per_row) * spacing, (index % per_row) * spacing), axis=1)
+        offsets -= (offsets.max(axis=0) + offsets.min(axis=0)) / 2.0
+        height = fleet_camera_height(offsets, spacing)
+        self.assertGreater(height, 20.0)
+        self.assertGreater(height * 4.0, height)
 
 
 class RewardTests(unittest.TestCase):
@@ -175,8 +197,31 @@ class RewardTests(unittest.TestCase):
             grasped=torch.tensor([False]),
             phase=torch.tensor([2]),
             command=torch.zeros(1, 3),
+            last_leg_action=torch.full((1, 12), 0.5),
         )
         self.assertEqual(obs.shape, (1, NUM_OBS))
+        self.assertEqual(obs[0, 69:81].tolist(), [0.5] * 12)
+        large = pack_observation(
+            leg_pos=torch.zeros(1, 12),
+            leg_vel=torch.zeros(1, 12),
+            projected_gravity=torch.zeros(1, 3),
+            base_lin_vel=torch.zeros(1, 3),
+            base_ang_vel=torch.zeros(1, 3),
+            base_height=torch.zeros(1, 1),
+            foot_contact=torch.zeros(1, 4),
+            arm_pos=torch.zeros(1, 6),
+            arm_vel=torch.zeros(1, 6),
+            gripper_pos=torch.zeros(1, 1),
+            gripper_vel=torch.zeros(1, 1),
+            ee_pos=torch.zeros(1, 3),
+            object_pos=torch.zeros(1, 3),
+            goal_pos=torch.zeros(1, 3),
+            grasped=torch.tensor([False]),
+            phase=torch.tensor([0]),
+            command=torch.zeros(1, 3),
+            last_leg_action=torch.full((1, 12), 40.0),
+        )
+        self.assertEqual(float(large[0, 69:].max()), 5.0)
         self.assertAlmostEqual(float(obs[0, 12]), 0.05)
         self.assertAlmostEqual(float(obs[0, 27]), 2.0)
         self.assertAlmostEqual(float(obs[0, 30]), 0.25)

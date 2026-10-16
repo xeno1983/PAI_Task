@@ -1,4 +1,4 @@
-"""The arm is the Unitree Z1: observation 69, action 19."""
+"""The arm is the Unitree Z1: observation 81, action 19."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ from pick_and_carry.control import arm_gripper_command
 class ArmLayoutTests(unittest.TestCase):
     def test_only_the_z1_is_available(self):
         z1 = get_arm("z1")
-        self.assertEqual(z1.num_obs, 69)
+        self.assertEqual(z1.num_obs, 81)
         self.assertEqual(z1.num_actions, 19)
-        self.assertEqual(NUM_OBS, 69)
+        self.assertEqual(NUM_OBS, 81)
         self.assertEqual(NUM_ACTIONS, 19)
         with self.assertRaises(ValueError):
             get_arm("panda")
@@ -26,7 +26,7 @@ class ArmLayoutTests(unittest.TestCase):
     def test_z1_is_under_eight_kilograms_and_has_six_joints(self):
         z1 = get_arm("z1")
         self.assertEqual(z1.dof, 6)
-        self.assertEqual(z1.num_obs, 69)
+        self.assertEqual(z1.num_obs, 81)
         self.assertEqual(z1.num_actions, 19)
         root = ET.parse(z1.urdf_path).getroot()
         mass = 0.0

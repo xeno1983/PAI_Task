@@ -115,6 +115,8 @@ OBS_LAYOUT = (
     ("grasped", 1),
     ("phase", 4),
     ("command", 3),
+    # The leg action applied on the previous step, as in legged_gym and Walk These Ways.
+    ("last_leg_action", 12),
 )
 # [12 leg positions | 6 Z1 arm positions | 1 gripper open/close]
 ACTION_LAYOUT = (
@@ -184,6 +186,34 @@ class RewardScales:
 
 
 @dataclass
+class LocomotionScales:
+    """Walking reward weights. Defaults follow legged_gym and its Unitree configs.
+
+    Every term is multiplied by ``dt``. Negative weights are penalties.
+    """
+
+    tracking_lin_vel: float = 1.0
+    tracking_ang_vel: float = 0.5
+    tracking_sigma: float = 0.25
+    lin_vel_z: float = -2.0
+    ang_vel_xy: float = -0.05
+    orientation: float = 0.0
+    base_height: float = -50.0
+    base_height_target: float = 0.30
+    torques: float = -1e-5
+    dof_acc: float = -2.5e-7
+    action_rate: float = -0.01
+    feet_air_time: float = 1.0
+    # Seconds in the air that earn a positive step. legged_gym uses 0.5.
+    feet_air_time_target: float = 0.5
+    # Per thigh or calf touching something.
+    collision: float = -1.0
+    # Charged once on a fall, after the positive terms are clipped at zero.
+    termination: float = -5.0
+    only_positive_rewards: bool = True
+
+
+@dataclass
 class EnvConfig:
     num_envs: int = 64
     backend: str = "gpu"
@@ -193,6 +223,8 @@ class EnvConfig:
     record_path: str | None = None
     # Add a camera without starting a file, so a script can render frames itself.
     enable_camera: bool = False
+    # One still of the first robots, written at the start of training. None skips it.
+    fleet_snapshot: str | None = None
     camera_res: tuple[int, int] = (960, 540)
     # Side view of the whole course, from the start pad through the goal pad.
     camera_pos: tuple[float, float, float] = (2.0, -4.6, 2.6)
@@ -218,7 +250,7 @@ class EnvConfig:
     # walk: legs the whole time, arm held still, reward is travel and not falling.
     # both: legs and arm together for the whole episode.
     control_split: str = "split"
-    # The arm is the Unitree Z1 (6 DoF, about 5.2 kg). Observation 69, action 19.
+    # The arm is the Unitree Z1 (6 DoF, about 5.2 kg). Observation 81, action 19.
     arm: str = "z1"
     # Wrist camera on the hand. Grasp uses the segmented cube, not the simulator position.
     wrist_camera: bool = False
@@ -236,14 +268,20 @@ class EnvConfig:
     base_init_pos: tuple[float, float, float] = (0.0, 0.0, 0.42)
     base_init_quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)  # wxyz
     env_spacing: tuple[float, float] = (3.0, 3.0)
-    action_clip: float = 1.0
-    # Radians of leg motion at a full action. Enough for a step around the standing pose.
-    leg_action_scale: float = 0.50
+    # Actions are Gaussian samples with no squashing, so the clip is only a guard.
+    action_clip: float = 100.0
+    # Radians of leg motion per action unit. The Genesis Go2 example and legged_gym use 0.25.
+    leg_action_scale: float = 0.25
     # One action unit. Large enough that joint 2 can go from the forward pose
     # (0.9) to the low reach (about 1.6) and back.
     arm_action_scale: float = 1.2
-    leg_kp: float = 80.0
-    leg_kd: float = 4.0
+    # The Genesis Go2 example uses 20 and 0.5 for the bare Go2. With the Z1 on its back the
+    # robot is about 5 kg heavier and 20 cannot hold it: it sinks to the joint limits and
+    # bounces. Holding the standing pose, 30 sags to 0.23 m, 40 to 0.29 m, 60 to 0.305 m,
+    # and 80 to 0.313 m. 60 and 1.5 keep the damping ratio of the Go2 value with margin
+    # for the box in haul and carry.
+    leg_kp: float = 60.0
+    leg_kd: float = 1.5
     arm_kp: float = 120.0
     arm_kd: float = 12.0
     gripper_kp: float = 40.0
@@ -277,14 +315,19 @@ class EnvConfig:
     transport_sigma: float = 0.40
     base_sigma: float = 0.60
     reward_scales: RewardScales = field(default_factory=RewardScales)
+    locomotion_scales: LocomotionScales = field(default_factory=LocomotionScales)
+    # Training-only robustness for walking. Playback leaves both off.
+    push_robots: bool = False
+    push_interval_s: float = 15.0
+    push_max_vel: float = 0.5
+    randomize_friction: bool = False
+    friction_range: tuple[float, float] = (0.5, 1.25)
     max_collision_pairs: int = 512
     seed: int = 0
-    # carry is the original pick-and-place. Later stages use their own observations.
+    # Every stage shares the Z1 observation. carry is pick-and-place.
     curriculum: str = "carry"
     catch_level: str = "static"
     catch_hold_steps: int = 50
-    # Set for haul and catch when a walk or rough checkpoint exists. Empty keeps the trot.
-    locomotion_checkpoint: str = ""
 
     @property
     def max_episode_length(self) -> int:

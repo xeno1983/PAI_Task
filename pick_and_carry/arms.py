@@ -1,6 +1,6 @@
 """The Unitree Z1 on the Go2.
 
-Six arm joints: observation 69, action 19. Every curriculum stage uses that layout.
+Six arm joints: observation 81, action 19. Every curriculum stage uses that layout.
 """
 
 from __future__ import annotations
@@ -10,34 +10,16 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pick_and_carry.config import URDF_DIR, layout_dim
+from pick_and_carry.config import ACTION_LAYOUT, OBS_LAYOUT, URDF_DIR, layout_dim
 
 Z1_DOF = 6
 
 
 def layouts(arm_dof: int) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str, int], ...]]:
-    """Observation and action layouts. Only the arm block changes with the manipulator."""
-    observation = (
-        ("leg_pos", 12),
-        ("leg_vel", 12),
-        ("projected_gravity", 3),
-        ("base_lin_vel", 3),
-        ("base_ang_vel", 3),
-        ("base_height", 1),
-        ("foot_contact", 4),
-        ("arm_pos", arm_dof),
-        ("arm_vel", arm_dof),
-        ("gripper_pos", 1),
-        ("gripper_vel", 1),
-        ("ee_pos", 3),
-        ("object_pos", 3),
-        ("goal_pos", 3),
-        ("grasped", 1),
-        ("phase", 4),
-        ("command", 3),
-    )
-    action = (("leg", 12), ("arm", arm_dof), ("gripper", 1))
-    return observation, action
+    """The one observation and action layout. Every stage uses it."""
+    if arm_dof != Z1_DOF:
+        raise ValueError(f"the Z1 arm has {Z1_DOF} joints, got {arm_dof}.")
+    return OBS_LAYOUT, ACTION_LAYOUT
 
 
 @dataclass(frozen=True)
@@ -52,7 +34,7 @@ class ArmSpec:
     # Joint position at action +1 (open) and action -1 (closed).
     joint_open: float
     joint_closed: float
-    # Grasp counts when the open amount is below this. Panda is metres, Z1 is radians.
+    # Grasp counts when the open amount is below this. The Z1 gripper is in radians.
     closed_threshold: float
     action_scale: float
     kp: float
