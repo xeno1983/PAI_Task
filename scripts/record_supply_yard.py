@@ -50,7 +50,7 @@ def action_for(env: PickAndCarryEnv) -> torch.Tensor:
 
 
 def main() -> None:
-    out = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry_supplies_90s.mp4"
+    out = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry" / "PickAndCarry_supplies_90s.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
     cfg = EnvConfig(
         num_envs=1,

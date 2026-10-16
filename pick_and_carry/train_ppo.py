@@ -18,6 +18,9 @@ from torch.utils.tensorboard import SummaryWriter
 from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
 from pick_and_carry.config import EnvConfig, layout_dim
 from pick_and_carry.curriculum import (
+    CATCH_LEVELS,
+    LOCOMOTION_STAGES,
+    STAGES,
     earlier_stages,
     holds_arm_pose,
     later_stages,
@@ -84,7 +87,7 @@ def archive_incompatible_logs(log_dir: Path, obs_dim: int, act_dim: int, scripte
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train pick-and-carry with PPO on Genesis.")
-    parser.add_argument("--num-envs", type=int, default=16)
+    parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--iterations", type=int, default=60)
     parser.add_argument("--num-steps", type=int, default=128)
     # Defaults follow rsl_rl / legged_gym: lr starts at 1e-3 and follows the KL target.
@@ -96,9 +99,9 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--num-mini-batches", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=0, help="Samples per minibatch. 0 uses batch / --num-mini-batches.")
-    parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--entropy-coef", type=float, default=0.001)
     parser.add_argument("--value-coef", type=float, default=1.0)
-    parser.add_argument("--leg-init-std", type=float, default=1.0)
+    parser.add_argument("--leg-init-std", type=float, default=0.3)
     parser.add_argument("--arm-init-std", type=float, default=0.4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
@@ -131,15 +134,16 @@ def parse_args():
     )
     parser.add_argument(
         "--curriculum",
-        choices=("carry", "walk", "jump", "stand", "sit", "rough", "haul", "catch"),
+        choices=STAGES,
         default="carry",
-        help="carry is pick-and-place. walk, then jump, stand, sit, then rough, haul, and catch.",
+        help="walk (stand, walk, turn, bumpy ground, arm moving), then reach, then haul and carry (the box) "
+        "or catch.",
     )
     parser.add_argument(
         "--catch-level",
-        choices=("static", "slow", "random", "noisy"),
+        choices=CATCH_LEVELS,
         default="static",
-        help="How the ball moves in the catch stage.",
+        help="How the ball moves in the catch stage: static, rolling, thrown, thrown with a noisy view.",
     )
     parser.add_argument(
         "--retreat",
@@ -380,14 +384,17 @@ def make_config(args) -> EnvConfig:
         cfg.control_split = "walk"
     elif cfg.curriculum != "carry":
         cfg.control_split = "both"
-    if cfg.curriculum in ("walk", "jump", "stand", "sit", "haul", "catch"):
+    if cfg.curriculum in LOCOMOTION_STAGES:
+        # Walk is the one stage on bumpy ground. The bumps start flat and grow with the score.
+        cfg.terrain = True
+        # The arm moves at random so the legs learn to balance it.
+        cfg.arm_disturb = True
+    elif cfg.curriculum != "carry":
         cfg.terrain = False
         cfg.terrain_steps = False
-    elif cfg.curriculum == "rough":
-        cfg.terrain = True
-    if cfg.curriculum in ("haul", "catch"):
+    if cfg.curriculum in ("haul", "reach", "catch"):
         cfg.catch_hold_steps = max(1, int(round(1.0 / cfg.dt)))
-    if cfg.curriculum in ("walk", "rough") and not args.play:
+    if cfg.curriculum in LOCOMOTION_STAGES and not args.play:
         # Pushes and per-robot friction, as in legged_gym. Playback stays undisturbed.
         cfg.push_robots = True
         cfg.randomize_friction = True
@@ -403,32 +410,23 @@ def make_config(args) -> EnvConfig:
 def _level_from_path(path: Path) -> str:
     name = path.parent.name
     prefix = "ppo_curriculum_catch_"
-    if name.startswith(prefix) and name[len(prefix) :] in ("static", "slow", "random", "noisy"):
+    if name.startswith(prefix) and name[len(prefix) :] in CATCH_LEVELS:
         return name[len(prefix) :]
     return "static"
 
 
 def _stage_rank(stage: str, catch_level: str) -> int:
     """Higher means a harder task on the same ladder. Carry stays at zero."""
-    if stage == "stand":
-        return 1
-    if stage == "sit":
-        return 2
-    if stage == "walk":
-        return 3
-    if stage == "jump":
-        return 4
-    if stage == "rough":
-        return 5
-    if stage == "haul":
-        return 6
-    if stage == "catch" and catch_level in ("static", "slow", "random", "noisy"):
-        return 7 + ("static", "slow", "random", "noisy").index(catch_level)
+    ladder = ("walk", "reach", "haul")
+    if stage in ladder:
+        return 1 + ladder.index(stage)
+    if stage == "catch" and catch_level in CATCH_LEVELS:
+        return 1 + len(ladder) + CATCH_LEVELS.index(catch_level)
     return 0
 
 
 class _Difficulty:
-    """Ease the live task when scores stay low, then climb back to the selected one."""
+    """Raise the live task as the score allows, and ease it when scores stay low."""
 
     def __init__(self, curriculum: str, catch_level: str):
         self.poor = 0
@@ -437,16 +435,22 @@ class _Difficulty:
         self.current = 0
         self.target = 0
         self.labels: tuple[str, ...] = ()
-        if curriculum == "rough":
+        if curriculum in LOCOMOTION_STAGES:
+            # Start on flat ground and climb to the selected bumps once walking is tracked.
             self.kind = "terrain"
             self.labels = ("平地", "半分の段差", "選んだ不整地")
             self.target = 2
-            self.current = 2
+            self.current = 0
         elif curriculum == "catch":
             self.kind = "catch"
-            self.labels = ("静止", "ゆっくり", "ばらす", "ノイズ")
-            self.target = ("static", "slow", "random", "noisy").index(catch_level)
+            self.labels = ("静止", "ゆっくり", "ばらす", "飛ぶ", "ノイズ")
+            self.target = CATCH_LEVELS.index(catch_level)
             self.current = self.target
+
+    def start(self, env) -> None:
+        """Put the environment on the starting rung. Walk begins on flat ground."""
+        if self.kind == "terrain":
+            env.set_terrain_mix(self.current / max(1, self.target))
 
     def update(self, env, score: float | None) -> str:
         if self.kind is None:
@@ -464,7 +468,7 @@ class _Difficulty:
             if self.kind == "terrain":
                 env.set_terrain_mix((0.0, 0.5, 1.0)[new])
             else:
-                env.set_catch_level(("static", "slow", "random", "noisy")[new])
+                env.set_catch_level(CATCH_LEVELS[new])
             if new < previous:
                 print(f"成績が低いので、{self.labels[new]} に戻しました。回復したら上げます。", flush=True)
             else:
@@ -649,6 +653,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
     )
     step_times: list[float] = []
     difficulty = _Difficulty(cfg.curriculum, cfg.catch_level)
+    difficulty.start(env)
     for iteration in range(start_iteration + 1, last_iteration + 1):
         started = time.perf_counter()
         obs_buf, act_buf, logp_buf, val_buf, rew_buf, boot_buf, done_buf = [], [], [], [], [], [], []
@@ -657,12 +662,13 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         gait_sum = 0.0
         steady_sum = 0.0
         jerk_sum = 0.0
+        tracking_sum = 0.0
         grip_sum = 0.0
         success_sum = 0.0
         success_count = 0
-        if cfg.curriculum in ("walk", "rough", "haul", "jump", "stand", "sit"):
-            progress_key = "tracking"
-        elif cfg.curriculum == "catch":
+        if cfg.curriculum in (*LOCOMOTION_STAGES, "haul"):
+            progress_key = "walk_score"
+        elif cfg.curriculum in ("catch", "reach"):
             progress_key = "approach"
         else:
             progress_key = "ee_dist"
@@ -695,6 +701,9 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             steady_score = env.reward_terms.get("steady")
             if steady_score is not None:
                 steady_sum += float(steady_score.mean())
+            tracking_score = env.reward_terms.get("tracking")
+            if tracking_score is not None:
+                tracking_sum += float(tracking_score.mean())
             jerk_score = env.reward_terms.get("jerk")
             if jerk_score is not None:
                 jerk_sum += float(jerk_score.mean())
@@ -765,8 +774,9 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         elif progress_key == "approach":
             detail = f"approach {mean_dist:.3f} grasp {grasp_rate:.2f}"
         else:
-            detail = f"tracking {mean_dist:.3f}"
-            if cfg.curriculum in ("walk", "rough"):
+            detail = f"walk {mean_dist:.3f} tracking {tracking_sum / args.num_steps:.3f}"
+            row["tracking"] = tracking_sum / args.num_steps
+            if cfg.curriculum in LOCOMOTION_STAGES:
                 detail = (
                     f"{detail} gait {gait_sum / args.num_steps:.3f} "
                     f"steady {steady_sum / args.num_steps:.3f} "
@@ -780,7 +790,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         row["entropy"] = float(metrics["entropy"])
         append_metrics(args.log_dir / "metrics.jsonl", row)
         tracker.log_row(row)
-        if cfg.curriculum == "rough":
+        if cfg.curriculum in LOCOMOTION_STAGES:
             live_score = mean_dist
         elif cfg.curriculum == "catch" and success_count:
             live_score = success_sum / success_count

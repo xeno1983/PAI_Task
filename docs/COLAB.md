@@ -14,7 +14,7 @@ CPU のまま実行すると、Genesis は GPU を見つけられず CPU に落�
 
 ## 2. プロジェクトを置く
 
-ローカルでは、デスクトップの `起動スクリプト\PickAndCarry_run.bat` を開き、`4` を選びます。同じフォルダに `PAI_Task_colab.zip` ができます。`.venv`、`logs`、`__pycache__`、`.git` は除いてあります。
+ローカルでは、デスクトップの `起動スクリプト\PickAndCarry\PickAndCarry_run.bat` を開き、`4` を選びます。同じフォルダに `PAI_Task_colab.zip` ができます。`.venv`、`logs`、`__pycache__`、`.git` は除いてあります。
 
 Colab のファイルパネルから、この zip をアップロードして展開します。
 

@@ -8,43 +8,121 @@ import torch
 
 from pick_and_carry.config import layout_dim
 from pick_and_carry.curriculum import (
-    SIT_HEIGHT,
-    STAND_HEIGHT,
-    crouch_legs,
+    BALL_RADIUS,
+    CATCH_LEVELS,
+    REACH_X,
+    REACH_Y,
+    REACH_Z,
+    STAGES,
+    ball_in_base,
     earlier_stages,
     feet_air_time_reward,
+    holds_arm_pose,
     later_stages,
     locomotion_reward,
     manipulation_reward,
-    pose_reward,
-    posture_achieved,
-    holds_arm_pose,
     retreat_choice,
     sample_ball,
     sample_command,
+    sample_reach_target,
     stage_layouts,
     stage_log_dir,
+    walk_score,
 )
 
 
 class LayoutTests(unittest.TestCase):
-    def test_leg_tasks_hold_the_reset_arm_pose(self):
-        for stage in ("stand", "sit", "walk", "jump", "rough"):
-            self.assertTrue(holds_arm_pose(stage))
-        for stage in ("haul", "carry", "catch"):
+    def test_the_stages_are_walk_reach_the_box_and_catch(self):
+        self.assertEqual(STAGES, ("walk", "reach", "haul", "carry", "catch"))
+        self.assertEqual(CATCH_LEVELS, ("static", "slow", "random", "fly", "noisy"))
+
+    def test_only_walk_leaves_the_arm_to_the_environment(self):
+        self.assertTrue(holds_arm_pose("walk"))
+        for stage in ("reach", "haul", "carry", "catch"):
             self.assertFalse(holds_arm_pose(stage))
+        for gone in ("stand", "sit", "jump", "rough"):
+            with self.assertRaises(ValueError):
+                holds_arm_pose(gone)
 
     def test_every_stage_uses_the_arm_layout(self):
         from pick_and_carry.arms import layouts
 
         shared = layouts(6)
-        for stage in ("carry", "stand", "sit", "walk", "jump", "rough", "haul", "catch"):
+        for stage in STAGES:
             self.assertEqual(stage_layouts(stage, 6), shared)
         self.assertEqual(layout_dim(shared[0]), 81)
         self.assertEqual(layout_dim(shared[1]), 19)
 
 
 class CommandTests(unittest.TestCase):
+    def test_walk_commands_include_standing_still(self):
+        torch.manual_seed(0)
+        command = sample_command(4000, stand_share=0.2)
+        still = (command.abs().sum(dim=-1) == 0).float().mean().item()
+        self.assertAlmostEqual(still, 0.2, delta=0.03)
+        self.assertEqual(float(sample_command(500).eq(0).all(dim=-1).float().sum()), 0.0)
+
+    def test_reach_targets_stay_in_the_box_in_front_of_the_body(self):
+        base = torch.tensor([[1.0, 2.0, 0.42]]).expand(500, 3)
+        target = sample_reach_target(base)
+        ahead = target[:, 0] - 1.0
+        aside = target[:, 1] - 2.0
+        self.assertGreaterEqual(float(ahead.min()), REACH_X[0] - 1e-6)
+        self.assertLessEqual(float(ahead.max()), REACH_X[1] + 1e-6)
+        self.assertGreaterEqual(float(aside.min()), REACH_Y[0] - 1e-6)
+        self.assertLessEqual(float(aside.max()), REACH_Y[1] + 1e-6)
+        self.assertGreaterEqual(float(target[:, 2].min()), REACH_Z[0] - 1e-6)
+        self.assertLessEqual(float(target[:, 2].max()), REACH_Z[1] + 1e-6)
+
+    def test_a_thrown_ball_passes_through_the_reach_box(self):
+        torch.manual_seed(1)
+        base = torch.tensor([[0.0, 0.0, 0.42]]).expand(300, 3)
+        for level in ("fly", "noisy"):
+            position, linear, angular = sample_ball(level, base)
+            self.assertEqual(float(angular.abs().max()), 0.0)
+            self.assertGreater(float(position[:, 0].min()), 1.3)
+            self.assertGreater(float(position[:, 2].min()), 0.45)
+            # Under gravity, find the point of the path nearest the front of the body.
+            crossing = []
+            for t in torch.linspace(0.6, 1.3, 71):
+                point = position + linear * t
+                point[:, 2] = point[:, 2] - 0.5 * 9.81 * t * t
+                crossing.append(point)
+            path = torch.stack(crossing)
+            reach = (
+                (path[..., 0] >= REACH_X[0] - 0.02)
+                & (path[..., 0] <= REACH_X[1] + 0.02)
+                & (path[..., 2] >= REACH_Z[0] - 0.05)
+                & (path[..., 2] <= REACH_Z[1] + 0.05)
+            ).any(dim=0)
+            self.assertTrue(bool(reach.all()), level)
+            # It comes toward the robot.
+            self.assertLess(float(linear[:, 0].max()), 0.0)
+
+    def test_the_ball_view_has_velocity_and_a_short_prediction(self):
+        base_pos = torch.zeros(2, 3)
+        quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(2, 4)
+        ball = torch.tensor([[1.0, 0.0, 0.8], [1.0, 0.0, BALL_RADIUS]])
+        velocity = torch.tensor([[-2.0, 0.0, 1.0], [-0.3, 0.0, 0.0]])
+        seen, seen_vel, ahead = ball_in_base(ball, velocity, base_pos, quat, "fly")
+        self.assertTrue(torch.allclose(seen, ball))
+        self.assertTrue(torch.allclose(seen_vel, velocity))
+        # Flying: 0.3 s along the path and a fall of g t^2 / 2. Rolling: a straight line on the ground.
+        self.assertAlmostEqual(float(ahead[0, 0]), 1.0 - 0.6, places=4)
+        self.assertAlmostEqual(float(ahead[0, 2]), 0.8 + 0.3 - 0.5 * 9.81 * 0.09, places=4)
+        self.assertAlmostEqual(float(ahead[1, 0]), 1.0 - 0.09, places=4)
+        self.assertAlmostEqual(float(ahead[1, 2]), BALL_RADIUS, places=4)
+
+    def test_only_the_noisy_level_blurs_the_ball_view(self):
+        base_pos = torch.zeros(64, 3)
+        quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(64, 4)
+        ball = torch.ones(64, 3)
+        velocity = torch.ones(64, 3)
+        clean, _, _ = ball_in_base(ball, velocity, base_pos, quat, "fly")
+        blurred, _, _ = ball_in_base(ball, velocity, base_pos, quat, "noisy")
+        self.assertEqual(float((clean - ball).abs().max()), 0.0)
+        self.assertGreater(float((blurred - ball).abs().max()), 0.0)
+
     def test_slow_ball_rolls_toward_the_robot(self):
         base = torch.tensor([[0.0, 0.0, 0.4]])
         position, linear, _ = sample_ball("slow", base)
@@ -56,82 +134,6 @@ class CommandTests(unittest.TestCase):
         _, linear, angular = sample_ball("static", base)
         self.assertEqual(float(linear.abs().max()), 0.0)
         self.assertEqual(float(angular.abs().max()), 0.0)
-
-
-class PostureTests(unittest.TestCase):
-    def _reward(self, task: str, height: float, vz: float = 0.0):
-        reward, terms, fallen = pose_reward(
-            task,
-            base_height=torch.tensor([height]),
-            base_lin_vel=torch.zeros(1, 3),
-            base_lin_vel_world=torch.tensor([[0.0, 0.0, vz]]),
-            base_ang_vel=torch.zeros(1, 3),
-            projected_gravity=torch.tensor([[0.0, 0.0, -1.0]]),
-            foot_contact=torch.ones(1, 4),
-            actions=torch.zeros(1, 12),
-            max_tilt_deg=60.0,
-            min_base_height=0.18,
-            dt=0.02,
-        )
-        return reward, terms, fallen
-
-    def test_the_crouch_stays_inside_the_standing_action(self):
-        from pick_and_carry.curriculum import CROUCH_FOLD
-
-        standing = torch.tensor([0.0, 0.8, -1.5] * 4)
-        folded = crouch_legs(standing)
-        self.assertAlmostEqual(float(folded[1] - standing[1]), CROUCH_FOLD)
-        self.assertAlmostEqual(float(standing[2] - folded[2]), CROUCH_FOLD)
-        self.assertEqual(float(folded[0]), 0.0)
-        self.assertLessEqual(float((folded - standing).abs().max()), 0.50)
-
-    def test_standing_at_the_target_height_scores_higher_than_crouching(self):
-        _, standing, _ = self._reward("stand", STAND_HEIGHT)
-        _, low, _ = self._reward("stand", SIT_HEIGHT)
-        self.assertGreater(standing["tracking"].item(), low["tracking"].item())
-
-    def test_sitting_at_the_low_height_scores_higher_than_standing_tall(self):
-        _, sitting, _ = self._reward("sit", SIT_HEIGHT)
-        _, tall, _ = self._reward("sit", STAND_HEIGHT)
-        self.assertGreater(sitting["tracking"].item(), tall["tracking"].item())
-
-    def test_a_jump_lands_only_after_the_feet_leave_the_ground(self):
-        height = torch.tensor([STAND_HEIGHT])
-        still = torch.zeros(1, 3)
-        down = torch.ones(1, 4)
-        up = torch.zeros(1, 4)
-        fallen = torch.tensor([False])
-        landed, airborne = posture_achieved(
-            "jump",
-            base_height=height,
-            base_lin_vel=still,
-            base_ang_vel=still,
-            foot_contact=down,
-            fallen=fallen,
-            was_airborne=torch.tensor([False]),
-        )
-        self.assertFalse(bool(landed))
-        self.assertFalse(bool(airborne))
-        _, airborne = posture_achieved(
-            "jump",
-            base_height=torch.tensor([STAND_HEIGHT + 0.1]),
-            base_lin_vel=still,
-            base_ang_vel=still,
-            foot_contact=up,
-            fallen=fallen,
-            was_airborne=torch.tensor([False]),
-        )
-        self.assertTrue(bool(airborne))
-        landed, _ = posture_achieved(
-            "jump",
-            base_height=height,
-            base_lin_vel=still,
-            base_ang_vel=still,
-            foot_contact=down,
-            fallen=fallen,
-            was_airborne=torch.tensor([True]),
-        )
-        self.assertTrue(bool(landed))
 
 
 def _walk_reward(**overrides):
@@ -223,6 +225,43 @@ class RewardTests(unittest.TestCase):
         self.assertNotIn("arm", " ".join(_walk_reward()[1]))
 
 
+class WalkScoreTests(unittest.TestCase):
+    def _score(self, command, lin, yaw=0.0):
+        command = torch.tensor([command], dtype=torch.float32)
+        lin_vel = torch.tensor([[lin[0], lin[1], 0.0]], dtype=torch.float32)
+        ang_vel = torch.tensor([[0.0, 0.0, yaw]], dtype=torch.float32)
+        return float(walk_score(command, lin_vel, ang_vel))
+
+    def test_standing_still_scores_zero_on_a_moving_command(self):
+        self.assertLess(self._score((0.4, 0.0, 0.0), (0.0, 0.0)), 0.01)
+        self.assertLess(self._score((0.0, 0.0, 0.5), (0.0, 0.0), 0.0), 0.01)
+
+    def test_the_commanded_speed_scores_one(self):
+        self.assertAlmostEqual(self._score((0.4, 0.0, 0.0), (0.4, 0.0)), 1.0, places=4)
+        self.assertAlmostEqual(self._score((0.0, 0.0, 0.5), (0.0, 0.0), 0.5), 1.0, places=4)
+
+    def test_half_speed_scores_half_and_wrong_ways_score_zero(self):
+        self.assertAlmostEqual(self._score((0.4, 0.0, 0.0), (0.2, 0.0)), 0.5, places=4)
+        self.assertEqual(self._score((0.4, 0.0, 0.0), (-0.4, 0.0)), 0.0)
+        self.assertEqual(self._score((0.4, 0.0, 0.0), (0.8, 0.0)), 0.0)
+
+    def test_a_still_command_rewards_staying_still(self):
+        self.assertGreater(self._score((0.0, 0.0, 0.0), (0.0, 0.0)), 0.99)
+        self.assertLess(self._score((0.0, 0.0, 0.0), (0.3, 0.0)), 0.01)
+
+    def test_both_parts_are_averaged(self):
+        self.assertAlmostEqual(self._score((0.4, 0.0, 0.5), (0.4, 0.0), 0.0), 0.5, places=4)
+
+    def test_standing_still_on_training_commands_is_far_below_the_difficulty_threshold(self):
+        torch.manual_seed(0)
+        command = sample_command(4000, stand_share=0.2)
+        zero = torch.zeros(4000, 3)
+        score = float(walk_score(command, zero, zero).mean())
+        self.assertLess(score, 0.35)
+        tracking = [float(_walk_reward(command=command[i : i + 1])[1]["tracking"]) for i in range(300)]
+        self.assertGreater(sum(tracking) / len(tracking), 0.5)
+
+
 class AirTimeTests(unittest.TestCase):
     def _step(self, air, last, contact, command, steps=1):
         reward = torch.zeros(1)
@@ -312,18 +351,24 @@ class AirTimeTests(unittest.TestCase):
 
 class TransferTests(unittest.TestCase):
     def test_each_stage_points_at_the_previous_skill(self):
-        self.assertEqual(earlier_stages("stand"), [])
-        self.assertEqual(earlier_stages("sit"), [("stand", "static")])
-        self.assertEqual(earlier_stages("walk"), [("sit", "static"), ("stand", "static")])
-        self.assertEqual(earlier_stages("carry"), [("haul", "static"), ("rough", "static"), ("jump", "static"), ("walk", "static"), ("sit", "static"), ("stand", "static")])
-        self.assertEqual(earlier_stages("catch", "static")[0], ("carry", "static"))
-        self.assertIn(("haul", "static"), earlier_stages("catch", "static"))
-        self.assertEqual(later_stages("walk")[0], ("jump", "static"))
-        self.assertEqual(later_stages("jump")[0], ("rough", "static"))
-        self.assertEqual(later_stages("catch", "slow"), [("catch", "random"), ("catch", "noisy")])
+        self.assertEqual(earlier_stages("walk"), [])
+        self.assertEqual(earlier_stages("reach"), [("walk", "static")])
+        self.assertEqual(earlier_stages("haul"), [("reach", "static"), ("walk", "static")])
+        self.assertEqual(
+            earlier_stages("carry"), [("haul", "static"), ("reach", "static"), ("walk", "static")]
+        )
+        # Catch grows from reach, not from the box.
+        self.assertEqual(earlier_stages("catch", "static"), [("reach", "static"), ("walk", "static")])
+        self.assertEqual(
+            earlier_stages("catch", "fly"),
+            [("catch", "random"), ("catch", "slow"), ("catch", "static"), ("reach", "static"), ("walk", "static")],
+        )
+        self.assertEqual(later_stages("walk")[0], ("reach", "static"))
+        self.assertEqual(later_stages("reach")[0], ("haul", "static"))
+        self.assertEqual(later_stages("catch", "slow"), [("catch", "random"), ("catch", "fly"), ("catch", "noisy")])
         self.assertEqual(later_stages("catch", "noisy"), [])
 
-    def test_rough_starts_from_walk_until_it_has_its_own_weights(self):
+    def test_reach_starts_from_walk_until_it_has_its_own_weights(self):
         import tempfile
         from pathlib import Path
 
@@ -331,7 +376,7 @@ class TransferTests(unittest.TestCase):
 
         from pick_and_carry.train_ppo import resolve_checkpoint
 
-        def save(directory: Path, name: str, stage: str, gait: bool, obs: int = 69, act: int = 19, arm: str = "z1") -> None:
+        def save(directory: Path, name: str, stage: str, gait: bool, obs: int = 81, act: int = 19, arm: str = "z1") -> None:
             directory.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {"obs_dim": obs, "act_dim": act, "scripted_gait": gait, "arm": arm, "curriculum": stage},
@@ -341,27 +386,78 @@ class TransferTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             walk = stage_log_dir("walk", root=root)
-            rough = stage_log_dir("rough", root=root)
+            reach = stage_log_dir("reach", root=root)
             haul = stage_log_dir("haul", root=root)
             slow = stage_log_dir("catch", "slow", root=root)
             save(walk, "ppo_0001.pt", "walk", False, arm="panda")
-            found = resolve_checkpoint(rough, "latest", 69, 19, False, "z1", "rough", root=root)
+            found = resolve_checkpoint(reach, "latest", 81, 19, False, "z1", "reach", root=root)
             self.assertIsNone(found)
             save(walk, "ppo_0002.pt", "walk", False)
-            found = resolve_checkpoint(rough, "latest", 69, 19, False, "z1", "rough", root=root)
+            found = resolve_checkpoint(reach, "latest", 81, 19, False, "z1", "reach", root=root)
             self.assertEqual(found, walk / "ppo_0002.pt")
-            save(rough, "ppo_0004.pt", "rough", False)
-            found = resolve_checkpoint(rough, "latest", 69, 19, False, "z1", "rough", root=root)
-            self.assertEqual(found, rough / "ppo_0004.pt")
+            save(reach, "ppo_0004.pt", "reach", False)
+            found = resolve_checkpoint(reach, "latest", 81, 19, False, "z1", "reach", root=root)
+            self.assertEqual(found, reach / "ppo_0004.pt")
+            # The catch levels start from reach, and not from the box task.
             save(haul, "ppo_0001.pt", "haul", False)
-            found = resolve_checkpoint(slow, "latest", 69, 19, False, "z1", "catch", "slow", root=root)
-            self.assertEqual(found, haul / "ppo_0001.pt")
-            found = resolve_checkpoint(
-                walk, "latest", 69, 19, False, "z1", "walk", root=root, retreat=True
-            )
-            self.assertEqual(found, rough / "ppo_0004.pt")
-            found = resolve_checkpoint(walk, "latest", 69, 19, False, "z1", "walk", root=root)
+            found = resolve_checkpoint(slow, "latest", 81, 19, False, "z1", "catch", "slow", root=root)
+            self.assertEqual(found, reach / "ppo_0004.pt")
+            # Practicing walk again prefers the harder stage's weights.
+            found = resolve_checkpoint(walk, "latest", 81, 19, False, "z1", "walk", root=root, retreat=True)
+            self.assertEqual(found, reach / "ppo_0004.pt")
+            found = resolve_checkpoint(walk, "latest", 81, 19, False, "z1", "walk", root=root)
             self.assertEqual(found, walk / "ppo_0002.pt")
+
+    def test_a_removed_stage_has_no_folder(self):
+        for gone in ("stand", "sit", "jump", "rough"):
+            with self.assertRaises(ValueError):
+                stage_log_dir(gone)
+
+    def test_the_trainer_ranks_the_ladder(self):
+        from pick_and_carry.train_ppo import _stage_rank
+
+        ranks = [_stage_rank("walk", "static"), _stage_rank("reach", "static"), _stage_rank("haul", "static")]
+        self.assertEqual(ranks, sorted(ranks))
+        self.assertLess(ranks[-1], _stage_rank("catch", "static"))
+        self.assertLess(_stage_rank("catch", "slow"), _stage_rank("catch", "fly"))
+        self.assertEqual(_stage_rank("carry", "static"), 0)
+
+
+class DifficultyTests(unittest.TestCase):
+    def test_walk_starts_flat_and_climbs_with_the_score(self):
+        from pick_and_carry.train_ppo import _Difficulty
+
+        class Env:
+            mix = None
+
+            def set_terrain_mix(self, value):
+                self.mix = value
+
+        env = Env()
+        difficulty = _Difficulty("walk", "static")
+        difficulty.start(env)
+        self.assertEqual(env.mix, 0.0)
+        for _ in range(8):
+            difficulty.update(env, 0.9)
+        self.assertEqual(env.mix, 0.5)
+        for _ in range(8):
+            difficulty.update(env, 0.9)
+        self.assertEqual(env.mix, 1.0)
+
+    def test_catch_climbs_back_toward_the_selected_ball(self):
+        from pick_and_carry.train_ppo import _Difficulty
+
+        class Env:
+            level = None
+
+            def set_catch_level(self, value):
+                self.level = value
+
+        env = Env()
+        difficulty = _Difficulty("catch", "fly")
+        for _ in range(8):
+            difficulty.update(env, 0.0)
+        self.assertEqual(env.level, "random")
 
 
 class TrainerSetupTests(unittest.TestCase):
@@ -433,7 +529,7 @@ class RetreatChoiceTests(unittest.TestCase):
 
 
 class MissingPlaybackTests(unittest.TestCase):
-    def test_catch_without_weights_names_the_haul_folder(self):
+    def test_catch_without_weights_names_the_reach_and_walk_folders(self):
         import tempfile
         from argparse import Namespace
         from pathlib import Path
@@ -454,5 +550,5 @@ class MissingPlaybackTests(unittest.TestCase):
             message = missing_play_checkpoint(args, cfg, root=root)
         self.assertIsNotNone(message)
         self.assertIn("再生できる重みがありません", message)
-        self.assertIn("ppo_curriculum_haul", message)
-        self.assertIn("ppo_z1", message)
+        self.assertIn("ppo_curriculum_reach", message)
+        self.assertIn("ppo_curriculum_walk", message)

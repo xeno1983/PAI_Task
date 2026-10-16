@@ -321,6 +321,13 @@ class EnvConfig:
     push_interval_s: float = 15.0
     push_max_vel: float = 0.5
     randomize_friction: bool = False
+    # Walk only: the arm moves to random poses so the legs learn to balance a moving 5 kg arm.
+    arm_disturb: bool = False
+    # Fraction of each joint's range from the reset pose that a random target may use.
+    arm_disturb_scale: float = 0.5
+    arm_disturb_interval_s: float = 2.0
+    # Per-step share of the way the arm moves toward its random target.
+    arm_disturb_rate: float = 0.06
     friction_range: tuple[float, float] = (0.5, 1.25)
     max_collision_pairs: int = 512
     seed: int = 0

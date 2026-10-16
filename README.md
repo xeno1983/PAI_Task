@@ -44,20 +44,20 @@ Genesis がなくても、報酬と URDF のテストは通ります。
 
 ## 3. 起動スクリプトで実行する
 
-デスクトップの `起動スクリプト\PickAndCarry_run.bat` をダブルクリックします。中身は `launcher\PickAndCarry_run.ps1` と同じメニューです。ログの窓は、`exit code` が出るまで閉じません。
+デスクトップの `起動スクリプト\PickAndCarry\PickAndCarry_run.bat` をダブルクリックします。中身は `launcher\PickAndCarry_run.ps1` と同じメニューです。ログの窓は、`exit code` が出るまで閉じません。
 
 | 番号 | 内容 | 主な出力 |
 | --- | --- | --- |
 | 1 | 8 秒間立たせて録画 | `PickAndCarry_smoke.mp4`（Z1 なら `PickAndCarry_z1_smoke.mp4`） |
 | 2 | PPO で学習し、終わると曲線と 20 秒の再生 | `PickAndCarry_ppo.mp4` または `PickAndCarry_z1.mp4` |
 | 3 | 短い SAC（Panda のみ、8 環境、500 ステップ） | `PickAndCarry_sac.mp4` |
-| 4 | Colab 用 zip | `起動スクリプト\PAI_Task_colab.zip` |
+| 4 | Colab 用 zip | `起動スクリプト\PickAndCarry\PAI_Task_colab.zip` |
 | 5 | クリックで物資と運び先を決めて再生。ROS 2 を選ぶと実行中に運び先を変えられる | 同じ mp4 |
 | 6 | 学習の早い時点と遅い時点を 1 本に並べる | `PickAndCarry_compare.mp4` |
 | 7 | 学習曲線をブラウザで開く | `PickAndCarry_curves.html` |
 | 8 | スライドと録画を、説明音声つきの 1 本にする | `PickAndCarry_presentation.mp4` |
 
-出力ファイルは、bat と同じ `起動スクリプト` フォルダにできます。
+出力ファイルは、bat と同じ `起動スクリプト\PickAndCarry` フォルダにできます。
 
 2 番を選ぶと、次を順に聞きます。Enter は括弧内の既定です。
 
@@ -86,7 +86,7 @@ Z1 で最初から学ぶときは `--arm z1 --log-dir logs/ppo_z1` を付けま�
 再生は学習せず、保存した重みで mp4 を書きます。
 
 ```powershell
-.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --seconds 20 --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry_ppo.mp4" --log-dir logs/ppo_walk --terrain-steps --terrain-amplitude 0.045
+.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --seconds 20 --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry\PickAndCarry_ppo.mp4" --log-dir logs/ppo_walk --terrain-steps --terrain-amplitude 0.045
 ```
 
 よく使う引数は次です。
@@ -119,7 +119,7 @@ Windows では起動スクリプトの 5 番で「ROS 2 で表示する」を選
 
 ```powershell
 $wslIp = (wsl.exe -d Ubuntu -- hostname -I).Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)[0]
-.\.venv\Scripts\python.exe scripts\infer_gui.py --log-dir logs/ppo_walk --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry_ppo.mp4" --seconds 60 --ros --ros-host $wslIp --terrain-steps --terrain-amplitude 0.045
+.\.venv\Scripts\python.exe scripts\infer_gui.py --log-dir logs/ppo_walk --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry\PickAndCarry_ppo.mp4" --seconds 60 --ros --ros-host $wslIp --terrain-steps --terrain-amplitude 0.045
 ```
 
 クリック画面の 1 点目が物資、2 点目が最初の運び先です。起動スクリプトの 5 番で ROS 2 を選ぶと rviz2 が開きます。`world` 座標は最初から出るので、ロボットモデルのエラーは推論を待たなくても消えます。推論が始まると、Windows にシミュレーション画面が開いて順に更新されます。rviz2 上部の Publish Point で地面をクリックすると、黄色い球がその場に出ます。推論中なら運び先がそこへ変わり、シミュレーション画面の緑の位置も動きます。コースの外はコース内に収めます。終わったあとの mp4 も残ります。ROS 2 を選ばないときは、これまでどおり推論が終わってから動画を開きます。
@@ -129,7 +129,7 @@ $wslIp = (wsl.exe -d Ubuntu -- hostname -I).Split(" ", [System.StringSplitOption
 学習曲線と比較動画です。
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\plot_curves.py --log-dir logs/ppo_walk --output "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry_curves.html"
+.\.venv\Scripts\python.exe scripts\plot_curves.py --log-dir logs/ppo_walk --output "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry\PickAndCarry_curves.html"
 .\.venv\Scripts\python.exe scripts\compare_snapshots.py --log-dir logs/ppo_walk --seconds 16 --panels 4 --terrain-steps --terrain-amplitude 0.045
 ```
 
@@ -147,32 +147,52 @@ $wslIp = (wsl.exe -d Ubuntu -- hostname -I).Split(" ", [System.StringSplitOption
 
 腕の初期姿勢で、手先は胴体の前方およそ 0.4 m に来ます。箱は一辺 4 cm です。つかんだとみなす距離は 0.12 m、指が閉じた基準は Panda で開き 0.012 m 未満です。
 
-### 観測と行動（Panda）
+### 段階的な学習
 
-`reset()` は `(環境数, 68)`、`step(action)` は `obs, reward, done, info` を返します。行動は `(環境数, 20)` で、各成分は -1 から 1 です。Z1 は腕が 6 関節なので、観測 66、行動 19 です。並びは同じで、腕の角度と角速度だけ 1 関節分短くなります。
+段階は `--curriculum` で選びます。全段階が観測 81・行動 19 で、重みは次の順に引き継ぎます。
+
+| 段階 | 内容 | 重みの元 |
+| --- | --- | --- |
+| `walk` | 立つ・歩く・旋回。平地から始め、成績が良いと傾斜と段差へ広げる。指令の 20% は静止。腕は勝手に動かす。ときどき押し、床の摩擦もばらす | なし |
+| `reach` | 胴の前の空中の点へ手先を届かせる。脚は歩行の姿勢を保つ | `walk` |
+| `haul` | 箱を持ったまま歩く | `reach` |
+| `carry` | ピック＆プレース（箱運び）。`logs/ppo_z1` | `haul` |
+| `catch` | ボールのキャッチ。`--catch-level` は `static`、`slow`、`random`、`fly`、`noisy` | `reach`（上の水準から順に） |
+
+旧い立つ・座る・ジャンプ・不整地の段階は、歩行に統合しました。以前の `logs/ppo_curriculum_stand` などは使いません。
+
+`catch` の観測は、物体位置の欄にボール位置、目標位置の欄にボール速度 × 0.5、速度指令の欄に 0.3 秒先の予測位置 × 0.1 を入れます。`fly` と `noisy` は転がしたあと宙を飛ばし、床に落ちると試行を終えます。
+
+### 観測と行動（Z1）
+
+`reset()` は `(環境数, 81)`、`step(action)` は `obs, reward, done, info` を返します。行動は `(環境数, 19)` で、各成分は -1 から 1 です。Panda は腕が 7 関節のため、観測 83、行動 20 です。
 
 | 区間 | 内容 |
 | --- | --- |
-| 0:12 | 脚の関節角（FL, FR, RL, RR の順に hip, thigh, calf） |
+| 0:12 | 脚の関節角（立ち姿勢との差。FL, FR, RL, RR の順に hip, thigh, calf） |
 | 12:24 | 脚の関節速度 × 0.05 |
 | 24:27 | ベース座標系の重力 |
 | 27:30 | ベース線速度 × 2 |
 | 30:33 | ベース角速度 × 0.25 |
 | 33:34 | ベース高さ |
 | 34:38 | 足先の接地（接触力 1 N 超） |
-| 38:45 | 腕の関節角（Panda は 7、Z1 は 6） |
-| 45:52 | 腕の関節速度 × 0.05 |
-| 52:53 | グリッパ。Panda は 0 が閉じ、0.04 m が全開 |
-| 53:54 | グリッパ速度 × 0.05 |
-| 54:57 | 手先位置（ベース座標） |
-| 57:60 | 物体位置（ベース座標）。手先カメラで見えないときは (0, 0, -1) |
-| 60:63 | 目標位置（ベース座標） |
-| 63:64 | 把持フラグ |
-| 64:68 | 段階 one-hot（箱へ歩く、拾う、運ぶ、置く） |
+| 38:44 | 腕の関節角 |
+| 44:50 | 腕の関節速度 × 0.05 |
+| 50:51 | グリッパ |
+| 51:52 | グリッパ速度 × 0.05 |
+| 52:55 | 手先位置（ベース座標） |
+| 55:58 | 物体位置（ベース座標）。到達・キャッチではボール。手先カメラで見えないときは (0, 0, -1) |
+| 58:61 | 目標位置（ベース座標）。キャッチではボール速度 × 0.5 |
+| 61:62 | 把持フラグ |
+| 62:66 | 段階 one-hot（箱へ歩く、拾う、運ぶ、置く） |
+| 66:69 | 速度指令。キャッチでは 0.3 秒先のボール位置 × 0.1 |
+| 69:81 | 直前の脚の指令 |
 
-行動は `[脚 12 | 腕 | グリッパ 1]` です。脚と腕は立ち姿勢からの差分で、脚は最大約 0.5 rad です。グリッパは -1 で閉じ、+1 で開きます。
+行動は `[脚 12 | 腕 | グリッパ 1]` です。脚は立ち姿勢からの差分に 0.25 を掛け、PD（kp 60、kd 1.5）で追従します。腕は初期姿勢からの差分、グリッパは -1 で閉じ +1 で開きます。
 
-報酬の式は `pick_and_carry/reward.py` です。前進（秒速 0.40 m 付近）、接近、把持、運搬、設置（+10）、転倒（-5）、操作量、生存を足します。歩行だけの学習では把持と設置の点は出しません。`ee_dist` は記録用で、報酬には足しません。
+歩行の報酬は legged_gym の標準の組み合わせです（速度の追従、縦揺れ・横揺れ、高さ 0.30 m、トルク、加速度、行動の変化、足を上げた時間、衝突、終了）。方策は 512×256×128 の ELU で、行動は正規分布です。学習率は KL 0.01 を目標に自動で調整します。
+
+箱運びの報酬の式は `pick_and_carry/reward.py` です。到達とキャッチは `pick_and_carry/curriculum.py` の `manipulation_reward`（手先の接近、速度の一致、保持）です。前進（秒速 0.40 m 付近）、接近、把持、運搬、設置（+10）、転倒（-5）、操作量、生存を足します。歩行だけの学習では把持と設置の点は出しません。`ee_dist` は記録用で、報酬には足しません。
 
 ## 6. 腕
 
@@ -192,10 +212,11 @@ Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(
 
 | ファイル | 内容 |
 | --- | --- |
-| `pick_and_carry/config.py` | 環境設定、Panda の観測 68 と行動 20 |
+| `pick_and_carry/config.py` | 環境設定、Z1 の観測 81 と行動 19 |
 | `pick_and_carry/arms.py` | Panda と Z1 の関節、質量の前提、次元 |
 | `pick_and_carry/observation.py` | 観測ベクトルの組み立て |
-| `pick_and_carry/reward.py` | 段階ごとの報酬 |
+| `pick_and_carry/reward.py` | 箱運びの報酬 |
+| `pick_and_carry/curriculum.py` | 段階の定義、重みの引き継ぎ、歩行・到達・キャッチの報酬 |
 | `pick_and_carry/control.py` | 脚・腕・指の目標角度 |
 | `pick_and_carry/helpers.py` | 座標変換、把持・設置・転倒、手先カメラの重心 |
 | `pick_and_carry/env.py` | Genesis のシーン |
