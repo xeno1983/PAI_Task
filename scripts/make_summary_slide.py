@@ -326,7 +326,8 @@ def add_curriculum_slide(prs) -> None:
             "腕は Unitree Z1 だけ",
             "今までの Panda の保存は使えない",
             "",
-            "歩行の点は、指令した速度への一致",
+            "歩行の点は、指令した速度への一致（legged_gym 標準）",
+            "　　足を上げる時間、胴の揺れ、力の大きさは罰",
             "　　記録の tracking は 0〜1。1 が一致",
             "キャッチの点は、手をボールへ近づける",
             "　　速度を揃える、指のあいだで保持する",
@@ -470,7 +471,7 @@ def add_loss_slide(prs, curve_png: Path | None) -> None:
     title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(12.0), Inches(0.38))
     write(title, ["Loss と学習曲線"], size=24, bold=True, spacing=0)
     subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.48), Inches(12.4), Inches(0.30))
-    write(subtitle, ["更新は、方策 Loss ＋ 0.5 × 価値 Loss − 0.005 × エントロピー。"], size=14, color=MUTED, spacing=0)
+    write(subtitle, ["更新は、方策 Loss ＋ 1.0 × 価値 Loss − 0.01 × エントロピー。"], size=14, color=MUTED, spacing=0)
     card(
         slide,
         Inches(0.28),
@@ -483,10 +484,10 @@ def add_loss_slide(prs, curve_png: Path | None) -> None:
             "　良かった行動の確率を上げる",
             "　変化は clip 0.2 までに制限",
             "　ゼロ付近なら更新は小さい",
-            "価値 Loss　係数 0.5",
+            "価値 Loss　係数 1.0",
             "　これからの報酬合計の予測誤差",
             "　0.5 ×（実際 − 予測）の二乗",
-            "エントロピー　係数 0.005",
+            "エントロピー　係数 0.01",
             "　行動のばらつきを少し残す",
             "　引き算なので、探索が報酬になる",
             "",
@@ -521,7 +522,7 @@ def main() -> None:
     subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.50), Inches(12.6), Inches(0.28))
     write(
         subtitle,
-        ["Unitree Go2 ＋ Unitree Z1　　PPO　　全段階 69/19"],
+        ["Unitree Go2 ＋ Unitree Z1　　PPO　　全段階 81/19"],
         size=12,
         color=MUTED,
         spacing=0,
@@ -541,10 +542,10 @@ def main() -> None:
         "学習条件",
         [
             "ロボット　Go2 に Z1（6 軸、約 5.2 kg）",
-            "方策　256×256 ELU、出力は −1〜1",
+            "方策　512×256×128 ELU、正規分布",
             "更新　16 環境 × 128 step / iteration",
-            "最適化　Adam 3e-4、clip 0.2",
-            "割引　γ 0.99、λ 0.95、entropy 0.005",
+            "最適化　Adam 1e-3（KL 0.01 で調整）、clip 0.2",
+            "割引　γ 0.99、λ 0.95、entropy 0.01",
             "時間　dt 0.02 s、1 試行 20 秒",
             "コース　平地 → 不整地 → 拾う → 不整地 → 置く",
             "地面　波 3.5 cm、または段差 4.5 / 6 cm",
@@ -563,10 +564,10 @@ def main() -> None:
         y,
         w,
         h,
-        "観測　69",
+        "観測　81",
         [
             "位置は胴体基準。前が +X、上が +Z",
-            "脚の角度　　　　12",
+            "脚の角度　　　　12　立ち姿勢との差",
             "脚の角速度　　　12　×0.05",
             "重力の向き　　　3",
             "胴体の並進速度　3　×2",
@@ -580,6 +581,7 @@ def main() -> None:
             "手先・物資・目標　各 3",
             "把持フラグ 1、段階 one-hot 4",
             "速度指令　　　　3　使わない段階は 0",
+            "直前の脚の指令　12",
             "カメラ時は物資の 3 つだけ検知位置",
             "見えない物資は (0, 0, −1)",
         ],
@@ -594,9 +596,9 @@ def main() -> None:
         "制御　19",
         [
             "位置制御。PD で目標角度へ追従",
-            "脚 12　立ち姿勢 + 出力 × 0.50 rad",
+            "脚 12　立ち姿勢 + 出力 × 0.25 rad",
             "　　hip 0、thigh 0.8、calf −1.5",
-            "　　kp 80 / kd 4",
+            "　　kp 60 / kd 1.5",
             "腕 6　初期姿勢 + 出力 × 1.0 rad",
             "　　(0, 1.76, −1.0, 0, 0, 0)",
             "　　kp 80 / kd 8",

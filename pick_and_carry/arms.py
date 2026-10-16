@@ -1,6 +1,6 @@
 """The Unitree Z1 on the Go2.
 
-Six arm joints: observation 69, action 19. Every curriculum stage uses that layout.
+Six arm joints: observation 81, action 19. Every curriculum stage uses that layout.
 """
 
 from __future__ import annotations

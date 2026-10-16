@@ -10,12 +10,15 @@ from pick_and_carry.config import layout_dim
 from pick_and_carry.curriculum import (
     SIT_HEIGHT,
     STAND_HEIGHT,
+    crouch_legs,
     earlier_stages,
+    feet_air_time_reward,
     later_stages,
     locomotion_reward,
     manipulation_reward,
     pose_reward,
     posture_achieved,
+    holds_arm_pose,
     retreat_choice,
     sample_ball,
     sample_command,
@@ -25,13 +28,19 @@ from pick_and_carry.curriculum import (
 
 
 class LayoutTests(unittest.TestCase):
+    def test_leg_tasks_hold_the_reset_arm_pose(self):
+        for stage in ("stand", "sit", "walk", "jump", "rough"):
+            self.assertTrue(holds_arm_pose(stage))
+        for stage in ("haul", "carry", "catch"):
+            self.assertFalse(holds_arm_pose(stage))
+
     def test_every_stage_uses_the_arm_layout(self):
         from pick_and_carry.arms import layouts
 
         shared = layouts(6)
         for stage in ("carry", "stand", "sit", "walk", "jump", "rough", "haul", "catch"):
             self.assertEqual(stage_layouts(stage, 6), shared)
-        self.assertEqual(layout_dim(shared[0]), 69)
+        self.assertEqual(layout_dim(shared[0]), 81)
         self.assertEqual(layout_dim(shared[1]), 19)
 
 
@@ -65,6 +74,16 @@ class PostureTests(unittest.TestCase):
             dt=0.02,
         )
         return reward, terms, fallen
+
+    def test_the_crouch_stays_inside_the_standing_action(self):
+        from pick_and_carry.curriculum import CROUCH_FOLD
+
+        standing = torch.tensor([0.0, 0.8, -1.5] * 4)
+        folded = crouch_legs(standing)
+        self.assertAlmostEqual(float(folded[1] - standing[1]), CROUCH_FOLD)
+        self.assertAlmostEqual(float(standing[2] - folded[2]), CROUCH_FOLD)
+        self.assertEqual(float(folded[0]), 0.0)
+        self.assertLessEqual(float((folded - standing).abs().max()), 0.50)
 
     def test_standing_at_the_target_height_scores_higher_than_crouching(self):
         _, standing, _ = self._reward("stand", STAND_HEIGHT)
@@ -115,33 +134,130 @@ class PostureTests(unittest.TestCase):
         self.assertTrue(bool(landed))
 
 
+def _walk_reward(**overrides):
+    command = torch.tensor([[0.0, 0.0, 0.0]])
+    values = dict(
+        base_lin_vel=torch.zeros(1, 3),
+        base_ang_vel=torch.zeros(1, 3),
+        command=command,
+        projected_gravity=torch.tensor([[0.0, 0.0, -1.0]]),
+        base_height=torch.tensor([0.30]),
+        leg_actions=torch.zeros(1, 12),
+        prev_leg_actions=torch.zeros(1, 12),
+        leg_vel=torch.zeros(1, 12),
+        prev_leg_vel=torch.zeros(1, 12),
+        leg_torque=torch.zeros(1, 12),
+        foot_contact=torch.ones(1, 4),
+        air_time_reward=torch.zeros(1),
+        collisions=torch.zeros(1),
+        body_contact=torch.zeros(1, dtype=torch.bool),
+        max_tilt_deg=60.0,
+        min_base_height=0.18,
+        dt=0.02,
+    )
+    values.update(overrides)
+    return locomotion_reward(**values)
+
+
 class RewardTests(unittest.TestCase):
     def test_matching_the_command_scores_higher(self):
         command = sample_command(1)
-        matched, _, _ = locomotion_reward(
-            base_lin_vel=command[:, :2].new_tensor([[command[0, 0], command[0, 1], 0.0]]),
+        matched, _, _ = _walk_reward(
+            base_lin_vel=command.new_tensor([[command[0, 0], command[0, 1], 0.0]]),
             base_ang_vel=command.new_tensor([[0.0, 0.0, command[0, 2]]]),
             command=command,
-            projected_gravity=command.new_tensor([[0.0, 0.0, -1.0]]),
-            base_height=command.new_tensor([0.4]),
-            actions=torch.zeros(1, 12),
-            max_tilt_deg=60.0,
-            min_base_height=0.18,
-            dt=0.02,
+            foot_contact=torch.zeros(1, 4),
         )
-        missed, _, fallen = locomotion_reward(
-            base_lin_vel=command.new_tensor([[0.0, 0.0, 0.0]]),
-            base_ang_vel=torch.zeros(1, 3),
+        missed, _, fallen = _walk_reward(
             command=command.new_tensor([[0.5, 0.0, 0.0]]),
-            projected_gravity=command.new_tensor([[0.0, 0.0, -1.0]]),
-            base_height=command.new_tensor([0.4]),
-            actions=torch.zeros(1, 12),
-            max_tilt_deg=60.0,
-            min_base_height=0.18,
-            dt=0.02,
+            foot_contact=torch.zeros(1, 4),
         )
         self.assertGreater(matched.item(), missed.item())
         self.assertFalse(bool(fallen))
+
+    def test_a_diagonal_step_is_logged_but_a_shuffle_is_not(self):
+        command = torch.tensor([[0.5, 0.0, 0.0]])
+        _, trot_terms, _ = _walk_reward(command=command, foot_contact=torch.tensor([[1.0, 0.0, 0.0, 1.0]]))
+        _, shuffle_terms, _ = _walk_reward(command=command, foot_contact=torch.ones(1, 4))
+        self.assertEqual(trot_terms["gait_score"].item(), 1.0)
+        self.assertEqual(shuffle_terms["gait_score"].item(), 0.0)
+
+    def test_a_long_step_earns_air_time_and_the_reward_follows(self):
+        command = torch.tensor([[0.5, 0.0, 0.0]])
+        stepping, _, _ = _walk_reward(command=command, air_time_reward=torch.tensor([0.3]))
+        shuffling, _, _ = _walk_reward(command=command, air_time_reward=torch.tensor([-0.3]))
+        self.assertGreater(stepping.item(), shuffling.item())
+
+    def test_a_level_body_at_the_target_height_scores_higher_than_a_crouch(self):
+        # Compare on a command the robot is meeting, so the positive part is not clipped away.
+        command = torch.tensor([[0.5, 0.0, 0.0]])
+        moving = dict(command=command, base_lin_vel=torch.tensor([[0.5, 0.0, 0.0]]))
+        level, level_terms, _ = _walk_reward(**moving)
+        low, low_terms, _ = _walk_reward(base_height=torch.tensor([0.22]), **moving)
+        self.assertGreater(level.item(), low.item())
+        self.assertGreater(level_terms["steady"].item(), low_terms["steady"].item())
+
+    def test_a_steady_action_scores_higher_than_a_jump(self):
+        moving = dict(command=torch.tensor([[0.5, 0.0, 0.0]]), base_lin_vel=torch.tensor([[0.5, 0.0, 0.0]]))
+        held, held_terms, _ = _walk_reward(leg_actions=torch.ones(1, 12), prev_leg_actions=torch.ones(1, 12), **moving)
+        jumped, jumped_terms, _ = _walk_reward(
+            leg_actions=torch.ones(1, 12), prev_leg_actions=torch.full((1, 12), -1.0), **moving
+        )
+        self.assertGreater(held.item(), jumped.item())
+        self.assertGreater(jumped_terms["jerk"].item(), held_terms["jerk"].item())
+
+    def test_penalties_cannot_push_a_step_below_zero_before_the_fall_cost(self):
+        reward, terms, fallen = _walk_reward(leg_torque=torch.full((1, 12), 20.0), collisions=torch.tensor([4.0]))
+        self.assertFalse(bool(fallen))
+        self.assertEqual(reward.item(), 0.0)
+        self.assertEqual(terms["termination"].item(), 0.0)
+
+    def test_touching_the_ground_with_the_body_ends_the_episode(self):
+        reward, terms, fallen = _walk_reward(body_contact=torch.tensor([True]))
+        self.assertTrue(bool(fallen))
+        self.assertLess(reward.item(), 0.0)
+        self.assertEqual(terms["termination"].item(), -5.0)
+
+    def test_the_arm_never_enters_the_penalties(self):
+        # Only leg actions are passed in, so arm noise cannot change the reward.
+        self.assertNotIn("arm", " ".join(_walk_reward()[1]))
+
+
+class AirTimeTests(unittest.TestCase):
+    def _step(self, air, last, contact, command, steps=1):
+        reward = torch.zeros(1)
+        for _ in range(steps):
+            reward, air, last = feet_air_time_reward(air, last, contact, command, 0.02, 0.5)
+        return reward, air, last
+
+    def test_a_foot_in_the_air_collects_time_and_pays_on_touchdown(self):
+        command = torch.tensor([[0.5, 0.0, 0.0]])
+        air = torch.zeros(1, 4)
+        last = torch.zeros(1, 4, dtype=torch.bool)
+        up = torch.zeros(1, 4)
+        reward, air, last = self._step(air, last, up, command, steps=40)
+        self.assertEqual(reward.item(), 0.0)
+        self.assertAlmostEqual(air[0, 0].item(), 0.8, places=4)
+        down = torch.zeros(1, 4)
+        down[0, 0] = 1.0
+        reward, air, last = feet_air_time_reward(air, last, down, command, 0.02, 0.5)
+        # 0.82 s in the air on the one foot that landed; the others stay in the air.
+        self.assertAlmostEqual(reward.item(), 0.32, places=4)
+        self.assertEqual(air[0, 0].item(), 0.0)
+
+    def test_a_short_step_costs_the_shortfall(self):
+        command = torch.tensor([[0.5, 0.0, 0.0]])
+        air = torch.full((1, 4), 0.1)
+        last = torch.zeros(1, 4, dtype=torch.bool)
+        contact = torch.ones(1, 4)
+        reward, _, _ = feet_air_time_reward(air, last, contact, command, 0.02, 0.5)
+        self.assertLess(reward.item(), 0.0)
+
+    def test_nothing_is_paid_without_a_speed_command(self):
+        air = torch.full((1, 4), 0.1)
+        last = torch.zeros(1, 4, dtype=torch.bool)
+        reward, _, _ = feet_air_time_reward(air, last, torch.ones(1, 4), torch.zeros(1, 3), 0.02, 0.5)
+        self.assertEqual(reward.item(), 0.0)
 
     def test_a_ball_in_the_hand_is_caught(self):
         hand = torch.tensor([[0.4, 0.0, 0.3]])
@@ -189,6 +305,7 @@ class RewardTests(unittest.TestCase):
             grasped=torch.zeros(2, dtype=torch.bool),
             phase=torch.zeros(2, dtype=torch.long),
             command=torch.zeros(2, 3),
+            last_leg_action=torch.zeros(2, 12),
         )
         self.assertEqual(obs.shape, (2, layout_dim(observation)))
 
@@ -245,6 +362,52 @@ class TransferTests(unittest.TestCase):
             self.assertEqual(found, rough / "ppo_0004.pt")
             found = resolve_checkpoint(walk, "latest", 69, 19, False, "z1", "walk", root=root)
             self.assertEqual(found, walk / "ppo_0002.pt")
+
+
+class TrainerSetupTests(unittest.TestCase):
+    def test_minibatch_is_a_quarter_of_the_batch_unless_set(self):
+        from types import SimpleNamespace
+
+        from pick_and_carry.train_ppo import minibatch_size_for
+
+        self.assertEqual(minibatch_size_for(SimpleNamespace(minibatch_size=0, num_mini_batches=4), 8192), 2048)
+        self.assertEqual(minibatch_size_for(SimpleNamespace(minibatch_size=512, num_mini_batches=4), 8192), 512)
+
+    def test_leg_noise_is_wide_and_arm_noise_is_narrow(self):
+        from pick_and_carry.train_ppo import initial_action_std
+
+        std = initial_action_std(19, 1.0, 0.4)
+        self.assertEqual(std[:12].tolist(), [1.0] * 12)
+        for value in std[12:].tolist():
+            self.assertAlmostEqual(value, 0.4, places=6)
+
+    def test_old_weights_are_moved_aside_but_matching_ones_stay(self):
+        import tempfile
+        from pathlib import Path
+
+        from pick_and_carry.train_ppo import archive_incompatible_logs
+
+        def save(directory: Path, name: str, obs: int) -> None:
+            torch.save(
+                {"obs_dim": obs, "act_dim": 19, "scripted_gait": False, "arm": "z1", "curriculum": "walk"},
+                directory / name,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            self.assertIsNone(archive_incompatible_logs(folder, 81, 19, False, "z1", "walk"))
+            save(folder, "ppo_0100.pt", 69)
+            (folder / "metrics.jsonl").write_text("{}\n", encoding="utf-8")
+            (folder / "events.out.tfevents.1").write_text("x", encoding="utf-8")
+            moved = archive_incompatible_logs(folder, 81, 19, False, "z1", "walk")
+            self.assertIsNotNone(moved)
+            self.assertTrue((moved / "ppo_0100.pt").is_file())
+            self.assertTrue((moved / "metrics.jsonl").is_file())
+            self.assertTrue((moved / "events.out.tfevents.1").is_file())
+            self.assertEqual(list(folder.glob("ppo_*.pt")), [])
+            save(folder, "ppo_0001.pt", 81)
+            self.assertIsNone(archive_incompatible_logs(folder, 81, 19, False, "z1", "walk"))
+            self.assertTrue((folder / "ppo_0001.pt").is_file())
 
 
 class RetreatChoiceTests(unittest.TestCase):

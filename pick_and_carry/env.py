@@ -31,7 +31,10 @@ from pick_and_carry.curriculum import (
     BALL_RADIUS,
     POSTURE_STAGES,
     POSE_HOLD_SECONDS,
+    holds_arm_pose,
     ball_in_base,
+    crouch_legs,
+    feet_air_time_reward,
     locomotion_reward,
     manipulation_reward,
     pose_reward,
@@ -42,6 +45,8 @@ from pick_and_carry.curriculum import (
 )
 from pick_and_carry.helpers import (
     detect_wrist_target,
+    fleet_camera_height,
+    fleet_view_indices,
     grasp_mask,
     gripper_is_closed,
     pairwise_distance,
@@ -55,6 +60,12 @@ from pick_and_carry.observation import object_in_base, pack_observation
 from pick_and_carry.reward import task_reward
 from pick_and_carry.ros_bridge import clamp_goal_xy, downsample_rgb
 from pick_and_carry.terrain import make_course, make_supply_yard, make_terrain_bank, paste_tile, sample_height
+
+
+# Thighs and calves hitting the ground or a wall count as collisions. The base counts as a fall.
+BASE_LINK = "base"
+COLLISION_LINKS = tuple(f"{leg}_{part}" for leg in ("FL", "FR", "RL", "RR") for part in ("thigh", "calf"))
+COLLISION_FORCE = 0.1
 
 
 def _joint_dof_index(joint) -> int:
@@ -91,6 +102,19 @@ def _on_device(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
     return tensor
 
 
+def _rgb_uint8(rgb) -> np.ndarray:
+    if hasattr(rgb, "detach"):
+        rgb = rgb.detach().cpu().numpy()
+    image = np.asarray(rgb)
+    if image.ndim == 4:
+        image = image[0]
+    if np.issubdtype(image.dtype, np.floating):
+        if image.size and float(image.max()) <= 1.0:
+            image = image * 255.0
+        image = np.clip(image, 0, 255).astype(np.uint8)
+    return image
+
+
 class PickAndCarryEnv:
     """Go2 base with a selectable arm fixed on its back, plus a cube and a goal."""
 
@@ -119,7 +143,9 @@ class PickAndCarryEnv:
         self.cfg.gripper_open = abs(self.arm.joint_open - self.arm.joint_closed)
         self.cfg.gripper_closed = self.arm.closed_threshold
         self.camera = None
+        self.fleet_camera = None
         self.wrist_camera = None
+        self._fleet_indices: list[int] = []
         self._recording = False
         self._wrist_warning_sent = False
         self._overview_warning_sent = False
@@ -164,6 +190,8 @@ class PickAndCarryEnv:
             self.urdf_path = self.cfg.urdf_path
         else:
             self.urdf_path = str(self.arm.urdf_path)
+        if self.cfg.fleet_snapshot and not self.cfg.wrist_camera and self.num_envs > 1:
+            self._fleet_indices = fleet_view_indices(self.num_envs)
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(dt=self.cfg.dt, substeps=self.cfg.substeps),
             rigid_options=gs.options.RigidOptions(
@@ -171,7 +199,7 @@ class PickAndCarryEnv:
                 max_collision_pairs=self.cfg.max_collision_pairs,
             ),
             vis_options=gs.options.VisOptions(
-                rendered_envs_idx=list(range(self.num_envs if self.cfg.wrist_camera else 1)),
+                rendered_envs_idx=self._rendered_env_indices(),
                 shadow=False,
                 segmentation_level="link",
             ),
@@ -288,6 +316,18 @@ class PickAndCarryEnv:
                 fov=self.cfg.wrist_camera_fov,
                 GUI=False,
             )
+        if self._fleet_indices:
+            # Drawn once at startup. The pose is moved over the block after the grid offsets exist.
+            self.fleet_camera = self.scene.add_camera(
+                res=(1280, 720),
+                pos=(0.0, 0.0, 8.0),
+                lookat=(0.0, 0.0, 0.2),
+                fov=50,
+                # Replaced with the fitted distance before the one snapshot. The default 20 m
+                # clips a wide block and the picture is only the background color.
+                far=2000.0,
+                GUI=False,
+            )
         if self.cfg.record_path or self.cfg.enable_camera:
             self.camera = self.scene.add_camera(
                 res=self.cfg.camera_res,
@@ -317,10 +357,13 @@ class PickAndCarryEnv:
         self.ee_link_name = self._resolve_ee_link()
         self.ee_link_idx = _link_index(self.robot.get_link(self.ee_link_name))
         self.foot_idx = [_link_index(self.robot.get_link(name)) for name in FOOT_LINKS]
+        self.base_link_idx = _link_index(self.robot.get_link(BASE_LINK))
+        self.collision_idx = [_link_index(self.robot.get_link(name)) for name in COLLISION_LINKS]
 
         self._configure_pd()
         self._allocate_buffers()
         self.extras: dict = {}
+        self._randomize_friction()
         self.reset()
 
     def _has_joint(self, name: str) -> bool:
@@ -369,6 +412,8 @@ class PickAndCarryEnv:
         self.arm_lower = self._tensor([self.arm.limits[name][0] for name in self.arm_names])
         self.arm_upper = self._tensor([self.arm.limits[name][1] for name in self.arm_names])
         self.default_leg = self._tensor([DEFAULT_LEG_ANGLES[name] for name in self.leg_names])
+        folded = crouch_legs(self.default_leg)
+        self.crouch_leg = torch.maximum(torch.minimum(folded, self.leg_upper), self.leg_lower)
         self.default_arm = self._tensor([self.arm.default_angles[name] for name in self.arm_names])
         self.leg_effort = self._tensor([leg_limit(name)[2] for name in self.leg_names])
         self.arm_effort = self._tensor([self.arm.limits[name][2] for name in self.arm_names])
@@ -382,6 +427,7 @@ class PickAndCarryEnv:
         self.rew_buf = torch.zeros((n,), dtype=torch.float32, device=self.device)
         self.done_buf = torch.zeros((n,), dtype=torch.bool, device=self.device)
         self.actions = torch.zeros((n, self.num_actions), dtype=torch.float32, device=self.device)
+        self.prev_actions = torch.zeros((n, self.num_actions), dtype=torch.float32, device=self.device)
         self.episode_length = torch.zeros((n,), dtype=torch.int32, device=self.device)
         self.episode_return = torch.zeros((n,), dtype=torch.float32, device=self.device)
         self.base_pos = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
@@ -395,6 +441,15 @@ class PickAndCarryEnv:
         self.obj_pos = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
         self.goal_pos = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
         self.foot_contact = torch.zeros((n, len(FOOT_LINKS)), dtype=torch.float32, device=self.device)
+        # Locomotion bookkeeping: how long each foot has been up, last step's leg speed and torque.
+        self.feet_air_time = torch.zeros((n, len(FOOT_LINKS)), dtype=torch.float32, device=self.device)
+        self.last_contact = torch.zeros((n, len(FOOT_LINKS)), dtype=torch.bool, device=self.device)
+        self.air_time_reward = torch.zeros((n,), dtype=torch.float32, device=self.device)
+        self.prev_leg_vel = torch.zeros((n, len(self.leg_names)), dtype=torch.float32, device=self.device)
+        self.leg_torque = torch.zeros((n, len(self.leg_names)), dtype=torch.float32, device=self.device)
+        self.body_contact = torch.zeros((n,), dtype=torch.bool, device=self.device)
+        self.leg_collisions = torch.zeros((n,), dtype=torch.float32, device=self.device)
+        self.push_timer = torch.zeros((n,), dtype=torch.int32, device=self.device)
         self.grasped = torch.zeros((n,), dtype=torch.bool, device=self.device)
         self.prev_grasped = torch.zeros((n,), dtype=torch.bool, device=self.device)
         self.was_grasped = torch.zeros((n,), dtype=torch.bool, device=self.device)
@@ -443,6 +498,7 @@ class PickAndCarryEnv:
         if self.cfg.freeze_legs and "leg" in self.action_slices:
             self.actions = self.actions.clone()
             self.actions[:, self.action_slices["leg"]] = 0.0
+        self._push_robots()
         self._apply_action(self.actions)
         self.scene.step()
         self.episode_length += 1
@@ -451,6 +507,7 @@ class PickAndCarryEnv:
         self._update_grasp_flags()
         self._assist_grasp()
         self._update_phase()
+        self._update_air_time()
 
         reward, terms, newly_placed, fallen = self.compute_reward()
         if self.cfg.cycle_supplies and self.cfg.curriculum == "carry" and bool(newly_placed.any()):
@@ -503,6 +560,8 @@ class PickAndCarryEnv:
             self.foot_contact = torch.where(done[:, None], 0.0, self.foot_contact)
         if self.cfg.curriculum in ("walk", "rough"):
             self._refresh_commands()
+        self.prev_actions = torch.where(done[:, None], torch.zeros_like(self.actions), self.actions)
+        self.prev_leg_vel = self.dof_vel[:, : len(self.leg_names)].clone()
         self.prev_grasped = torch.where(done, torch.zeros_like(grasped_now), grasped_now)
         self._write_observation()
         return self.obs_buf, self.rew_buf, self.done_buf, self.extras
@@ -516,10 +575,19 @@ class PickAndCarryEnv:
                 command=self.command,
                 projected_gravity=self.projected_gravity,
                 base_height=self.base_pos[:, 2],
-                actions=self.actions,
+                leg_actions=self.actions[:, self.action_slices["leg"]],
+                prev_leg_actions=self.prev_actions[:, self.action_slices["leg"]],
+                leg_vel=self.dof_vel[:, self.action_slices["leg"]],
+                prev_leg_vel=self.prev_leg_vel,
+                leg_torque=self.leg_torque,
+                foot_contact=self.foot_contact,
+                air_time_reward=self.air_time_reward,
+                collisions=self.leg_collisions,
+                body_contact=self.body_contact,
                 max_tilt_deg=self.cfg.max_tilt_deg,
                 min_base_height=self.cfg.min_base_height,
                 dt=self.cfg.dt,
+                scales=self.cfg.locomotion_scales,
             )
             return reward, terms, torch.zeros_like(fallen), fallen
         if self.cfg.curriculum in POSTURE_STAGES:
@@ -663,37 +731,99 @@ class PickAndCarryEnv:
         grip_act = action[:, self.action_slices["gripper"]]
         if self.cfg.control_mode == "position":
             leg_target = self._leg_command(leg_act)
-            arm_target, opening = arm_gripper_command(
-                arm_act,
-                grip_act,
-                self.default_arm,
-                self.phase,
-                control_split=self.cfg.control_split,
-                arm_scale=self.cfg.arm_action_scale,
-                gripper_open=self.arm.joint_open,
-                gripper_closed=self.arm.joint_closed,
-                lower=self.arm_lower,
-                upper=self.arm_upper,
-            )
-            finger_target = opening.unsqueeze(-1).expand(-1, len(self.finger_names))
+            self._estimate_leg_torque(leg_target)
+            if holds_arm_pose(self.cfg.curriculum):
+                arm_target = self.default_arm.expand(action.shape[0], -1)
+                finger_target = self._rest_fingers(action.shape[0])
+            else:
+                arm_target, opening = arm_gripper_command(
+                    arm_act,
+                    grip_act,
+                    self.default_arm,
+                    self.phase,
+                    control_split=self.cfg.control_split,
+                    arm_scale=self.cfg.arm_action_scale,
+                    gripper_open=self.arm.joint_open,
+                    gripper_closed=self.arm.joint_closed,
+                    lower=self.arm_lower,
+                    upper=self.arm_upper,
+                )
+                finger_target = opening.unsqueeze(-1).expand(-1, len(self.finger_names))
             target = torch.cat((leg_target, arm_target, finger_target), dim=-1)
             self.robot.control_dofs_position(target, self.dof_idx)
             return
         leg_torque = leg_act * self.leg_effort
-        arm_torque = arm_act * self.arm_effort
-        finger_torque = grip_act.expand(-1, len(self.finger_names)) * 20.0
+        self.leg_torque = leg_torque
+        if holds_arm_pose(self.cfg.curriculum):
+            arm_torque = torch.zeros_like(arm_act)
+            finger_torque = torch.zeros(action.shape[0], len(self.finger_names), device=self.device)
+        else:
+            arm_torque = arm_act * self.arm_effort
+            finger_torque = grip_act.expand(-1, len(self.finger_names)) * 20.0
         force = torch.cat((leg_torque, arm_torque, finger_torque), dim=-1)
         self.robot.control_dofs_force(force, self.dof_idx)
+
+    def _initial_push_timer(self, count: int) -> torch.Tensor:
+        """Start each robot at a random point of the push cycle so the pushes do not all land together."""
+        steps = max(1, int(self.cfg.push_interval_s / self.cfg.dt))
+        return torch.randint(0, steps, (count,), dtype=torch.int32, device=self.device)
+
+    def _update_air_time(self) -> None:
+        if self.cfg.curriculum not in ("walk", "rough"):
+            return
+        self.air_time_reward, self.feet_air_time, self.last_contact = feet_air_time_reward(
+            self.feet_air_time,
+            self.last_contact,
+            self.foot_contact,
+            self.command,
+            self.cfg.dt,
+            self.cfg.locomotion_scales.feet_air_time_target,
+        )
+
+    def _estimate_leg_torque(self, leg_target: torch.Tensor) -> None:
+        """PD torque the simulator will apply this step, limited by each joint's effort."""
+        leg = slice(0, len(self.leg_names))
+        torque = self.cfg.leg_kp * (leg_target - self.dof_pos[:, leg]) - self.cfg.leg_kd * self.dof_vel[:, leg]
+        self.leg_torque = torch.maximum(torch.minimum(torque, self.leg_effort), -self.leg_effort)
+
+    def _randomize_friction(self) -> None:
+        """Give every environment its own ground friction, as legged_gym does."""
+        if not self.cfg.randomize_friction:
+            return
+        low, high = self.cfg.friction_range
+        try:
+            ratio = torch.empty((self.num_envs, 1), dtype=torch.float32, device=self.device).uniform_(low, high)
+            links = list(range(self.robot.n_links))
+            self.robot.set_friction_ratio(ratio.expand(-1, len(links)).contiguous(), links)
+        except Exception as error:
+            print(f"Friction randomization is unavailable on this Genesis build ({error}); friction stays fixed.")
+
+    def _push_robots(self) -> None:
+        """Every push interval, give some robots a random planar velocity. legged_gym pushes all at once."""
+        if not self.cfg.push_robots or self.cfg.curriculum not in ("walk", "rough"):
+            return
+        self.push_timer += 1
+        due = self.push_timer >= int(self.cfg.push_interval_s / self.cfg.dt)
+        if not bool(due.any()):
+            return
+        idx = torch.nonzero(due, as_tuple=False).squeeze(-1)
+        self.push_timer[idx] = 0
+        velocity = self.base_lin_vel_world[idx, :2]
+        velocity = velocity + (torch.rand_like(velocity) * 2.0 - 1.0) * self.cfg.push_max_vel
+        self.robot.set_dofs_velocity(velocity, [0, 1], envs_idx=idx)
 
     def _leg_command(self, leg_act: torch.Tensor) -> torch.Tensor:
         """Legs while walking. Learned by default; a fixed trot only if scripted_gait is set."""
         if self.cfg.freeze_legs:
             return self.default_leg.expand(leg_act.shape[0], -1).clone()
+        # Stand and sit share the crouch as action 0, so the stand-up action still means
+        # "extend" when sit loads those weights. Walking and later stages keep action 0 standing.
+        reference = self.crouch_leg if self.cfg.curriculum in ("stand", "sit") else self.default_leg
         walk = (self.phase == 0) | (self.phase == 2)
         if not self.cfg.scripted_gait:
             return learned_leg_target(
                 leg_act,
-                self.default_leg,
+                reference,
                 walk,
                 control_split=self.cfg.control_split,
                 action_scale=self.cfg.leg_action_scale,
@@ -777,14 +907,28 @@ class PickAndCarryEnv:
             net = self._batch(self.robot.get_links_net_contact_force())
             foot_force = net[:, self.foot_idx, :]
             self.foot_contact = (torch.linalg.norm(foot_force, dim=-1) > self.cfg.contact_force_threshold).to(torch.float32)
+            self.body_contact = torch.linalg.norm(net[:, self.base_link_idx, :], dim=-1) > self.cfg.contact_force_threshold
+            hits = torch.linalg.norm(net[:, self.collision_idx, :], dim=-1) > COLLISION_FORCE
+            self.leg_collisions = hits.sum(dim=-1).to(torch.float32)
         except Exception:
             if not self._contact_warning_sent:
                 print("Foot contact is unavailable on this Genesis build; contact flags stay zero.")
                 self._contact_warning_sent = True
             self.foot_contact.zero_()
+            self.body_contact.zero_()
+            self.leg_collisions.zero_()
 
     def _batch(self, tensor: torch.Tensor) -> torch.Tensor:
         return _on_device(_as_batch(tensor, self.num_envs), self.device)
+
+    def _rest_fingers(self, count: int) -> torch.Tensor:
+        """Gripper joint position written at reset. Holding it keeps the initial pose."""
+        return torch.full(
+            (count, len(self.finger_names)),
+            0.5 * self.cfg.gripper_open,
+            dtype=torch.float32,
+            device=self.device,
+        )
 
     def _finger_slice(self) -> slice:
         return slice(len(self.leg_names) + len(self.arm_names), len(self.actuated_names))
@@ -983,6 +1127,82 @@ class PickAndCarryEnv:
             "cube_size": float(self.cfg.cube_size),
         }
 
+    def _set_camera_far(self, camera, far: float) -> None:
+        """Push the clip plane out. It is fixed when the camera is built, and update_camera leaves it."""
+        camera._far = float(far)
+        rasterizer = self.scene.visualizer.rasterizer
+        node = getattr(rasterizer, "_camera_nodes", {}).get(camera.uid)
+        if node is not None and node.camera is not None:
+            node.camera.zfar = float(far)
+
+    def _rendered_env_indices(self) -> list[int]:
+        """Environments the rasterizer draws. Physics still steps every copy."""
+        if self._fleet_indices:
+            return self._fleet_indices
+        return list(range(self.num_envs if self.cfg.wrist_camera else 1))
+
+    def save_fleet_snapshot(self) -> Path | None:
+        """Write one overhead still of the drawn robots. The viewer stays closed."""
+        if self.fleet_camera is None or not self.cfg.fleet_snapshot:
+            return None
+        try:
+            offsets = np.asarray(self.scene.envs_offset, dtype=np.float64)[self._fleet_indices]
+            origin = offsets[0]
+            center = offsets.mean(axis=0)
+            center[2] = 0.2
+            height = fleet_camera_height(offsets[:, :2], max(self.cfg.env_spacing))
+            look = center - origin
+            pos = look + np.array([0.0, 0.0, height])
+            self._set_camera_far(self.fleet_camera, max(height * 4.0, 50.0))
+            self.fleet_camera.set_pose(pos=pos.tolist(), lookat=look.tolist())
+            rgb, *_ = self.fleet_camera.render(
+                rgb=True, depth=False, segmentation=False, normal=False, force_render=True
+            )
+            image = _rgb_uint8(rgb)
+            path = Path(self.cfg.fleet_snapshot)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            import cv2
+
+            if not cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR)):
+                raise RuntimeError(f"cv2.imwrite failed for {path}")
+        except Exception as exc:
+            print(f"並びの静止画を残せません。{exc}", flush=True)
+            return None
+        print(
+            f"並びの静止画を残しました: {path} （描画 {len(self._fleet_indices)} 台 / 計算 {self.num_envs} 台）",
+            flush=True,
+        )
+        try:
+            import os
+
+            os.startfile(path)
+        except Exception:
+            pass
+        return path
+
+    def record_initial_pose(self, hold_s: float = 1.0) -> None:
+        """Write the pose from reset at the front of the mp4, before any action is applied."""
+        camera = self.camera
+        if camera is None or not self._recording or not camera._recorded_encoders:
+            return
+        from genesis.utils.misc import tensor_to_array
+
+        rgb, *_ = camera.render(rgb=True, depth=False, segmentation=False, normal=False, force_render=True)
+        frame = tensor_to_array(rgb)
+        if not np.issubdtype(np.asarray(frame).dtype, np.integer):
+            frame = _rgb_uint8(frame)
+        frame = np.ascontiguousarray(frame)
+        fps = float(camera._recorded_encoders[0]._fps)
+        repeats = max(1, int(round(hold_s * fps)))
+        batched = bool(getattr(camera, "_is_batched", False) and camera._env_idx is None)
+        for _ in range(repeats):
+            if batched:
+                for env_frame, encoder in zip(frame, camera._recorded_encoders):
+                    encoder.write(np.ascontiguousarray(env_frame))
+            else:
+                camera._recorded_encoders[0].write(frame.copy())
+        print(f"動画の最初の {hold_s:.0f} 秒は、動かす前の初期姿勢です。", flush=True)
+
     def overview_rgb(self) -> np.ndarray | None:
         """One downsampled overview frame. The interactive viewer stays closed."""
         if self.camera is None:
@@ -1039,7 +1259,7 @@ class PickAndCarryEnv:
             phase = self.phase
             grasped = torch.zeros_like(self.grasped)
         self.obs_buf = pack_observation(
-            leg_pos=self.dof_pos[:, leg],
+            leg_pos=self.dof_pos[:, leg] - self.default_leg,
             leg_vel=self.dof_vel[:, leg],
             projected_gravity=self.projected_gravity,
             base_lin_vel=self.base_lin_vel,
@@ -1056,6 +1276,7 @@ class PickAndCarryEnv:
             grasped=grasped,
             phase=phase,
             command=command,
+            last_leg_action=self.prev_actions[:, self.action_slices["leg"]],
         )
         if self.obs_buf.shape[-1] != self.num_obs:
             raise RuntimeError(
@@ -1079,7 +1300,7 @@ class PickAndCarryEnv:
         base_quat = self.init_base_quat.expand(n, 4).clone()
         leg = self.default_leg.expand(n, -1)
         arm = self.default_arm.expand(n, -1)
-        fingers = torch.full((n, len(self.finger_names)), 0.5 * self.cfg.gripper_open, dtype=torch.float32, device=self.device)
+        fingers = self._rest_fingers(n)
         dof_pos = torch.cat((leg, arm, fingers), dim=-1)
 
         self.robot.set_pos(base_pos, envs_idx=idx, zero_velocity=True)
@@ -1100,6 +1321,12 @@ class PickAndCarryEnv:
             self.base_pos.copy_(base_pos)
             self.base_quat.copy_(base_quat)
             self.actions.zero_()
+            self.prev_actions.zero_()
+            self.feet_air_time.zero_()
+            self.last_contact.fill_(False)
+            self.air_time_reward.zero_()
+            self.prev_leg_vel.zero_()
+            self.push_timer.copy_(self._initial_push_timer(n))
             self.episode_length.zero_()
             self.episode_return.zero_()
             self.grasped.fill_(False)
@@ -1116,6 +1343,12 @@ class PickAndCarryEnv:
             self.base_pos[idx] = base_pos
             self.base_quat[idx] = base_quat
             self.actions[idx] = 0
+            self.prev_actions[idx] = 0
+            self.feet_air_time[idx] = 0
+            self.last_contact[idx] = False
+            self.air_time_reward[idx] = 0
+            self.prev_leg_vel[idx] = 0
+            self.push_timer[idx] = self._initial_push_timer(n)
             self.episode_length[idx] = 0
             self.episode_return[idx] = 0
             self.grasped[idx] = False
@@ -1148,20 +1381,10 @@ class PickAndCarryEnv:
         return self.hold_steps >= need
 
     def _spawn_crouched(self, idx, count: int, base_pos: torch.Tensor) -> None:
-        """Start the stand-up task folded, inside the same joint range the policy can reach."""
-        leg = self.default_leg.expand(count, -1).clone()
-        leg[:, 1::3] = leg[:, 1::3] + 0.45
-        leg[:, 2::3] = leg[:, 2::3] - 0.45
-        lower = self.leg_lower.expand(count, -1)
-        upper = self.leg_upper.expand(count, -1)
-        leg = torch.maximum(torch.minimum(leg, upper), lower)
+        """Start the stand-up task in the same crouch that action 0 holds."""
+        leg = self.crouch_leg.expand(count, -1)
         arm = self.default_arm.expand(count, -1)
-        fingers = torch.full(
-            (count, len(self.finger_names)),
-            0.5 * self.cfg.gripper_open,
-            dtype=torch.float32,
-            device=self.device,
-        )
+        fingers = self._rest_fingers(count)
         dof_pos = torch.cat((leg, arm, fingers), dim=-1)
         posed = base_pos.clone()
         posed[:, 2] = 0.30

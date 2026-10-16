@@ -18,6 +18,8 @@ GRIPPER_VEL_SCALE = 0.05
 LIN_VEL_SCALE = 2.0
 ANG_VEL_SCALE = 0.25
 UNSEEN_OBJECT = (0.0, 0.0, -1.0)
+# Gaussian actions are unbounded. Past this the observation stops growing.
+LAST_ACTION_CLIP = 5.0
 
 
 def object_in_base(
@@ -59,8 +61,13 @@ def pack_observation(
     grasped: torch.Tensor,
     phase: torch.Tensor,
     command: torch.Tensor,
+    last_leg_action: torch.Tensor,
 ) -> torch.Tensor:
-    """Concatenate one observation row per environment. ``phase`` is an integer 0..3."""
+    """Concatenate one observation row per environment. ``phase`` is an integer 0..3.
+
+    ``leg_pos`` is measured from the standing pose. ``last_leg_action`` is the leg
+    action applied on the previous step.
+    """
     return torch.cat(
         (
             leg_pos,
@@ -80,6 +87,7 @@ def pack_observation(
             grasped.to(dtype=torch.float32).unsqueeze(-1),
             torch.nn.functional.one_hot(phase.long(), num_classes=4).to(dtype=torch.float32),
             command,
+            last_leg_action.clamp(-LAST_ACTION_CLIP, LAST_ACTION_CLIP),
         ),
         dim=-1,
     )

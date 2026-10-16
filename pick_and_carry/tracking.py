@@ -125,7 +125,7 @@ def render_curves(rows: list[dict], run: dict | None = None) -> str:
             + "</ul>"
         )
     if not rows:
-        bits.append("<p class='empty'>学習記録がまだありません。メニューの 2 で学習すると、ここに曲線が出ます。</p>")
+        bits.append("<p class='empty'>学習記録がまだありません。メニューの 1 で学習すると、ここに曲線が出ます。</p>")
     else:
         bits.append(f"<p>{len(rows)} iteration を記録しています。細い線が各回、太い線が移動平均です。</p>")
         for key, title, caption in CHARTS:

@@ -51,7 +51,7 @@ def main() -> None:
     if run_path.is_file():
         run = json.loads(run_path.read_text(encoding="utf-8"))
     if not rows:
-        print(f"{args.log_dir.resolve()} に学習記録がありません。先にメニューの 2 で学習してください。", flush=True)
+        print(f"{args.log_dir.resolve()} に学習記録がありません。先にメニューの 1 で学習してください。", flush=True)
         raise SystemExit(1)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_curves(rows, run), encoding="utf-8")

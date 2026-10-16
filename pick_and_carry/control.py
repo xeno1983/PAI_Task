@@ -23,7 +23,7 @@ def learned_leg_target(
     lower: torch.Tensor,
     upper: torch.Tensor,
 ) -> torch.Tensor:
-    """Standing pose plus the policy, held still during pickup and release in split mode."""
+    """Reference pose plus the policy, held still during pickup and release in split mode."""
     pose = default_leg.expand(leg_act.shape[0], -1)
     commanded = (pose + leg_act * action_scale).clamp(lower, upper)
     if control_split in ("walk", "both"):
