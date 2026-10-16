@@ -27,8 +27,7 @@ from pick_and_carry.curriculum import (
     sample_reach_target,
     stage_layouts,
     stage_log_dir,
-    walk_score,
-)
+    walk_score)
 
 
 class LayoutTests(unittest.TestCase):
@@ -155,8 +154,7 @@ def _walk_reward(**overrides):
         body_contact=torch.zeros(1, dtype=torch.bool),
         max_tilt_deg=60.0,
         min_base_height=0.18,
-        dt=0.02,
-    )
+        dt=0.02)
     values.update(overrides)
     return locomotion_reward(**values)
 
@@ -168,12 +166,10 @@ class RewardTests(unittest.TestCase):
             base_lin_vel=command.new_tensor([[command[0, 0], command[0, 1], 0.0]]),
             base_ang_vel=command.new_tensor([[0.0, 0.0, command[0, 2]]]),
             command=command,
-            foot_contact=torch.zeros(1, 4),
-        )
+            foot_contact=torch.zeros(1, 4))
         missed, _, fallen = _walk_reward(
             command=command.new_tensor([[0.5, 0.0, 0.0]]),
-            foot_contact=torch.zeros(1, 4),
-        )
+            foot_contact=torch.zeros(1, 4))
         self.assertGreater(matched.item(), missed.item())
         self.assertFalse(bool(fallen))
 
@@ -317,8 +313,7 @@ class AirTimeTests(unittest.TestCase):
             prev_distance=torch.tensor([0.0]),
             max_tilt_deg=60.0,
             min_base_height=0.18,
-            dt=0.02,
-        )
+            dt=0.02)
         self.assertTrue(bool(caught))
         self.assertGreater(terms["catch"].item(), 0.0)
 
@@ -344,8 +339,7 @@ class AirTimeTests(unittest.TestCase):
             grasped=torch.zeros(2, dtype=torch.bool),
             phase=torch.zeros(2, dtype=torch.long),
             command=torch.zeros(2, 3),
-            last_leg_action=torch.zeros(2, 12),
-        )
+            last_leg_action=torch.zeros(2, 12))
         self.assertEqual(obs.shape, (2, layout_dim(observation)))
 
 
@@ -361,8 +355,7 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(earlier_stages("catch", "static"), [("reach", "static"), ("walk", "static")])
         self.assertEqual(
             earlier_stages("catch", "fly"),
-            [("catch", "random"), ("catch", "slow"), ("catch", "static"), ("reach", "static"), ("walk", "static")],
-        )
+            [("catch", "random"), ("catch", "slow"), ("catch", "static"), ("reach", "static"), ("walk", "static")])
         self.assertEqual(later_stages("walk")[0], ("reach", "static"))
         self.assertEqual(later_stages("reach")[0], ("haul", "static"))
         self.assertEqual(later_stages("catch", "slow"), [("catch", "random"), ("catch", "fly"), ("catch", "noisy")])
@@ -374,14 +367,13 @@ class TransferTests(unittest.TestCase):
 
         import torch
 
-        from pick_and_carry.train_ppo import resolve_checkpoint
+        from pick_and_carry.checkpoints import resolve_checkpoint
 
-        def save(directory: Path, name: str, stage: str, gait: bool, obs: int = 81, act: int = 19, arm: str = "z1") -> None:
+        def save(directory: Path, name: str, stage: str, obs: int = 81, act: int = 19, arm: str = "z1") -> None:
             directory.mkdir(parents=True, exist_ok=True)
             torch.save(
-                {"obs_dim": obs, "act_dim": act, "scripted_gait": gait, "arm": arm, "curriculum": stage},
-                directory / name,
-            )
+                {"obs_dim": obs, "act_dim": act, "arm": arm, "curriculum": stage},
+                directory / name)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -389,23 +381,23 @@ class TransferTests(unittest.TestCase):
             reach = stage_log_dir("reach", root=root)
             haul = stage_log_dir("haul", root=root)
             slow = stage_log_dir("catch", "slow", root=root)
-            save(walk, "ppo_0001.pt", "walk", False, arm="panda")
-            found = resolve_checkpoint(reach, "latest", 81, 19, False, "z1", "reach", root=root)
+            save(walk, "ppo_0001.pt", "walk", arm="panda")
+            found = resolve_checkpoint(reach, "latest", 81, 19, "z1", "reach", root=root)
             self.assertIsNone(found)
-            save(walk, "ppo_0002.pt", "walk", False)
-            found = resolve_checkpoint(reach, "latest", 81, 19, False, "z1", "reach", root=root)
+            save(walk, "ppo_0002.pt", "walk")
+            found = resolve_checkpoint(reach, "latest", 81, 19, "z1", "reach", root=root)
             self.assertEqual(found, walk / "ppo_0002.pt")
-            save(reach, "ppo_0004.pt", "reach", False)
-            found = resolve_checkpoint(reach, "latest", 81, 19, False, "z1", "reach", root=root)
+            save(reach, "ppo_0004.pt", "reach")
+            found = resolve_checkpoint(reach, "latest", 81, 19, "z1", "reach", root=root)
             self.assertEqual(found, reach / "ppo_0004.pt")
             # The catch levels start from reach, and not from the box task.
-            save(haul, "ppo_0001.pt", "haul", False)
-            found = resolve_checkpoint(slow, "latest", 81, 19, False, "z1", "catch", "slow", root=root)
+            save(haul, "ppo_0001.pt", "haul")
+            found = resolve_checkpoint(slow, "latest", 81, 19, "z1", "catch", "slow", root=root)
             self.assertEqual(found, reach / "ppo_0004.pt")
             # Practicing walk again prefers the harder stage's weights.
-            found = resolve_checkpoint(walk, "latest", 81, 19, False, "z1", "walk", root=root, retreat=True)
+            found = resolve_checkpoint(walk, "latest", 81, 19, "z1", "walk", root=root, retreat=True)
             self.assertEqual(found, reach / "ppo_0004.pt")
-            found = resolve_checkpoint(walk, "latest", 81, 19, False, "z1", "walk", root=root)
+            found = resolve_checkpoint(walk, "latest", 81, 19, "z1", "walk", root=root)
             self.assertEqual(found, walk / "ppo_0002.pt")
 
     def test_a_removed_stage_has_no_folder(self):
@@ -414,18 +406,18 @@ class TransferTests(unittest.TestCase):
                 stage_log_dir(gone)
 
     def test_the_trainer_ranks_the_ladder(self):
-        from pick_and_carry.train_ppo import _stage_rank
+        from pick_and_carry.checkpoints import stage_rank
 
-        ranks = [_stage_rank("walk", "static"), _stage_rank("reach", "static"), _stage_rank("haul", "static")]
+        ranks = [stage_rank("walk", "static"), stage_rank("reach", "static"), stage_rank("haul", "static")]
         self.assertEqual(ranks, sorted(ranks))
-        self.assertLess(ranks[-1], _stage_rank("catch", "static"))
-        self.assertLess(_stage_rank("catch", "slow"), _stage_rank("catch", "fly"))
-        self.assertEqual(_stage_rank("carry", "static"), 0)
+        self.assertLess(ranks[-1], stage_rank("catch", "static"))
+        self.assertLess(stage_rank("catch", "slow"), stage_rank("catch", "fly"))
+        self.assertEqual(stage_rank("carry", "static"), 0)
 
 
 class DifficultyTests(unittest.TestCase):
     def test_walk_starts_flat_and_climbs_with_the_score(self):
-        from pick_and_carry.train_ppo import _Difficulty
+        from pick_and_carry.difficulty import Difficulty
 
         class Env:
             mix = None
@@ -434,7 +426,7 @@ class DifficultyTests(unittest.TestCase):
                 self.mix = value
 
         env = Env()
-        difficulty = _Difficulty("walk", "static")
+        difficulty = Difficulty("walk", "static")
         difficulty.start(env)
         self.assertEqual(env.mix, 0.0)
         for _ in range(8):
@@ -445,7 +437,7 @@ class DifficultyTests(unittest.TestCase):
         self.assertEqual(env.mix, 1.0)
 
     def test_catch_climbs_back_toward_the_selected_ball(self):
-        from pick_and_carry.train_ppo import _Difficulty
+        from pick_and_carry.difficulty import Difficulty
 
         class Env:
             level = None
@@ -454,7 +446,7 @@ class DifficultyTests(unittest.TestCase):
                 self.level = value
 
         env = Env()
-        difficulty = _Difficulty("catch", "fly")
+        difficulty = Difficulty("catch", "fly")
         for _ in range(8):
             difficulty.update(env, 0.0)
         self.assertEqual(env.level, "random")
@@ -481,28 +473,27 @@ class TrainerSetupTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        from pick_and_carry.train_ppo import archive_incompatible_logs
+        from pick_and_carry.checkpoints import archive_incompatible_logs
 
         def save(directory: Path, name: str, obs: int) -> None:
             torch.save(
-                {"obs_dim": obs, "act_dim": 19, "scripted_gait": False, "arm": "z1", "curriculum": "walk"},
-                directory / name,
-            )
+                {"obs_dim": obs, "act_dim": 19, "arm": "z1", "curriculum": "walk"},
+                directory / name)
 
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            self.assertIsNone(archive_incompatible_logs(folder, 81, 19, False, "z1", "walk"))
+            self.assertIsNone(archive_incompatible_logs(folder, 81, 19, "z1", "walk"))
             save(folder, "ppo_0100.pt", 69)
             (folder / "metrics.jsonl").write_text("{}\n", encoding="utf-8")
             (folder / "events.out.tfevents.1").write_text("x", encoding="utf-8")
-            moved = archive_incompatible_logs(folder, 81, 19, False, "z1", "walk")
+            moved = archive_incompatible_logs(folder, 81, 19, "z1", "walk")
             self.assertIsNotNone(moved)
             self.assertTrue((moved / "ppo_0100.pt").is_file())
             self.assertTrue((moved / "metrics.jsonl").is_file())
             self.assertTrue((moved / "events.out.tfevents.1").is_file())
             self.assertEqual(list(folder.glob("ppo_*.pt")), [])
             save(folder, "ppo_0001.pt", 81)
-            self.assertIsNone(archive_incompatible_logs(folder, 81, 19, False, "z1", "walk"))
+            self.assertIsNone(archive_incompatible_logs(folder, 81, 19, "z1", "walk"))
             self.assertTrue((folder / "ppo_0001.pt").is_file())
 
 
@@ -536,17 +527,16 @@ class MissingPlaybackTests(unittest.TestCase):
 
         from pick_and_carry.config import EnvConfig
         from pick_and_carry.curriculum import stage_log_dir
-        from pick_and_carry.train_ppo import missing_play_checkpoint
+        from pick_and_carry.checkpoints import missing_play_checkpoint
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            cfg = EnvConfig(curriculum="catch", catch_level="static", arm="z1", scripted_gait=True)
+            cfg = EnvConfig(curriculum="catch", catch_level="static", arm="z1")
             args = Namespace(
                 play=True,
                 resume="latest",
                 retreat=False,
-                log_dir=stage_log_dir("catch", "static", "z1", root=root),
-            )
+                log_dir=stage_log_dir("catch", "static", "z1", root=root))
             message = missing_play_checkpoint(args, cfg, root=root)
         self.assertIsNotNone(message)
         self.assertIn("再生できる重みがありません", message)

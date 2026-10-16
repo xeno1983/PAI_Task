@@ -102,17 +102,13 @@ def task_reward(
             if name in terms:
                 terms[name] = torch.zeros_like(terms[name])
         walk = (~fallen).to(dtype=reward.dtype)
-    if cfg.scripted_gait:
-        forward = base_lin_vel[:, 0].clamp(-0.5, 1.0)
-        terms["forward"] = cfg.reward_scales.forward * forward * walk * cfg.dt
-    else:
-        vx = base_lin_vel[:, 0]
-        vy = base_lin_vel[:, 1]
-        yaw = base_ang_vel[:, 2]
-        track = torch.exp(-((vx - TRACK_SPEED) / TRACK_SIGMA) ** 2)
-        slip = vy.square() + (0.5 * yaw).square()
-        speed_coef = WALK_SPEED_COEF if cfg.control_split == "walk" else SPLIT_SPEED_COEF
-        terms["forward"] = (speed_coef * track - SLIP_COEF * slip) * walk * cfg.dt
+    vx = base_lin_vel[:, 0]
+    vy = base_lin_vel[:, 1]
+    yaw = base_ang_vel[:, 2]
+    track = torch.exp(-((vx - TRACK_SPEED) / TRACK_SIGMA) ** 2)
+    slip = vy.square() + (0.5 * yaw).square()
+    speed_coef = WALK_SPEED_COEF if cfg.control_split == "walk" else SPLIT_SPEED_COEF
+    terms["forward"] = (speed_coef * track - SLIP_COEF * slip) * walk * cfg.dt
     open_frac = (gripper_opening / cfg.gripper_open).clamp(0.0, 1.0)
     if cfg.control_split == "walk":
         terms["release"] = torch.zeros_like(reward)

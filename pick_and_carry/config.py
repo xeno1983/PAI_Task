@@ -1,8 +1,7 @@
-"""Shared specification for the Go2 + Franka pick-and-carry task.
+"""Shared specification for the Go2 + Unitree Z1 pick-and-carry task.
 
-The mount pose is the single source of truth for both the primitive URDF and
-the official-URDF merger. Go2 ``base`` uses +X forward and +Z up. Franka
-``panda_link0`` also uses +Z up, so a zero rpy keeps the arm upright.
+The mount pose is the single source of truth for ``scripts/build_z1_urdf.py``.
+Go2 ``base`` uses +X forward and +Z up.
 """
 
 from __future__ import annotations
@@ -14,15 +13,10 @@ from pick_and_carry.terrain import GOAL_X_RANGE, OBJECT_X_RANGE
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 URDF_DIR = PACKAGE_ROOT / "assets" / "urdf"
-PRIMITIVE_URDF = URDF_DIR / "quadruped_arm.urdf"
-MERGED_URDF = URDF_DIR / "quadruped_arm_merged.urdf"
 
 # Slightly aft of the base origin, just above the chassis top (~0.057 m).
 MOUNT_XYZ = (-0.05, 0.0, 0.08)
 MOUNT_RPY = (0.0, 0.0, 0.0)
-MOUNT_JOINT = "arm_mount_joint"
-BASE_LINK_CANDIDATES = ("base", "base_link", "trunk")
-ARM_ROOT_LINK = "panda_link0"
 
 LEG_JOINTS = (
     "FL_hip_joint",
@@ -38,18 +32,7 @@ LEG_JOINTS = (
     "RR_thigh_joint",
     "RR_calf_joint",
 )
-ARM_JOINTS = (
-    "panda_joint1",
-    "panda_joint2",
-    "panda_joint3",
-    "panda_joint4",
-    "panda_joint5",
-    "panda_joint6",
-    "panda_joint7",
-)
-FINGER_JOINTS = ("panda_finger_joint1", "panda_finger_joint2")
 FOOT_LINKS = ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
-EE_LINK_CANDIDATES = ("panda_hand_tcp", "panda_grasptarget", "panda_hand", "panda_link8")
 
 # Per-leg order matches LEG_JOINTS. Angles are radians, in the standing pose
 # used by Unitree's Go2 locomotion examples.
@@ -67,32 +50,10 @@ DEFAULT_LEG_ANGLES = {
     "RR_thigh_joint": 0.8,
     "RR_calf_joint": -1.5,
 }
-# Forward and partly lowered, so action 0 starts in the workspace above the
-# cube. Joint 2 at -0.785 points the hand straight up, which the old ±0.4 rad
-# action range could never leave. Joint 4 stays inside [-3.07, -0.07].
-DEFAULT_ARM_ANGLES = {
-    "panda_joint1": 0.0,
-    "panda_joint2": 0.9,
-    "panda_joint3": 0.0,
-    "panda_joint4": -1.4,
-    "panda_joint5": 0.0,
-    "panda_joint6": 1.8,
-    "panda_joint7": 0.7,
-}
-
 LEG_LIMITS = {
     "hip": (-1.0472, 1.0472, 23.7),
     "thigh": (-1.5708, 3.4907, 23.7),
     "calf": (-2.7227, -0.83776, 45.43),
-}
-ARM_LIMITS = {
-    "panda_joint1": (-2.8973, 2.8973, 87.0),
-    "panda_joint2": (-1.7628, 1.7628, 87.0),
-    "panda_joint3": (-2.8973, 2.8973, 87.0),
-    "panda_joint4": (-3.0718, -0.0698, 87.0),
-    "panda_joint5": (-2.8973, 2.8973, 12.0),
-    "panda_joint6": (-0.0175, 3.7525, 12.0),
-    "panda_joint7": (-2.8973, 2.8973, 12.0),
 }
 
 # (name, dim). Positions of the object, goal, and end effector are expressed
@@ -141,18 +102,6 @@ def layout_slices(layout: tuple[tuple[str, int], ...]) -> dict[str, slice]:
 
 NUM_OBS = layout_dim(OBS_LAYOUT)
 NUM_ACTIONS = layout_dim(ACTION_LAYOUT)
-
-
-def default_urdf_path() -> Path:
-    """Prefer a merged mesh URDF, then official visuals on the primitive body."""
-    if MERGED_URDF.is_file():
-        return MERGED_URDF
-    from pick_and_carry.visual_urdf import styled_urdf_path
-
-    styled = styled_urdf_path()
-    if styled is not None:
-        return styled
-    return PRIMITIVE_URDF
 
 
 def leg_limit(joint_name: str) -> tuple[float, float, float]:
@@ -237,15 +186,6 @@ class EnvConfig:
     # Flat treads on the travel strips. Pads under the box and the goal stay flat.
     terrain_steps: bool = False
     urdf_path: str | None = None
-    control_mode: str = "position"  # "position" or "torque"
-    # Kinematic attach once the gripper is closed near the cube. This is the
-    # curriculum stage; set False to require a physical finger grasp.
-    assist_grasp: bool = True
-    # Hold the standing pose. The policy does not command the legs.
-    freeze_legs: bool = False
-    # False: while walking, the policy commands the legs around the standing pose.
-    # True: a fixed diagonal trot walks, and the policy only adds a small residual.
-    scripted_gait: bool = False
     # split: legs while walking, arm while picking up or releasing.
     # walk: legs the whole time, arm held still, reward is travel and not falling.
     # both: legs and arm together for the whole episode.
@@ -304,7 +244,6 @@ class EnvConfig:
     # that starts the release while the cube is held.
     pickup_distance: float = 0.55
     release_distance: float = 0.45
-    gait_period: float = 0.40
     goal_radius: float = 0.28
     place_height: float = 0.08
     goal_marker_size: tuple[float, float, float] = (0.30, 0.30, 0.01)

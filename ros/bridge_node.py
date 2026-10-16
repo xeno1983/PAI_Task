@@ -11,7 +11,6 @@ import argparse
 import base64
 import json
 import os
-import socket
 import threading
 import time
 from pathlib import Path
@@ -76,17 +75,13 @@ def _marker(marker_id: int, stamp, position, scale, color, shape) -> Marker:
 
 
 class PickAndCarryBridge(Node):
-    def __init__(self, host: str, port: int, link_dir: str = "") -> None:
+    def __init__(self, link_dir: str) -> None:
         super().__init__("pick_and_carry_bridge")
         self._lock = threading.Lock()
-        self._sock: socket.socket | None = None
-        self._server: socket.socket | None = None
         self._latest: dict | None = None
         self._announced = False
-        self._pending_goal: bytes | None = None
         self._click_xy: tuple[float, float] | None = None
-        self._last_goal_send = 0.0
-        self._link_dir = Path(link_dir) if link_dir else None
+        self._link_dir = Path(link_dir)
         self._state_seq: object = None
         self._joints = self.create_publisher(JointState, "/joint_states", 10)
         self._image = self.create_publisher(Image, "/overview/image", 1)
@@ -96,82 +91,9 @@ class PickAndCarryBridge(Node):
         self._listener = TransformListener(self._buffer, self)
         self.create_subscription(PointStamped, "/clicked_point", self._on_click, 10)
         self.create_timer(0.02, self._pump)
-        if self._link_dir is not None:
-            self.get_logger().info(f"姿勢ファイルを見ます {self._link_dir}")
-            return
-        self._listen(host, port)
-        threading.Thread(target=self._accept_loop, name="sim-socket", daemon=True).start()
-
-    def _listen(self, host: str, port: int) -> None:
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((host, port))
-        server.listen(1)
-        server.settimeout(0.5)
-        self._server = server
-        self.get_logger().info(f"推論からの接続を待っています {host}:{port}")
-
-    def _accept_loop(self) -> None:
-        while rclpy.ok():
-            server = self._server
-            if server is None:
-                return
-            try:
-                sock, _addr = server.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            sock.settimeout(0.5)
-            with self._lock:
-                previous = self._sock
-                self._sock = sock
-            if previous is not None:
-                try:
-                    previous.close()
-                except OSError:
-                    pass
-            self.get_logger().info("シミュレーションが接続しました")
-            self._read(sock)
-            with self._lock:
-                if self._sock is sock:
-                    self._sock = None
-            self.get_logger().info("シミュレーションとの接続が切れました。再接続を待ちます。")
-
-    def _read(self, sock: socket.socket) -> None:
-        buf = b""
-        try:
-            while rclpy.ok():
-                try:
-                    chunk = sock.recv(65536)
-                except socket.timeout:
-                    continue
-                except OSError:
-                    return
-                if not chunk:
-                    return
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        payload = json.loads(line.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-                    if isinstance(payload, dict) and payload.get("type") == "state":
-                        with self._lock:
-                            self._latest = payload
-        finally:
-            try:
-                sock.close()
-            except OSError:
-                pass
+        self.get_logger().info(f"姿勢ファイルを見ます {self._link_dir}")
 
     def _read_link(self) -> None:
-        if self._link_dir is None:
-            return
         newest = None
         newest_seq = None
         try:
@@ -199,7 +121,6 @@ class PickAndCarryBridge(Node):
             self._latest = newest
 
     def _write_goal_file(self, x: float, y: float) -> None:
-        assert self._link_dir is not None
         seq = 1
         for path in self._link_dir.glob("goal-*.json"):
             try:
@@ -224,9 +145,6 @@ class PickAndCarryBridge(Node):
             state = self._latest
             click = self._click_xy
         now = self.get_clock().now().to_msg()
-        if state is not None:
-            self._acknowledge(state)
-        self._flush_goal()
         if not state:
             # Keep world in the TF tree before the simulator connects, or rviz stays in error.
             self._send_base(now, (0.0, 0.0, 0.42), (1.0, 0.0, 0.0, 0.0))
@@ -277,15 +195,6 @@ class PickAndCarryBridge(Node):
         joints.position = [float(value) for value in STANDING_JOINTS.values()]
         self._joints.publish(joints)
 
-    def _acknowledge(self, state: dict) -> None:
-        click = self._click_xy
-        goal = state.get("goal_pos")
-        if click is None or not isinstance(goal, (list, tuple)) or len(goal) < 2:
-            return
-        if (float(goal[0]) - click[0]) ** 2 + (float(goal[1]) - click[1]) ** 2 <= 0.08 ** 2:
-            with self._lock:
-                self._pending_goal = None
-
     def _send_base(self, stamp, position, quat_wxyz) -> None:
         transform = TransformStamped()
         transform.header.stamp = stamp
@@ -310,20 +219,6 @@ class PickAndCarryBridge(Node):
         array = MarkerArray()
         array.markers = markers
         self._markers.publish(array)
-
-    def _flush_goal(self) -> None:
-        now = time.monotonic()
-        with self._lock:
-            payload = self._pending_goal
-            sock = self._sock
-            if payload is None or sock is None or now - self._last_goal_send < 0.2:
-                return
-        try:
-            sock.sendall(payload)
-        except OSError as exc:
-            self.get_logger().warn(f"運び先を送れません: {exc}")
-            return
-        self._last_goal_send = now
 
     def _publish_overview(self, state: dict, stamp) -> None:
         packed = state.get("image")
@@ -358,26 +253,18 @@ class PickAndCarryBridge(Node):
         with self._lock:
             self._click_xy = (x, y)
         self.get_logger().info(f"運び先 ({x:.2f}, {y:.2f})")
-        if self._link_dir is not None:
-            try:
-                self._write_goal_file(x, y)
-            except OSError as exc:
-                self.get_logger().warn(f"運び先を書けません: {exc}")
-            return
-        payload = (json.dumps({"type": "goal", "x": x, "y": y, "seq": time.time_ns()}) + "\n").encode("utf-8")
-        with self._lock:
-            self._pending_goal = payload
-        self._flush_goal()
+        try:
+            self._write_goal_file(x, y)
+        except OSError as exc:
+            self.get_logger().warn(f"運び先を書けません: {exc}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Publish inference state to rviz2 and forward goal clicks.")
-    parser.add_argument("--sim-host", default="0.0.0.0", help="Address this node listens on.")
-    parser.add_argument("--sim-port", type=int, default=11411)
-    parser.add_argument("--link-dir", default="", help="Shared folder for state.json and goal.json.")
+    parser.add_argument("--link-dir", required=True, help="Shared folder for the state and goal files.")
     args = parser.parse_args()
     rclpy.init()
-    node = PickAndCarryBridge(args.sim_host, args.sim_port, args.link_dir)
+    node = PickAndCarryBridge(args.link_dir)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

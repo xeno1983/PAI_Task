@@ -16,20 +16,33 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
-from pick_and_carry.config import EnvConfig, layout_dim
+from pick_and_carry.algorithms import (
+    ALGORITHMS,
+    ALGO_LABELS,
+    augment_symmetric,
+    group_relative_advantages,
+    normalize_algo,
+)
+from pick_and_carry.checkpoints import (
+    archive_incompatible_logs,
+    level_from_path,
+    missing_play_checkpoint,
+    resolve_checkpoint,
+    save_checkpoint,
+    stage_rank,
+    torch_load,
+)
+from pick_and_carry.config import EnvConfig
+from pick_and_carry.difficulty import Difficulty
 from pick_and_carry.curriculum import (
+    CATCH_HOLD_SECONDS,
     CATCH_LEVELS,
     LOCOMOTION_STAGES,
     STAGES,
-    earlier_stages,
     holds_arm_pose,
-    later_stages,
-    retreat_choice,
-    stage_layouts,
-    stage_log_dir,
 )
 from pick_and_carry.env import PickAndCarryEnv
-from pick_and_carry.ros_bridge import DEFAULT_HOST, DEFAULT_PORT, FileBridge, pack_rgb_image, ros_usage_error
+from pick_and_carry.ros_bridge import FileBridge, pack_rgb_image, ros_usage_error
 from pick_and_carry.mlflow_log import LocalTracker
 from pick_and_carry.tracking import append_metrics, write_run
 
@@ -64,29 +77,21 @@ def initial_action_std(num_actions: int, leg_std: float, arm_std: float, leg_cou
     return std
 
 
-def archive_incompatible_logs(log_dir: Path, obs_dim: int, act_dim: int, scripted_gait: bool, arm: str, curriculum: str) -> Path | None:
-    """Move weights and curves of another network shape aside so a new run cannot overwrite them.
-
-    Nothing moves when a compatible checkpoint exists or the folder holds no checkpoint.
-    """
-    weights = sorted(log_dir.glob("ppo_*.pt")) if log_dir.is_dir() else []
-    if not weights:
-        return None
-    if latest_matching(log_dir, obs_dim, act_dim, scripted_gait, arm, curriculum) is not None:
-        return None
-    target = log_dir / f"old_{time.strftime('%Y%m%d_%H%M%S')}"
-    target.mkdir(parents=True, exist_ok=True)
-    moving = [*weights, *log_dir.glob("events.out.tfevents*")]
-    metrics = log_dir / "metrics.jsonl"
-    if metrics.exists():
-        moving.append(metrics)
-    for path in moving:
-        path.replace(target / path.name)
-    return target
-
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train pick-and-carry with PPO on Genesis.")
+    parser = argparse.ArgumentParser(description="Train pick-and-carry on Genesis.")
+    parser.add_argument(
+        "--algo",
+        choices=ALGORITHMS,
+        default="ppo",
+        help="ppo: clipped PPO. grpo: group-relative advantages without critic. "
+        "sym_ppo: PPO with left-right observation/action augmentation.",
+    )
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        default=0,
+        help="GRPO group size. 0 uses --num-envs.",
+    )
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--iterations", type=int, default=60)
     parser.add_argument("--num-steps", type=int, default=128)
@@ -105,11 +110,6 @@ def parse_args():
     parser.add_argument("--arm-init-std", type=float, default=0.4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
-    parser.add_argument("--control", choices=("position", "torque"), default="position")
-    parser.add_argument("--no-assist-grasp", action="store_true")
-    parser.add_argument("--freeze-legs", action="store_true", help="Stand still instead of walking.")
-    parser.add_argument("--scripted-gait", action="store_true", help="Use the fixed trot instead of learning the legs.")
-    parser.add_argument("--walk", action="store_true", help="Accepted for older commands. Walking is already the default.")
     parser.add_argument("--viewer", action="store_true")
     parser.add_argument("--record", type=str, default=None, help="Save an mp4 of env 0 to this path.")
     parser.add_argument("--seed", type=int, default=0)
@@ -168,8 +168,6 @@ def parse_args():
         action="store_true",
         help="Inference only. Publish robot state and accept a new drop point while playing.",
     )
-    parser.add_argument("--ros-host", default=DEFAULT_HOST, help="Unused. Kept so older commands still start.")
-    parser.add_argument("--ros-port", type=int, default=DEFAULT_PORT, help="Unused. Kept so older commands still start.")
     parser.add_argument(
         "--ros-dir",
         type=Path,
@@ -188,174 +186,6 @@ def _parse_xy(text: str | None) -> tuple[float, float] | None:
     return float(parts[0]), float(parts[1])
 
 
-def _torch_load(path: Path, device: torch.device):
-    try:
-        return torch.load(path, map_location=device, weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location=device)
-
-
-def _checkpoint_matches(
-    blob: dict,
-    obs_dim: int,
-    act_dim: int,
-    scripted_gait: bool,
-    arm: str,
-    curriculum: str,
-    *,
-    match_arm: bool,
-) -> bool:
-    if int(blob.get("obs_dim", -1)) != obs_dim or int(blob.get("act_dim", -1)) != act_dim:
-        return False
-    # Files written before the Z1-only layout have no arm field and do not load.
-    if match_arm and str(blob.get("arm", "panda")) != arm:
-        return False
-    # Files saved before the split used the fixed trot.
-    if bool(blob.get("scripted_gait", True)) != scripted_gait:
-        return False
-    # Files saved before the curriculum field are pick-and-place.
-    return str(blob.get("curriculum", "carry")) == curriculum
-
-
-def latest_matching(
-    log_dir: Path,
-    obs_dim: int,
-    act_dim: int,
-    scripted_gait: bool,
-    arm: str,
-    curriculum: str,
-    *,
-    match_arm: bool = True,
-) -> Path | None:
-    """Newest checkpoint in one folder whose network matches this task."""
-    if not log_dir.is_dir():
-        return None
-    compatible: list[Path] = []
-    skipped_arm = 0
-    for path in sorted(log_dir.glob("ppo_*.pt")):
-        blob = _torch_load(path, torch.device("cpu"))
-        saved_arm = str(blob.get("arm", "panda"))
-        if match_arm and saved_arm != arm and int(blob.get("obs_dim", -1)) == obs_dim:
-            skipped_arm += 1
-        if _checkpoint_matches(blob, obs_dim, act_dim, scripted_gait, arm, curriculum, match_arm=match_arm):
-            compatible.append(path)
-    if not compatible and skipped_arm:
-        print(f"skipped {skipped_arm} checkpoint(s) from a different arm.", flush=True)
-    return compatible[-1] if compatible else None
-
-
-def resolve_checkpoint(
-    log_dir: Path,
-    resume: str,
-    obs_dim: int,
-    act_dim: int,
-    scripted_gait: bool,
-    arm: str,
-    curriculum: str = "carry",
-    catch_level: str = "static",
-    root: Path | None = None,
-    retreat: bool = False,
-) -> Path | None:
-    """Own folder first. Empty folders use an easier stage. ``retreat`` prefers a harder stage."""
-    if resume != "latest":
-        path = Path(resume)
-        if not path.is_file():
-            raise SystemExit(f"Checkpoint not found: {path}")
-        return path
-    # Old Panda checkpoints name a different arm and do not load.
-    match_arm = True
-    if retreat:
-        for stage, level in later_stages(curriculum, catch_level):
-            found = latest_matching(
-                stage_log_dir(stage, level, arm, root=root),
-                obs_dim,
-                act_dim,
-                scripted_gait,
-                arm,
-                stage,
-                match_arm=match_arm,
-            )
-            if found is not None:
-                return found
-    own = latest_matching(log_dir, obs_dim, act_dim, scripted_gait, arm, curriculum)
-    if own is not None:
-        return own
-    for stage, level in earlier_stages(curriculum, catch_level):
-        found = latest_matching(
-            stage_log_dir(stage, level, arm, root=root),
-            obs_dim,
-            act_dim,
-            scripted_gait,
-            arm,
-            stage,
-            match_arm=match_arm,
-        )
-        if found is not None:
-            return found
-    return None
-
-
-def missing_play_checkpoint(args, cfg, root: Path | None = None) -> str | None:
-    """Japanese reason to stop before building a scene, when playback has no weights."""
-    if not getattr(args, "play", False) or not getattr(args, "resume", None):
-        return None
-    from pick_and_carry.arms import get_arm
-
-    arm = get_arm(cfg.arm)
-    observation, action = stage_layouts(cfg.curriculum, arm.dof)
-    found = resolve_checkpoint(
-        args.log_dir,
-        args.resume,
-        layout_dim(observation),
-        layout_dim(action),
-        cfg.scripted_gait,
-        cfg.arm,
-        cfg.curriculum,
-        cfg.catch_level,
-        root=root,
-        retreat=getattr(args, "retreat", False),
-    )
-    if found is not None:
-        return None
-    looked = [str(Path(args.log_dir))]
-    for stage, level in earlier_stages(cfg.curriculum, cfg.catch_level):
-        looked.append(str(stage_log_dir(stage, level, cfg.arm, root=root)))
-    lines = [
-        "再生できる重みがありません。",
-        "探した場所: " + "、".join(looked),
-        "先にメニューの 1 で、この段階を学習してください。",
-    ]
-    return "\n".join(lines)
-
-
-def save_checkpoint(
-    path: Path,
-    agent,
-    optimizer,
-    iteration: int,
-    obs_dim: int,
-    act_dim: int,
-    scripted_gait: bool,
-    arm: str,
-    curriculum: str = "carry",
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model": agent.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "iteration": iteration,
-            "obs_dim": obs_dim,
-            "act_dim": act_dim,
-            "scripted_gait": scripted_gait,
-            "arm": arm,
-            "curriculum": curriculum,
-        },
-        path,
-    )
-    print(f"saved {path}", flush=True)
-
-
 def make_config(args) -> EnvConfig:
     amplitude = 0.035 if args.terrain_amplitude is None else args.terrain_amplitude
     cfg = EnvConfig(
@@ -363,10 +193,6 @@ def make_config(args) -> EnvConfig:
         backend=args.backend,
         show_viewer=args.viewer,
         record_path=args.record,
-        control_mode=args.control,
-        assist_grasp=not args.no_assist_grasp,
-        freeze_legs=args.freeze_legs,
-        scripted_gait=args.scripted_gait,
         seed=args.seed,
         terrain_steps=args.terrain_steps,
         terrain_amplitude=amplitude,
@@ -378,8 +204,6 @@ def make_config(args) -> EnvConfig:
         curriculum=getattr(args, "curriculum", "carry"),
         catch_level=getattr(args, "catch_level", "static"),
     )
-    if cfg.curriculum != "carry":
-        cfg.scripted_gait = False
     if holds_arm_pose(cfg.curriculum):
         cfg.control_split = "walk"
     elif cfg.curriculum != "carry":
@@ -393,7 +217,7 @@ def make_config(args) -> EnvConfig:
         cfg.terrain = False
         cfg.terrain_steps = False
     if cfg.curriculum in ("haul", "reach", "catch"):
-        cfg.catch_hold_steps = max(1, int(round(1.0 / cfg.dt)))
+        cfg.catch_hold_steps = max(1, int(round(CATCH_HOLD_SECONDS / cfg.dt)))
     if cfg.curriculum in LOCOMOTION_STAGES and not args.play:
         # Pushes and per-robot friction, as in legged_gym. Playback stays undisturbed.
         cfg.push_robots = True
@@ -407,77 +231,6 @@ def make_config(args) -> EnvConfig:
     return cfg
 
 
-def _level_from_path(path: Path) -> str:
-    name = path.parent.name
-    prefix = "ppo_curriculum_catch_"
-    if name.startswith(prefix) and name[len(prefix) :] in CATCH_LEVELS:
-        return name[len(prefix) :]
-    return "static"
-
-
-def _stage_rank(stage: str, catch_level: str) -> int:
-    """Higher means a harder task on the same ladder. Carry stays at zero."""
-    ladder = ("walk", "reach", "haul")
-    if stage in ladder:
-        return 1 + ladder.index(stage)
-    if stage == "catch" and catch_level in CATCH_LEVELS:
-        return 1 + len(ladder) + CATCH_LEVELS.index(catch_level)
-    return 0
-
-
-class _Difficulty:
-    """Raise the live task as the score allows, and ease it when scores stay low."""
-
-    def __init__(self, curriculum: str, catch_level: str):
-        self.poor = 0
-        self.good = 0
-        self.kind = None
-        self.current = 0
-        self.target = 0
-        self.labels: tuple[str, ...] = ()
-        if curriculum in LOCOMOTION_STAGES:
-            # Start on flat ground and climb to the selected bumps once walking is tracked.
-            self.kind = "terrain"
-            self.labels = ("平地", "半分の段差", "選んだ不整地")
-            self.target = 2
-            self.current = 0
-        elif curriculum == "catch":
-            self.kind = "catch"
-            self.labels = ("静止", "ゆっくり", "ばらす", "飛ぶ", "ノイズ")
-            self.target = CATCH_LEVELS.index(catch_level)
-            self.current = self.target
-
-    def start(self, env) -> None:
-        """Put the environment on the starting rung. Walk begins on flat ground."""
-        if self.kind == "terrain":
-            env.set_terrain_mix(self.current / max(1, self.target))
-
-    def update(self, env, score: float | None) -> str:
-        if self.kind is None:
-            return ""
-        new, self.poor, self.good = retreat_choice(
-            score,
-            current=self.current,
-            target=self.target,
-            poor_streak=self.poor,
-            good_streak=self.good,
-        )
-        if new != self.current:
-            previous = self.current
-            self.current = new
-            if self.kind == "terrain":
-                env.set_terrain_mix((0.0, 0.5, 1.0)[new])
-            else:
-                env.set_catch_level(CATCH_LEVELS[new])
-            if new < previous:
-                print(f"成績が低いので、{self.labels[new]} に戻しました。回復したら上げます。", flush=True)
-            else:
-                print(f"成績が戻ったので、{self.labels[new]} に上げました。", flush=True)
-        if self.current == self.target:
-            return ""
-        return self.labels[self.current]
-
-
 def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     """Load a checkpoint when --resume is set. Returns the saved iteration and path."""
     if not args.resume:
@@ -487,11 +240,11 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
         args.resume,
         env.num_obs,
         env.num_actions,
-        cfg.scripted_gait,
         cfg.arm,
         cfg.curriculum,
         cfg.catch_level,
         retreat=getattr(args, "retreat", False),
+        algo=getattr(args, "algo", "ppo"),
     )
     if ckpt_path is None:
         if args.play:
@@ -500,31 +253,27 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
             )
         print(f"{args.log_dir.resolve()} にも前の段階にも重みがありません。最初から学習します。", flush=True)
         return 0, None
-    blob = _torch_load(ckpt_path, env.device)
+    blob = torch_load(ckpt_path, env.device)
     obs_dim = int(blob.get("obs_dim", -1))
     act_dim = int(blob.get("act_dim", -1))
-    saved_gait = bool(blob.get("scripted_gait", True))
-    saved_arm = str(blob.get("arm", "panda"))
+    saved_arm = str(blob["arm"]) if "arm" in blob else ""
     saved_stage = str(blob.get("curriculum", "carry"))
-    arm_required = True
     same_network = (
         obs_dim == env.num_obs
         and act_dim == env.num_actions
-        and saved_gait == cfg.scripted_gait
-        and (saved_arm == cfg.arm or not arm_required)
+        and saved_arm == cfg.arm
     )
     if not same_network:
         print(
-            f"checkpoint {ckpt_path} is for arm {saved_arm} obs {obs_dim} act {act_dim} "
-            f"scripted_gait {saved_gait}, this task is arm {cfg.arm} obs {env.num_obs} act {env.num_actions} "
-            f"scripted_gait {cfg.scripted_gait}. Starting from scratch.",
+            f"checkpoint {ckpt_path} is for arm {saved_arm or '?'} obs {obs_dim} act {act_dim}, "
+            f"this task is arm {cfg.arm} obs {env.num_obs} act {env.num_actions}. Starting from scratch.",
             flush=True,
         )
         return 0, None
     agent.load_state_dict(blob["model"])
     same_folder = ckpt_path.parent.resolve() == Path(args.log_dir).resolve()
     if not same_folder:
-        harder = _stage_rank(saved_stage, _level_from_path(ckpt_path)) > _stage_rank(cfg.curriculum, cfg.catch_level)
+        harder = stage_rank(saved_stage, level_from_path(ckpt_path)) > stage_rank(cfg.curriculum, cfg.catch_level)
         if harder:
             print(f"上の段階の重みで、易しい課題に戻って学びます: {ckpt_path}", flush=True)
         else:
@@ -641,9 +390,9 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             0,
             env.num_obs,
             env.num_actions,
-            cfg.scripted_gait,
             cfg.arm,
             cfg.curriculum,
+            algo=normalize_algo(getattr(args, "algo", "ppo")),
         )
         tracker.log_checkpoint(first)
     last_iteration = start_iteration + args.iterations
@@ -652,7 +401,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         flush=True,
     )
     step_times: list[float] = []
-    difficulty = _Difficulty(cfg.curriculum, cfg.catch_level)
+    difficulty = Difficulty(cfg.curriculum, cfg.catch_level)
     difficulty.start(env)
     for iteration in range(start_iteration + 1, last_iteration + 1):
         started = time.perf_counter()
@@ -724,21 +473,37 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         def flat(items):
             return torch.cat(items, dim=0)
 
+        algo = normalize_algo(getattr(args, "algo", "ppo"))
+        flat_returns = returns.reshape(-1)
+        flat_advantages = advantages.reshape(-1)
+        flat_obs = flat(obs_buf)
+        flat_act = flat(act_buf)
+        flat_logp = flat(logp_buf)
+        flat_values = flat(val_buf)
+        value_coef = args.value_coef
+        if algo == "grpo":
+            group = int(args.group_size) if int(args.group_size) > 0 else int(args.num_envs)
+            flat_advantages = group_relative_advantages(flat_returns, group)
+            value_coef = 0.0
+        if algo == "sym_ppo":
+            flat_obs, flat_act, flat_logp, flat_returns, flat_advantages, flat_values = augment_symmetric(
+                flat_obs, flat_act, flat_logp, flat_returns, flat_advantages, flat_values
+            )
         metrics = ppo_update(
             agent,
             optimizer,
-            flat(obs_buf),
-            flat(act_buf),
-            flat(logp_buf),
-            returns.reshape(-1),
-            advantages.reshape(-1),
+            flat_obs,
+            flat_act,
+            flat_logp,
+            flat_returns,
+            flat_advantages,
             clip=args.clip,
             epochs=args.epochs,
-            minibatch_size=minibatch_size_for(args, args.num_envs * args.num_steps),
+            minibatch_size=minibatch_size_for(args, flat_obs.shape[0]),
             entropy_coef=args.entropy_coef,
-            value_coef=args.value_coef,
+            value_coef=value_coef,
             max_grad_norm=args.max_grad_norm,
-            old_values=flat(val_buf),
+            old_values=None if algo == "grpo" else flat_values,
             desired_kl=args.desired_kl if args.desired_kl > 0 else None,
         )
         elapsed = time.perf_counter() - started
@@ -814,9 +579,9 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
                 iteration,
                 env.num_obs,
                 env.num_actions,
-                cfg.scripted_gait,
                 cfg.arm,
                 cfg.curriculum,
+                algo=normalize_algo(getattr(args, "algo", "ppo")),
             )
             tracker.log_checkpoint(saved)
 
@@ -839,7 +604,7 @@ def main() -> None:
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
     if not args.play:
         archived = archive_incompatible_logs(
-            args.log_dir, env.num_obs, env.num_actions, cfg.scripted_gait, cfg.arm, cfg.curriculum
+            args.log_dir, env.num_obs, env.num_actions, cfg.arm, cfg.curriculum
         )
         if archived is not None:
             print(f"形の違う古い重みと記録を {archived} に移しました。", flush=True)
@@ -852,11 +617,12 @@ def main() -> None:
     if device.type == "cuda" and torch.cuda.is_available():
         free, total = torch.cuda.mem_get_info(device)
         gpu = "  " + format_gpu_memory(free, total)
+    algo = normalize_algo(getattr(args, "algo", "ppo"))
     print(
-        f"PPO obs={env.num_obs} act={env.num_actions} envs={env.num_envs} "
+        f"{ALGO_LABELS[algo]} obs={env.num_obs} act={env.num_actions} envs={env.num_envs} "
         f"arm={cfg.arm} curriculum={cfg.curriculum} catch={cfg.catch_level} "
-        f"freeze_legs={cfg.freeze_legs} control_split={cfg.control_split} "
-        f"wrist_camera={cfg.wrist_camera} urdf={env.urdf_path} device={device}{gpu}",
+        f"control_split={cfg.control_split} wrist_camera={cfg.wrist_camera} "
+        f"urdf={env.urdf_path} device={device}{gpu}",
         flush=True,
     )
     print(
@@ -867,7 +633,7 @@ def main() -> None:
     tracker = LocalTracker()
     if not args.play:
         info = {
-            "algorithm": "ppo",
+            "algorithm": algo,
             "resumed_from": resumed_from,
             "start_iteration": start_iteration,
             "iterations_requested": args.iterations,
@@ -880,8 +646,6 @@ def main() -> None:
             "terrain": cfg.terrain,
             "terrain_amplitude_m": cfg.terrain_amplitude,
             "terrain_steps": cfg.terrain_steps,
-            "freeze_legs": cfg.freeze_legs,
-            "scripted_gait": cfg.scripted_gait,
             "arm": cfg.arm,
             "control_split": cfg.control_split,
             "wrist_camera": cfg.wrist_camera,

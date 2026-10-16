@@ -43,7 +43,6 @@ PREFERRED = (
     "PickAndCarry_catch.mp4",
     "PickAndCarry_compare.mp4",
     "PickAndCarry_z1_compare.mp4",
-    "PickAndCarry_supplies_90s.mp4",
 )
 TITLES = {
     "PickAndCarry_smoke.mp4": ("起動確認", "ロボットが足場に立つかを見ます"),
@@ -61,7 +60,6 @@ TITLES = {
     "PickAndCarry_catch.mp4": ("転がるボール", "前の段階から続けた、キャッチの方策です"),
     "PickAndCarry_compare.mp4": ("学習の途中経過", "早い時点と遅い時点を並べます"),
     "PickAndCarry_z1_compare.mp4": ("学習の途中経過（Z1）", "早い時点と遅い時点を並べます"),
-    "PickAndCarry_supplies_90s.mp4": ("複数の物資を運ぶ", "台本の歩行で、箱を順に拾って置きます"),
 }
 OUTPUT_NAME = "PickAndCarry_presentation.mp4"
 SLIDE_NARRATION = (
@@ -112,7 +110,6 @@ VIDEO_NARRATION = {
     "PickAndCarry_catch.mp4": "転がるボールを掴む段階です。前の段階の重みから続けた方策です。",
     "PickAndCarry_compare.mp4": "学習の途中経過です。同じ配置で、早い時点と遅い時点を同時に再生しています。",
     "PickAndCarry_z1_compare.mp4": "ゼットワンの途中経過です。同じ配置で、早い時点と遅い時点を同時に再生しています。",
-    "PickAndCarry_supplies_90s.mp4": "複数の物資を運ぶ実演です。台本の歩行で、箱を順に拾って置きます。",
 }
 
 

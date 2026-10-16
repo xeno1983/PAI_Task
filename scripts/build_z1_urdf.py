@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pick_and_carry.arms import get_arm  # noqa: E402
-from pick_and_carry.config import MOUNT_XYZ, PRIMITIVE_URDF, URDF_DIR  # noqa: E402
+from pick_and_carry.config import MOUNT_XYZ, URDF_DIR  # noqa: E402
 
 # name, mass, com xyz, inertia ixx ixy ixz iyy iyz izz
 LINKS = (
@@ -90,7 +90,7 @@ def _revolute(name: str, parent: str, child: str, xyz: str, axis: str, lower: fl
 
 
 def build_z1_urdf() -> ET.ElementTree:
-    tree = ET.parse(PRIMITIVE_URDF)
+    tree = ET.parse(URDF_DIR / "quadruped_z1.urdf")
     robot = tree.getroot()
     robot.set("name", "quadruped_z1")
     robot.insert(
@@ -104,7 +104,7 @@ def build_z1_urdf() -> ET.ElementTree:
     )
     for child in list(robot):
         name = child.get("name", "")
-        if name.startswith("panda") or name == "arm_mount_joint":
+        if name.startswith("z1_") or name == "arm_mount_joint":
             robot.remove(child)
     arm = get_arm("z1")
     mount = ET.Element("joint", {"name": "arm_mount_joint", "type": "fixed"})

@@ -62,7 +62,6 @@ class LocalTracker:
             "terrain_amplitude_m": info.get("terrain_amplitude_m"),
             "control_split": info.get("control_split"),
             "wrist_camera": info.get("wrist_camera"),
-            "scripted_gait": info.get("scripted_gait"),
             "log_dir": str(log_dir),
         }
         self._call(lambda: mlflow.log_params({key: "" if value is None else str(value) for key, value in params.items()}))

@@ -75,7 +75,7 @@ def load_snapshots(log_dir: Path, expected_obs: int, expected_act: int, arm: str
             blob = torch.load(path, map_location="cpu", weights_only=False)
         except TypeError:
             blob = torch.load(path, map_location="cpu")
-        if int(blob.get("obs_dim", -1)) != expected_obs or int(blob.get("act_dim", -1)) != expected_act or str(blob.get("arm", "panda")) != arm or "model" not in blob:
+        if int(blob.get("obs_dim", -1)) != expected_obs or int(blob.get("act_dim", -1)) != expected_act or str(blob.get("arm", "")) != arm or "model" not in blob:
             skipped += 1
             continue
         records.append(

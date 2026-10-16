@@ -8,7 +8,6 @@ import torch
 
 from pick_and_carry.agents import (
     ActorCritic,
-    ReplayBuffer,
     adapt_learning_rate,
     compute_gae,
     gaussian_kl,
@@ -61,18 +60,6 @@ class AgentTests(unittest.TestCase):
             mean = agent.act_mean(torch.randn(8, NUM_OBS))
         self.assertLess(float(mean.abs().max()), 0.2)
 
-    def test_replay_wrap(self):
-        buffer = ReplayBuffer(4, 2, 1, torch.device("cpu"))
-        obs = torch.arange(6, dtype=torch.float32).reshape(3, 2)
-        actions = torch.zeros(3, 1)
-        rewards = torch.arange(3, dtype=torch.float32)
-        dones = torch.zeros(3)
-        buffer.add(obs, actions, rewards, obs + 1, dones)
-        self.assertEqual(buffer.size, 3)
-        buffer.add(obs, actions, rewards, obs + 1, dones)
-        self.assertEqual(buffer.size, 4)
-        sample = buffer.sample(4)
-        self.assertEqual(sample[0].shape, (4, 2))
 
 
 class PpoUpdateTests(unittest.TestCase):

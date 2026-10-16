@@ -1,6 +1,6 @@
 # Go2 Pick-and-Carry（Genesis）
 
-Unitree Go2 の背中に腕を固定し、不整地を渡って立方体を拾い、目標へ置く環境です。学習は PPO が本体で、短い SAC も同梱しています。画面は出さず、結果は mp4 で確認します。この GPU では Genesis の 3D ウィンドウが落ちるため、`--viewer` は使いません。
+Unitree Go2 の背中に腕を固定し、不整地を渡って立方体を拾い、目標へ置く環境です。学習は PPO が既定で、起動時に GRPO と Symmetric PPO（左右対称の増強）も選べます。手法ごとの保存先は `logs/{algo}_*` で、メニュー 7 で曲線を重ねて比較できます。画面は出さず、結果は mp4 で確認します。この GPU では Genesis の 3D ウィンドウが落ちるため、`--viewer` は使いません。
 
 確認済みの組み合わせは Windows、Python 3.12、PyTorch 2.11.0+cu128、Genesis 1.4.3、RTX 5070 Laptop（8 GB）です。
 
@@ -36,7 +36,7 @@ $env:PYTHONUTF8 = "1"
 .\.venv\Scripts\python.exe scripts\smoke_local.py
 ```
 
-Genesis がなくても、報酬と URDF のテストは通ります。
+Genesis がなくても、報酬と方策のテストは通ります。
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests
@@ -48,52 +48,48 @@ Genesis がなくても、報酬と URDF のテストは通ります。
 
 | 番号 | 内容 | 主な出力 |
 | --- | --- | --- |
-| 1 | 8 秒間立たせて録画 | `PickAndCarry_smoke.mp4`（Z1 なら `PickAndCarry_z1_smoke.mp4`） |
-| 2 | PPO で学習し、終わると曲線と 20 秒の再生 | `PickAndCarry_ppo.mp4` または `PickAndCarry_z1.mp4` |
-| 3 | 短い SAC（Panda のみ、8 環境、500 ステップ） | `PickAndCarry_sac.mp4` |
-| 4 | Colab 用 zip | `起動スクリプト\PickAndCarry\PAI_Task_colab.zip` |
-| 5 | クリックで物資と運び先を決めて再生。ROS 2 を選ぶと実行中に運び先を変えられる | 同じ mp4 |
-| 6 | 学習の早い時点と遅い時点を 1 本に並べる | `PickAndCarry_compare.mp4` |
-| 7 | 学習曲線をブラウザで開く | `PickAndCarry_curves.html` |
-| 8 | スライドと録画を、説明音声つきの 1 本にする | `PickAndCarry_presentation.mp4` |
+| 1 | 段階を選んで PPO 学習（歩行 / 到達 / 持ち運び / 箱運び / キャッチ） | 各 `logs/ppo_*` |
+| 2 | 推論。段階を選んで保存した重みを再生 | mp4 |
+| 3 | 箱運びの途中経過を並べた比較動画 | `PickAndCarry_z1_compare.mp4` |
+| 4 | 学習曲線をブラウザで開く | `PickAndCarry_curves.html` |
+| 5 | スライドと録画を、説明音声つきの 1 本にする | `PickAndCarry_presentation.mp4` |
+| 6 | Colab 用 zip | `起動スクリプト\PickAndCarry\PAI_Task_colab.zip` |
+| 7 | 学習手法（PPO / GRPO / Symmetric PPO）の曲線比較 | `PickAndCarry_compare_curves.html` |
 
 出力ファイルは、bat と同じ `起動スクリプト\PickAndCarry` フォルダにできます。
 
-2 番を選ぶと、次を順に聞きます。Enter は括弧内の既定です。
+1 番を選ぶと、次を順に聞きます。Enter は括弧内の既定です。
 
-1. 腕。Panda（既定）か Z1。
-2. 学習回数（1000）。今の iteration にこの回数を足します。
-3. 同時に動かすロボット数（16）。32 を超えると 8 GB の GPU ではメモリ不足になることがあります。手先カメラを使うと、同じ台数でも遅くなります。
-4. 走行環境。低い波 3.5 cm、段差 4.5 cm（既定）、段差 6 cm。段は箱の前に 1 段、置く前に 2 段で、箱と目標の下は平らです。
-5. 学習の分け方。歩行のみ、歩行と把持を分割（既定）、同時。
-6. 対象物の見つけ方。シミュレータの位置（既定）か、手先カメラ。
+1. カリキュラム段階（歩行 / 到達 / 持ち運び / 箱運び / キャッチ）。
+2. 学習回数。今の iteration にこの回数を足します。
+3. 同時に動かすロボット数（既定 64）。
+4. 歩行では地形の高さ。到達以降は平地です。
 
 途中で止めても、最後に `saved ppo_XXXX.pt` と出た時点から次回続けられます。保存は 20 iteration ごとです。画面の iteration がファイルより先に進んでいることがあります。
 
-5 番は、腕・走行環境・分け方・見つけ方のあと、rviz2 を使うかを聞きます。使うときは推論が 60 秒になり、そのあいだ rviz2 のクリックで運び先だけが動きます。物資の位置は、最初のクリック画面のままです。
+2 番の箱運び推論では、クリックで物資と運び先を決められます。ROS 2 を選ぶと rviz2 のクリックで運び先だけが動きます。物資の位置は、最初のクリック画面のままです。
 
 ## 4. コマンドで実行する
 
-起動スクリプトと同じ学習を、プロジェクトルートから直接行う例です。Panda の続きは `logs/ppo_walk`、Z1 は `logs/ppo_z1` です。引数を付けない `train_ppo` の既定ログは `logs/ppo` なので、続きから学ぶときは `--log-dir` を明示します。
+起動スクリプトと同じ学習を、プロジェクトルートから直接行う例です。歩行は `logs/ppo_curriculum_walk`、箱運びは `logs/ppo_z1` です。
 
 ```powershell
 $env:PYTHONUTF8 = "1"
-.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --resume latest --num-envs 16 --iterations 1000 --num-steps 128 --save-interval 20 --log-dir logs/ppo_walk --terrain-steps --terrain-amplitude 0.045
+.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --resume latest --num-envs 64 --iterations 1000 --num-steps 128 --save-interval 20 --log-dir logs/ppo_curriculum_walk --curriculum walk --arm z1
 ```
-
-Z1 で最初から学ぶときは `--arm z1 --log-dir logs/ppo_z1` を付けます。Panda の重みは寸法が違うので読みません。
 
 再生は学習せず、保存した重みで mp4 を書きます。
 
 ```powershell
-.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --seconds 20 --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry\PickAndCarry_ppo.mp4" --log-dir logs/ppo_walk --terrain-steps --terrain-amplitude 0.045
+.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --seconds 20 --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry\PickAndCarry_ppo.mp4" --log-dir logs/ppo_curriculum_walk --curriculum walk --arm z1
 ```
 
 よく使う引数は次です。
 
 | 引数 | 意味 |
 | --- | --- |
-| `--arm panda` / `--arm z1` | 腕。既定は panda |
+| `--arm z1` | 腕。Unitree Z1（既定） |
+| `--algo ppo` / `grpo` / `sym_ppo` | 学習手法。保存先は `logs/{algo}_*` |
 | `--control-split split` / `walk` / `both` | 歩行と把持の分け方。既定は split |
 | `--wrist-camera` | 手先カメラで箱を見てからつかむ |
 | `--terrain-steps` | 移動区間に段差を足す |
@@ -101,7 +97,6 @@ Z1 で最初から学ぶときは `--arm z1 --log-dir logs/ppo_z1` を付けま�
 | `--resume latest` | そのログフォルダの最新の適合する重みから続ける |
 | `--play` | 学習せず再生する |
 | `--ros` | 推論だけ。状態を送り、実行中の運び先を受け取る。学習中に付けると止まる |
-| `--no-assist-grasp` | 指の接触だけで持つ。既定は、つかんだ判定のあいだ箱を手先へ固定する |
 
 ### 推論中に運び先を動かす
 
@@ -110,16 +105,15 @@ Genesis の画面は開きません。表示は WSL2 の rviz2 です。シミ�
 WSL で、プロジェクト（例: `/mnt/c/Users/xeno1/PAI_Task`）に移動してから次を実行します。`ros-<distro>-desktop` が入っている必要があります。
 
 ```bash
-bash ros/display.sh panda
+bash ros/display.sh z1
 ```
 
 Z1 のときは `bash ros/display.sh z1` です。箱の URDF を rviz2 に出します。公式メッシュは使いません。
 
-Windows では起動スクリプトの 5 番で「ROS 2 で表示する」を選びます。rviz2 は WSL の Ubuntu（ROS 2 Jazzy）で開きます。手で開くときは、先に WSL で `bash ros/display.sh panda` を実行し、その WSL のアドレスを `--ros-host` に渡します。
+Windows では起動スクリプトで「ROS 2 で表示する」を選びます。rviz2 は WSL の Ubuntu（ROS 2 Jazzy）で開き、姿勢は共有フォルダ経由で渡します。手で開くときは、先に WSL で `bash ros/display.sh z1` を実行します。
 
 ```powershell
-$wslIp = (wsl.exe -d Ubuntu -- hostname -I).Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)[0]
-.\.venv\Scripts\python.exe scripts\infer_gui.py --log-dir logs/ppo_walk --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry\PickAndCarry_ppo.mp4" --seconds 60 --ros --ros-host $wslIp --terrain-steps --terrain-amplitude 0.045
+.\.venv\Scripts\python.exe scripts\infer_gui.py --log-dir logs/ppo_curriculum_walk --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry\PickAndCarry_ppo.mp4" --seconds 60 --ros --curriculum walk --arm z1
 ```
 
 クリック画面の 1 点目が物資、2 点目が最初の運び先です。起動スクリプトの 5 番で ROS 2 を選ぶと rviz2 が開きます。`world` 座標は最初から出るので、ロボットモデルのエラーは推論を待たなくても消えます。推論が始まると、Windows にシミュレーション画面が開いて順に更新されます。rviz2 上部の Publish Point で地面をクリックすると、黄色い球がその場に出ます。推論中なら運び先がそこへ変わり、シミュレーション画面の緑の位置も動きます。コースの外はコース内に収めます。終わったあとの mp4 も残ります。ROS 2 を選ばないときは、これまでどおり推論が終わってから動画を開きます。
@@ -145,7 +139,7 @@ $wslIp = (wsl.exe -d Ubuntu -- hostname -I).Split(" ", [System.StringSplitOption
 - `walk`: 脚だけ。腕は固定、指は開いたまま。報酬は前進と、転ばないこと。
 - `both`: 脚・腕・指を試行のあいだずっと出す。
 
-腕の初期姿勢で、手先は胴体の前方およそ 0.4 m に来ます。箱は一辺 4 cm です。つかんだとみなす距離は 0.12 m、指が閉じた基準は Panda で開き 0.012 m 未満です。
+腕の初期姿勢で、手先は胴体の前方およそ 0.4 m に来ます。箱は一辺 4 cm です。つかんだとみなす距離は 0.12 m、指が閉じた基準は Z1 のグリッパ関節で閉じ側です。
 
 ### 段階的な学習
 
@@ -165,9 +159,7 @@ $wslIp = (wsl.exe -d Ubuntu -- hostname -I).Split(" ", [System.StringSplitOption
 
 ### 観測と行動（Z1）
 
-`reset()` は `(環境数, 81)`、`step(action)` は `obs, reward, done, info` を返します。行動は `(環境数, 19)` で、各成分は -1 から 1 です。Panda は腕が 7 関節のため、観測 83、行動 20 です。
-
-| 区間 | 内容 |
+`reset()` は `(環境数, 81)`、`step(action)` は `obs, reward, done, info` を返します。行動は `(環境数, 19)` で、各成分は -1 から 1 です。| 区間 | 内容 |
 | --- | --- |
 | 0:12 | 脚の関節角（立ち姿勢との差。FL, FR, RL, RR の順に hip, thigh, calf） |
 | 12:24 | 脚の関節速度 × 0.05 |
@@ -196,9 +188,7 @@ $wslIp = (wsl.exe -d Ubuntu -- hostname -I).Split(" ", [System.StringSplitOption
 
 ## 6. 腕
 
-既定は Franka Panda です。実機は約 18 kg で Go2 の定格積載（約 8 kg）を超えます。学習用 URDF `assets/urdf/quadruped_arm.urdf` は腕の質量を約 3.4 kg に落としてあり、見た目のメッシュは公式の形状を参照します。保存済みの Panda の重みは、この 68 次元のまま続きます。
-
-Unitree Z1 は `--arm z1` です。公式の関節位置と慣性を使い、グリッパ込みで約 5.2 kg、6 軸です。URDF は `assets/urdf/quadruped_z1.urdf` です。観測が変わるので、Panda の重みは読まず `logs/ppo_z1` で最初から学習します。
+腕は Unitree Z1 のみです。公式の関節位置と慣性を使い、グリッパ込みで約 5.2 kg、6 軸です。URDF は `assets/urdf/quadruped_z1.urdf` です。観測 81、行動 19 です。
 
 Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(-0.05, 0, 0.08)` に固定します。胴体の少し後ろ、上面のすぐ上です。
 
@@ -213,7 +203,7 @@ Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(
 | ファイル | 内容 |
 | --- | --- |
 | `pick_and_carry/config.py` | 環境設定、Z1 の観測 81 と行動 19 |
-| `pick_and_carry/arms.py` | Panda と Z1 の関節、質量の前提、次元 |
+| `pick_and_carry/arms.py` | Z1 の関節、質量の前提、次元 |
 | `pick_and_carry/observation.py` | 観測ベクトルの組み立て |
 | `pick_and_carry/reward.py` | 箱運びの報酬 |
 | `pick_and_carry/curriculum.py` | 段階の定義、重みの引き継ぎ、歩行・到達・キャッチの報酬 |
@@ -222,6 +212,8 @@ Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(
 | `pick_and_carry/env.py` | Genesis のシーン |
 | `pick_and_carry/agents.py` | PPO の方策と clip 付きの更新 |
 | `pick_and_carry/train_ppo.py` | 学習と再生 |
+| `pick_and_carry/checkpoints.py` | 重みの保存、互換する最新の探索、古い保存の退避 |
+| `pick_and_carry/difficulty.py` | 学習中の難しさ（地形、ボール）を、成績で上げ下げする |
 | `pick_and_carry/ros_bridge.py` | 推論中の状態送信と運び先の受信。ROS 自体は入れない |
 | `ros/bridge_node.py` | WSL 側で関節、姿勢、マーカーに変換し、クリックを返す |
 | `ros/display.sh` | robot_state_publisher と rviz2 を起動する |

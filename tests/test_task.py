@@ -150,7 +150,7 @@ class RewardTests(unittest.TestCase):
 
     def test_walk_mode_drops_manipulation_reward(self):
         n = 1
-        cfg = EnvConfig(control_split="walk", scripted_gait=False)
+        cfg = EnvConfig(control_split="walk")
         zeros = torch.zeros(n, 3)
         reward, terms, *_ = task_reward(
             ee_pos=zeros,

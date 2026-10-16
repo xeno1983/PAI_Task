@@ -126,7 +126,7 @@ def task_phase(
     pickup = (~grasped) & ~walk_object
     release = grasped & (object_goal_xy <= release_distance)
     walk_goal = grasped & ~release
-    phase = torch.zeros(grasped.shape, dtype=torch.long, device=grasped.device)
+    phase = torch.full(grasped.shape, PHASE_WALK_OBJECT, dtype=torch.long, device=grasped.device)
     phase = torch.where(pickup, torch.full_like(phase, PHASE_PICKUP), phase)
     phase = torch.where(walk_goal, torch.full_like(phase, PHASE_WALK_GOAL), phase)
     phase = torch.where(release, torch.full_like(phase, PHASE_RELEASE), phase)

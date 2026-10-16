@@ -43,6 +43,7 @@ Write-Host "   5  プレゼン用の動画を作る（追加学習なし）"
 Write-Host "      学習条件のスライドを作り直し、フォルダ内の録画を1本につなぐ。説明の音声も入る。"
 Write-Host "      動画: 起動スクリプトの PickAndCarry フォルダの PickAndCarry_presentation.mp4"
 Write-Host "   6  Colab 用 zip を起動スクリプトの PickAndCarry フォルダに作る"
+Write-Host "   7  学習手法の結果を比較する（PPO / GRPO / Symmetric PPO）"
 Write-Host ""
 
 function Get-LatestIteration {
@@ -60,9 +61,85 @@ function Get-LatestIteration {
     return $best
 }
 
-$z1Iter = Get-LatestIteration "logs\ppo_z1"
-Write-Host " 腕は Unitree Z1（約 5.2 kg、関節 6）。観測 81、行動 19。"
-Write-Host " 箱運びの iteration: $z1Iter    保存: logs\ppo_z1"
+function Get-StageFolder {
+    param([string]$Algo, [string]$Stage, [string]$Level = "static")
+    switch ($Stage) {
+        "walk" { return "logs/${Algo}_curriculum_walk" }
+        "reach" { return "logs/${Algo}_curriculum_reach" }
+        "haul" { return "logs/${Algo}_curriculum_haul" }
+        "carry" { return "logs/${Algo}_z1" }
+        "catch" { return "logs/${Algo}_curriculum_catch_$Level" }
+        default { return "logs/${Algo}_z1" }
+    }
+}
+
+function Format-Iter {
+    param([int]$Value)
+    if ($Value -le 0) { return "-" }
+    return "$Value"
+}
+
+function Show-StageProgress {
+    Write-Host " 腕は Unitree Z1（約 5.2 kg、関節 6）。観測 81、行動 19。"
+    Write-Host " 学習済み iteration（最新の ppo_XXXX.pt）"
+    Write-Host ("   {0,-14} {1,8} {2,8} {3,10}" -f "段階", "PPO", "GRPO", "Sym PPO")
+    $rows = @(
+        @{ Label = "歩行"; Stage = "walk"; Level = "static" },
+        @{ Label = "到達"; Stage = "reach"; Level = "static" },
+        @{ Label = "持ち歩き"; Stage = "haul"; Level = "static" },
+        @{ Label = "箱運び"; Stage = "carry"; Level = "static" },
+        @{ Label = "キャッチ静止"; Stage = "catch"; Level = "static" },
+        @{ Label = "キャッチ遅い"; Stage = "catch"; Level = "slow" },
+        @{ Label = "キャッチばらす"; Stage = "catch"; Level = "random" },
+        @{ Label = "キャッチ飛ぶ"; Stage = "catch"; Level = "fly" },
+        @{ Label = "キャッチノイズ"; Stage = "catch"; Level = "noisy" }
+    )
+    foreach ($row in $rows) {
+        $ppo = Get-LatestIteration ((Get-StageFolder "ppo" $row.Stage $row.Level) -replace "/", "\")
+        $grpo = Get-LatestIteration ((Get-StageFolder "grpo" $row.Stage $row.Level) -replace "/", "\")
+        $sym = Get-LatestIteration ((Get-StageFolder "sym_ppo" $row.Stage $row.Level) -replace "/", "\")
+        Write-Host ("   {0,-14} {1,8} {2,8} {3,10}" -f $row.Label, (Format-Iter $ppo), (Format-Iter $grpo), (Format-Iter $sym))
+    }
+}
+
+function Select-Algo {
+    Write-Host ""
+    Write-Host " 学習手法"
+    Write-Host "   1  PPO（既定。価値関数つきの clipped PPO）"
+    Write-Host "   2  GRPO（並列環境の相対報酬。批評家は更新しない）"
+    Write-Host "   3  Symmetric PPO（左右反転のデータを足して学習）"
+    $picked = Read-Host "手法 [1]"
+    if ([string]::IsNullOrWhiteSpace($picked)) { $picked = "1" }
+    switch ($picked) {
+        "2" {
+            $script:algo = "grpo"
+            Write-Host "GRPO で学習します。保存先は logs\grpo_* です。"
+        }
+        "3" {
+            $script:algo = "sym_ppo"
+            Write-Host "Symmetric PPO で学習します。保存先は logs\sym_ppo_* です。"
+        }
+        default {
+            $script:algo = "ppo"
+            Write-Host "PPO で学習します。保存先は logs\ppo_* です。"
+        }
+    }
+    $script:algoArgs = @("--algo", $script:algo)
+}
+
+function Set-LogDirFromStage {
+    $script:logDir = Get-StageFolder $script:algo $script:stage $(if ($script:catchLevel) { $script:catchLevel } else { "static" })
+    if ($script:stage -eq "carry") {
+        $script:videoName = "PickAndCarry_$($script:algo)_z1.mp4"
+    } elseif ($script:stage -eq "catch") {
+        $script:videoName = "PickAndCarry_$($script:algo)_catch_$($script:catchLevel).mp4"
+    } else {
+        $script:videoName = "PickAndCarry_$($script:algo)_$($script:stage).mp4"
+    }
+    $script:activeIter = Get-LatestIteration ($script:logDir -replace "/", "\")
+}
+
+Show-StageProgress
 Write-Host ""
 $choice = Read-Host "番号を入力 [1]"
 if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
@@ -79,26 +156,20 @@ function Select-Curriculum {
     $picked = Read-Host "段階 [1]"
     if ([string]::IsNullOrWhiteSpace($picked)) { $picked = "1" }
     $script:stage = "carry"
+    $script:catchLevel = "static"
     $script:curriculumArgs = @()
     if ($picked -eq "2") {
         $script:stage = "reach"
         $script:curriculumArgs = @("--curriculum", "reach")
-        $script:logDir = "logs/ppo_curriculum_reach"
-        $script:videoName = "PickAndCarry_reach.mp4"
         Write-Host "到達です。歩行の重みから続けます。胴の前の空中に点が出て、手先がそこへ届いて少し保つと成功です。"
-        Write-Host "脚は歩行の姿勢を保ちます。保存先は logs\ppo_curriculum_reach です。追加で選ぶ項目はありません。"
+        Write-Host "脚は歩行の姿勢を保ちます。追加で選ぶ項目はありません。"
     } elseif ($picked -eq "3") {
         $script:stage = "haul"
         $script:curriculumArgs = @("--curriculum", "haul")
-        $script:logDir = "logs/ppo_curriculum_haul"
-        $script:videoName = "PickAndCarry_haul.mp4"
         Write-Host "掴んだまま歩く段階です。到達の重みから、脚も腕も同じネットワークで続けます。"
-        Write-Host "保存先は logs\ppo_curriculum_haul です。"
     } elseif ($picked -eq "4") {
         $script:stage = "carry"
         $script:curriculumArgs = @()
-        $script:logDir = "logs/ppo_z1"
-        $script:videoName = "PickAndCarry_z1.mp4"
         Write-Host "ピック＆プレースです。歩きながら持つ段階と同じ観測・行動なので、その重みから続けます。"
         Write-Host "このあと、走行環境・学習の分け方・手先カメラを選びます。"
         if ($ForPlay) {
@@ -113,31 +184,27 @@ function Select-Curriculum {
         Write-Host "   5  飛ぶボールに、位置のノイズを足す"
         $levelPick = Read-Host "ボール [1]"
         if ([string]::IsNullOrWhiteSpace($levelPick)) { $levelPick = "1" }
-        $level = @("static", "slow", "random", "fly", "noisy")[[Math]::Min(4, [Math]::Max(0, [int]$levelPick - 1))]
-        $script:curriculumArgs = @("--curriculum", "catch", "--catch-level", $level)
-        $script:logDir = "logs/ppo_curriculum_catch_$level"
-        $script:videoName = "PickAndCarry_catch_$level.mp4"
-        Write-Host "キャッチ（$level）です。到達の重みから続けます。観測にはボールの速度と 0.3 秒先の位置が入ります。"
-        Write-Host "保存先は $script:logDir です。"
-        if ($level -ne "static") {
+        $script:catchLevel = @("static", "slow", "random", "fly", "noisy")[[Math]::Min(4, [Math]::Max(0, [int]$levelPick - 1))]
+        $script:curriculumArgs = @("--curriculum", "catch", "--catch-level", $script:catchLevel)
+        Write-Host "キャッチ（$($script:catchLevel)）です。到達の重みから続けます。観測にはボールの速度と 0.3 秒先の位置が入ります。"
+        if ($script:catchLevel -ne "static") {
             Write-Host "成績が低いあいだは易しいボールに戻し、回復したら上げます。"
         }
-        if ($level -in @("fly", "noisy")) {
+        if ($script:catchLevel -in @("fly", "noisy")) {
             Write-Host "投げたボールが床に落ちると、その試行は終わります。"
         }
     } else {
         $script:stage = "walk"
         $script:curriculumArgs = @("--curriculum", "walk")
-        $script:logDir = "logs/ppo_curriculum_walk"
-        $script:videoName = "PickAndCarry_walk.mp4"
         if ($picked -ne "1") {
             Write-Host "不明な番号なので、歩行から始めます。"
         }
-        Write-Host "歩行です。最初の学習なので、初期値から始めます。平地から始め、成績が良いと地形を広げます。"
+        Write-Host "歩行です。平地から始め、成績が良いと地形を広げます。"
         Write-Host "止まる指令も混ぜ、腕は勝手に動かし、ときどき押し、床の摩擦もばらします。"
-        Write-Host "保存先は logs\ppo_curriculum_walk です。このあと選ぶのは段差の高さだけです。"
+        Write-Host "このあと選ぶのは段差の高さだけです。"
     }
-    $script:activeIter = Get-LatestIteration ($script:logDir -replace "/", "\")
+    Set-LogDirFromStage
+    Write-Host "保存先は $($script:logDir -replace '/', '\') です。今の iteration: $($script:activeIter)"
     if (-not $ForPlay -and ($script:stage -in @("walk", "reach", "haul", "catch"))) {
         Ask-Retreat
     }
@@ -285,16 +352,18 @@ function Open-Mlflow {
 }
 
 $script:armArgs = @("--arm", "z1")
-$script:logDir = "logs/ppo_z1"
-$script:videoName = "PickAndCarry_z1.mp4"
+$script:algo = "ppo"
+$script:algoArgs = @("--algo", "ppo")
+$script:catchLevel = "static"
 $script:stage = "carry"
-$script:activeIter = $z1Iter
+Set-LogDirFromStage
 
 $code = 0
 switch ($choice) {
     "1" {
         Write-Host ""
-        Write-Host "段階を選んで学習します。終わると、MLflow、その保存先の学習曲線、動画を開きます。"
+        Write-Host "段階と学習手法を選んで学習します。終わると、MLflow、その保存先の学習曲線、動画を開きます。"
+        Select-Algo
         Select-Curriculum
         $trainIters = 0
         while ($trainIters -lt 1) {
@@ -325,7 +394,7 @@ switch ($choice) {
             Write-Host "足りなくなると学習が止まります。開始ログの GPU 使用量で確認できます。"
         }
         Select-StageOptions
-        & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
+        & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
         $code = $LASTEXITCODE
         Open-Mlflow
         if ($code -eq 0) {
@@ -333,7 +402,7 @@ switch ($choice) {
             & $python -u scripts\plot_curves.py --log-dir $logDir --output $curves
             if ($LASTEXITCODE -eq 0 -and (Test-Path $curves)) { Start-Process $curves }
             $video = Join-Path $out $videoName
-            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
+            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
             $code = $LASTEXITCODE
             if ($code -eq 0 -and (Test-Path $video)) {
                 Write-Host "提出動画用に残しました: $videoName"
@@ -343,6 +412,7 @@ switch ($choice) {
     }
     "2" {
         Write-Host ""
+        Select-Algo
         Select-Curriculum -ForPlay
         Write-Host "推論します。使う重み: iteration $script:activeIter （$logDir）"
         $video = Join-Path $out $videoName
@@ -351,7 +421,7 @@ switch ($choice) {
             Write-Host "1回目のクリックが物資、2回目が運び先です。"
             & $python -u scripts\infer_gui.py --log-dir $logDir --record $video --seconds $script:inferSeconds @armArgs @terrainArgs @controlArgs @visionArgs @rosArgs
         } else {
-            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @armArgs @terrainArgs @curriculumArgs
+            & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @curriculumArgs
         }
         $code = $LASTEXITCODE
         if ($code -eq 0 -and (Test-Path $video)) {
@@ -361,18 +431,23 @@ switch ($choice) {
     }
     "3" {
         Write-Host ""
-        Write-Host "比較動画は箱運びだけです。logs\ppo_z1 の時点を並べます。"
+        Select-Algo
+        $script:stage = "carry"
+        $script:catchLevel = "static"
+        Set-LogDirFromStage
+        Write-Host "比較動画は箱運びだけです。$($script:logDir -replace '/', '\') の時点を並べます。"
         Write-Host "保存済みの時点を同じ配置で再生し、並べた動画を作ります。最新は iteration $script:activeIter です。"
         Select-Terrain
         Select-Control
         Select-Vision
-        $video = Join-Path $out "PickAndCarry_z1_compare.mp4"
+        $video = Join-Path $out "PickAndCarry_$($script:algo)_z1_compare.mp4"
         & $python -u scripts\compare_snapshots.py --log-dir $logDir --output $video --seconds 16 --panels 4 @armArgs @terrainArgs @controlArgs @visionArgs
         $code = $LASTEXITCODE
         if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
     }
     "4" {
         Write-Host ""
+        Select-Algo
         Select-Curriculum -ForPlay
         Write-Host "保存済みの学習記録から曲線を作り、ブラウザで開きます。保存先: $logDir"
         $curves = Join-Path $out "PickAndCarry_curves.html"
@@ -396,6 +471,33 @@ switch ($choice) {
         tar -a -c -f $zip --exclude=.venv --exclude=logs --exclude=__pycache__ --exclude=.git -C C:\Users\xeno1 PAI_Task
         $code = $LASTEXITCODE
         if ($code -eq 0) { Write-Host "作成しました: $zip" }
+    }
+    "7" {
+        Write-Host ""
+        Write-Host "同じ段階について、PPO / GRPO / Symmetric PPO の曲線を重ねます。"
+        $script:algo = "ppo"
+        $script:algoArgs = @("--algo", "ppo")
+        Select-Curriculum -ForPlay
+        $dirs = @()
+        $labels = @()
+        foreach ($name in @("ppo", "grpo", "sym_ppo")) {
+            $folder = Get-StageFolder $name $script:stage $(if ($script:catchLevel) { $script:catchLevel } else { "static" })
+            $metrics = Join-Path (Get-Location) (($folder -replace "/", "\") + "\metrics.jsonl")
+            $hasPt = (Get-LatestIteration ($folder -replace "/", "\")) -gt 0
+            if ((Test-Path $metrics) -or $hasPt) {
+                $dirs += $folder
+                $labels += $name
+            }
+        }
+        if ($dirs.Count -lt 2) {
+            Write-Host "比較できる手法が 2 つ未満です。別の手法でも同じ段階を学習してから再実行してください。"
+            $code = 1
+        } else {
+            $curves = Join-Path $out "PickAndCarry_compare_curves.html"
+            & $python -u scripts\plot_curves.py --compare @dirs --labels @labels --output $curves
+            $code = $LASTEXITCODE
+            if ($code -eq 0 -and (Test-Path $curves)) { Start-Process $curves }
+        }
     }
     default {
         Write-Host "不明な番号です: $choice"

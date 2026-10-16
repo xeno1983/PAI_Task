@@ -119,22 +119,31 @@ def retreat_choice(
     return current, 0, 0
 
 
-def stage_log_dir(stage: str, catch_level: str = "static", arm: str = "z1", root: Path | None = None) -> Path:
-    """Folder used by the launcher for this stage."""
+def stage_log_dir(
+    stage: str,
+    catch_level: str = "static",
+    arm: str = "z1",
+    root: Path | None = None,
+    algo: str = "ppo",
+) -> Path:
+    """Folder used by the launcher for this stage and learning algorithm."""
     if arm != "z1":
         raise ValueError(f"the arm is z1, got {arm}.")
+    from pick_and_carry.algorithms import normalize_algo
+
+    prefix = normalize_algo(algo)
     if stage == "carry":
-        relative = "logs/ppo_z1"
+        relative = f"logs/{prefix}_z1"
     elif stage == "walk":
-        relative = "logs/ppo_curriculum_walk"
+        relative = f"logs/{prefix}_curriculum_walk"
     elif stage == "reach":
-        relative = "logs/ppo_curriculum_reach"
+        relative = f"logs/{prefix}_curriculum_reach"
     elif stage == "haul":
-        relative = "logs/ppo_curriculum_haul"
+        relative = f"logs/{prefix}_curriculum_haul"
     elif stage == "catch":
         if catch_level not in CATCH_LEVELS:
             raise ValueError(f"unknown catch level {catch_level}")
-        relative = f"logs/ppo_curriculum_catch_{catch_level}"
+        relative = f"logs/{prefix}_curriculum_catch_{catch_level}"
     else:
         raise ValueError(f"unknown curriculum stage {stage}")
     base = Path(root) if root is not None else Path()
