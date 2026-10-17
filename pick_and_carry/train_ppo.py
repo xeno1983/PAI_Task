@@ -41,6 +41,8 @@ from pick_and_carry.curriculum import (
     LOCOMOTION_STAGES,
     STAGES,
     holds_arm_pose,
+    locomotion_action_mask,
+    stage_log_dir,
 )
 from pick_and_carry.env import PickAndCarryEnv
 from pick_and_carry.ros_bridge import FileBridge, pack_rgb_image, ros_usage_error
@@ -141,6 +143,16 @@ def parse_args():
         "or catch.",
     )
     parser.add_argument(
+        "--easy-walk",
+        action="store_true",
+        help="Walk only: flat ground, no arm wander / pushes / friction noise. Saves under *_walk_easy.",
+    )
+    parser.add_argument(
+        "--no-arm-disturb",
+        action="store_true",
+        help="Walk only: keep the arm at the reset pose (no random wander).",
+    )
+    parser.add_argument(
         "--catch-level",
         choices=CATCH_LEVELS,
         default="static",
@@ -159,6 +171,13 @@ def parse_args():
         const="latest",
         default=None,
         help="Checkpoint path, or 'latest' in --log-dir. With no value, 'latest' is used.",
+    )
+    parser.add_argument(
+        "--init-from",
+        type=Path,
+        default=None,
+        help="Load network weights only (e.g. bc_trot.pt) and start PPO from iteration 0. "
+        "Ignored when --resume finds a checkpoint in --log-dir.",
     )
     parser.add_argument("--play", action="store_true", help="Run the loaded policy and skip learning.")
     parser.add_argument("--seconds", type=float, default=20.0, help="Length of a --play recording, in simulation seconds.")
@@ -209,17 +228,21 @@ def make_config(args) -> EnvConfig:
         cfg.control_split = "walk"
     elif cfg.curriculum != "carry":
         cfg.control_split = "both"
+    easy_walk = bool(getattr(args, "easy_walk", False)) and cfg.curriculum in LOCOMOTION_STAGES
     if cfg.curriculum in LOCOMOTION_STAGES:
         # Walk is the one stage on bumpy ground. The bumps start flat and grow with the score.
-        cfg.terrain = True
-        # The arm moves at random so the legs learn to balance it.
-        cfg.arm_disturb = True
+        cfg.terrain = not easy_walk
+        # The arm moves at random so the legs learn to balance it (off in easy mode).
+        cfg.arm_disturb = not (easy_walk or getattr(args, "no_arm_disturb", False))
+        if easy_walk:
+            cfg.terrain_steps = False
+            cfg.terrain_amplitude = 0.0
     elif cfg.curriculum != "carry":
         cfg.terrain = False
         cfg.terrain_steps = False
     if cfg.curriculum in ("haul", "reach", "catch"):
         cfg.catch_hold_steps = max(1, int(round(CATCH_HOLD_SECONDS / cfg.dt)))
-    if cfg.curriculum in LOCOMOTION_STAGES and not args.play:
+    if cfg.curriculum in LOCOMOTION_STAGES and not args.play and not easy_walk:
         # Pushes and per-robot friction, as in legged_gym. Playback stays undisturbed.
         cfg.push_robots = True
         cfg.randomize_friction = True
@@ -285,6 +308,28 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     start_iteration = int(blob.get("iteration", 0))
     print(f"resumed {ckpt_path} at iteration {start_iteration}", flush=True)
     return start_iteration, str(ckpt_path)
+
+
+def load_init_weights(path: Path, env, cfg, agent) -> str | None:
+    """Load actor/critic weights without optimizer or iteration (BC warm-start)."""
+    if path is None:
+        return None
+    ckpt = Path(path)
+    if not ckpt.is_file():
+        raise SystemExit(f"--init-from not found: {ckpt}")
+    blob = torch_load(ckpt, env.device)
+    obs_dim = int(blob.get("obs_dim", -1))
+    act_dim = int(blob.get("act_dim", -1))
+    saved_arm = str(blob["arm"]) if "arm" in blob else ""
+    if obs_dim != env.num_obs or act_dim != env.num_actions or saved_arm != cfg.arm:
+        raise SystemExit(
+            f"--init-from {ckpt} is arm {saved_arm or '?'} obs {obs_dim} act {act_dim}, "
+            f"need arm {cfg.arm} obs {env.num_obs} act {env.num_actions}."
+        )
+    agent.load_state_dict(blob["model"])
+    kind = "BC trot" if blob.get("bc_trot") else "init"
+    print(f"{kind} weights from {ckpt} (PPO starts at iteration 0)", flush=True)
+    return str(ckpt)
 
 
 _live_window_ready = False
@@ -383,7 +428,7 @@ def play_policy(args, cfg, env, agent, obs) -> None:
 
 def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration: int, tracker: LocalTracker) -> None:
     if start_iteration == 0:
-        first = args.log_dir / "ppo_0000.pt"
+        first = args.log_dir / "ppo_000000.pt"
         save_checkpoint(
             first,
             agent,
@@ -593,7 +638,8 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             flush=True,
         )
         if iteration % args.save_interval == 0 or iteration == last_iteration:
-            saved = args.log_dir / f"ppo_{iteration:04d}.pt"
+            # Zero-pad to 6 so names sort in iteration order even as plain strings.
+            saved = args.log_dir / f"ppo_{iteration:06d}.pt"
             save_checkpoint(
                 saved,
                 agent,
@@ -613,6 +659,13 @@ def main() -> None:
     error = ros_usage_error(enabled=args.ros, play=args.play, num_envs=args.num_envs)
     if error:
         raise SystemExit(error)
+    algo = normalize_algo(getattr(args, "algo", "ppo"))
+    if getattr(args, "easy_walk", False) and getattr(args, "curriculum", "carry") == "walk":
+        # Keep a hard run's weights; easy walk always uses its own folder unless the user
+        # already pointed --log-dir at a *_walk_easy path.
+        if "walk_easy" not in Path(args.log_dir).name:
+            args.log_dir = stage_log_dir("walk", algo=algo, easy=True)
+            print(f"easy-walk: log-dir → {args.log_dir}", flush=True)
     cfg = make_config(args)
     missing = missing_play_checkpoint(args, cfg)
     if missing:
@@ -623,6 +676,10 @@ def main() -> None:
     device = env.device
     init_std = initial_action_std(env.num_actions, args.leg_init_std, args.arm_init_std)
     agent = ActorCritic(env.num_obs, env.num_actions, init_std=init_std).to(device)
+    if holds_arm_pose(cfg.curriculum):
+        # Arm / gripper actions are not applied; keep them out of PPO entropy and KL.
+        agent.set_action_mask(locomotion_action_mask(env.num_actions, device=device))
+        print("action mask: legs only (arm dims ignored in policy loss)", flush=True)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
     if not args.play:
         archived = archive_incompatible_logs(
@@ -635,15 +692,27 @@ def main() -> None:
     obs = env.reset()
     env.save_fleet_snapshot()
     start_iteration, resumed_from = resume_agent(args, env, cfg, agent, optimizer)
+    init_from = getattr(args, "init_from", None)
+    if resumed_from is None:
+        # Auto-pick BC warm-start in the easy-walk folder when no PPO checkpoint exists.
+        if init_from is None and getattr(args, "easy_walk", False):
+            candidate = Path(args.log_dir) / "bc_trot.pt"
+            if candidate.is_file():
+                init_from = candidate
+        if init_from is not None:
+            resumed_from = load_init_weights(init_from, env, cfg, agent)
+            start_iteration = 0
+    elif init_from is not None:
+        print(f"--init-from {init_from} ignored because --resume loaded {resumed_from}", flush=True)
     gpu = ""
     if device.type == "cuda" and torch.cuda.is_available():
         free, total = torch.cuda.mem_get_info(device)
         gpu = "  " + format_gpu_memory(free, total)
-    algo = normalize_algo(getattr(args, "algo", "ppo"))
     print(
         f"{ALGO_LABELS[algo]} obs={env.num_obs} act={env.num_actions} envs={env.num_envs} "
         f"arm={cfg.arm} curriculum={cfg.curriculum} catch={cfg.catch_level} "
         f"control_split={cfg.control_split} wrist_camera={cfg.wrist_camera} "
+        f"arm_disturb={cfg.arm_disturb} terrain={cfg.terrain} "
         f"urdf={env.urdf_path} device={device}{gpu}",
         flush=True,
     )
@@ -669,6 +738,9 @@ def main() -> None:
             "terrain_amplitude_m": cfg.terrain_amplitude,
             "terrain_steps": cfg.terrain_steps,
             "arm": cfg.arm,
+            "arm_disturb": cfg.arm_disturb,
+            "push_robots": cfg.push_robots,
+            "easy_walk": bool(getattr(args, "easy_walk", False)),
             "control_split": cfg.control_split,
             "wrist_camera": cfg.wrist_camera,
             "curriculum": cfg.curriculum,

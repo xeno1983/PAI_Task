@@ -55,22 +55,46 @@ class GaussianActor(nn.Module):
     def _dist(self, obs: torch.Tensor) -> Normal:
         return Normal(self.mean(self.body(obs)), self.std())
 
-    def sample(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def sample(
+        self,
+        obs: torch.Tensor,
+        action_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         dist = self._dist(obs)
         action = dist.sample()
-        return action, dist.log_prob(action).sum(dim=-1)
+        if action_mask is not None:
+            # Unused dims (e.g. arm during walk) stay at 0 and do not enter the log-prob.
+            action = torch.where(action_mask.expand_as(action), action, torch.zeros_like(action))
+        return action, self._masked_sum(dist.log_prob(action), action_mask)
 
     def mean_action(self, obs: torch.Tensor) -> torch.Tensor:
         """Deterministic action used when recording the learned policy."""
         return self.mean(self.body(obs))
 
-    def log_prob(self, obs: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def log_prob(
+        self,
+        obs: torch.Tensor,
+        action: torch.Tensor,
+        action_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         dist = self._dist(obs)
-        return dist.log_prob(action).sum(dim=-1), dist.entropy().sum(dim=-1)
+        return (
+            self._masked_sum(dist.log_prob(action), action_mask),
+            self._masked_sum(dist.entropy(), action_mask),
+        )
 
     def distribution_params(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         mean = self.mean(self.body(obs))
         return mean, self.std().expand_as(mean)
+
+    @staticmethod
+    def _masked_sum(per_dim: torch.Tensor, action_mask: torch.Tensor | None) -> torch.Tensor:
+        if action_mask is None:
+            return per_dim.sum(dim=-1)
+        mask = action_mask.to(dtype=per_dim.dtype, device=per_dim.device)
+        if mask.ndim == 1:
+            mask = mask.unsqueeze(0)
+        return (per_dim * mask.expand_as(per_dim)).sum(dim=-1)
 
 
 class ActorCritic(nn.Module):
@@ -84,20 +108,28 @@ class ActorCritic(nn.Module):
         super().__init__()
         self.actor = GaussianActor(obs_dim, act_dim, hidden, init_std)
         self.critic = mlp(obs_dim, hidden, 1)
+        # Optional per-dim mask: False dims are ignored in log-prob / entropy / KL.
+        self.action_mask: torch.Tensor | None = None
+
+    def set_action_mask(self, mask: torch.Tensor | None) -> None:
+        self.action_mask = None if mask is None else mask.detach().clone().bool()
 
     def act(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        action, log_prob = self.actor.sample(obs)
+        action, log_prob = self.actor.sample(obs, self.action_mask)
         value = self.value(obs)
         return action, log_prob, value
 
     def act_mean(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.actor.mean_action(obs)
+        action = self.actor.mean_action(obs)
+        if self.action_mask is not None:
+            action = torch.where(self.action_mask.expand_as(action), action, torch.zeros_like(action))
+        return action
 
     def value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.critic(obs).squeeze(-1)
 
     def evaluate(self, obs: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        log_prob, entropy = self.actor.log_prob(obs, action)
+        log_prob, entropy = self.actor.log_prob(obs, action, self.action_mask)
         return log_prob, entropy, self.value(obs)
 
 
@@ -123,10 +155,11 @@ def gaussian_kl(
     old_std: torch.Tensor,
     new_mean: torch.Tensor,
     new_std: torch.Tensor,
+    action_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """KL(old || new) of diagonal Gaussians, summed over actions and averaged over the batch."""
+    """KL(old || new) of diagonal Gaussians, summed over (masked) actions and averaged over the batch."""
     kl = torch.log(new_std / old_std) + (old_std.square() + (old_mean - new_mean).square()) / (2.0 * new_std.square()) - 0.5
-    return kl.sum(dim=-1).mean()
+    return GaussianActor._masked_sum(kl, action_mask).mean()
 
 
 def adapt_learning_rate(learning_rate: float, kl: float, desired_kl: float) -> float:
@@ -192,7 +225,15 @@ def ppo_update(
             optimizer.step()
             with torch.no_grad():
                 new_mean, new_std = agent.actor.distribution_params(obs[batch])
-                kl = float(gaussian_kl(old_mean[batch], old_std[batch], new_mean, new_std))
+                kl = float(
+                    gaussian_kl(
+                        old_mean[batch],
+                        old_std[batch],
+                        new_mean,
+                        new_std,
+                        action_mask=agent.action_mask,
+                    )
+                )
             if desired_kl is not None:
                 for group in optimizer.param_groups:
                     group["lr"] = adapt_learning_rate(float(group["lr"]), kl, desired_kl)

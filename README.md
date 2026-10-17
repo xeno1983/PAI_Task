@@ -71,12 +71,17 @@ Genesis がなくても、報酬と方策のテストは通ります。
 
 ## 4. コマンドで実行する
 
-起動スクリプトと同じ学習を、プロジェクトルートから直接行う例です。歩行は `logs/ppo_curriculum_walk`、箱運びは `logs/ppo_z1` です。
+起動スクリプトと同じ学習を、プロジェクトルートから直接行う例です。歩行は `logs/ppo_curriculum_walk`（簡単モードは `*_walk_easy`）、箱運びは `logs/ppo_z1` です。`--resume latest` は iteration の数値順で最新を選びます。
 
 ```powershell
 $env:PYTHONUTF8 = "1"
-.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --resume latest --num-envs 64 --iterations 1000 --num-steps 128 --save-interval 20 --log-dir logs/ppo_curriculum_walk --curriculum walk --arm z1
+# 1) トロット教師のデモ → 模倣学習（BC）。出力: logs/ppo_curriculum_walk_easy/bc_trot.pt
+.\.venv\Scripts\python.exe -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs 80
+# 2) BC 重みから easy-walk PPO
+.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --easy-walk --init-from logs/ppo_curriculum_walk_easy/bc_trot.pt --num-envs 64 --iterations 1000 --num-steps 128 --save-interval 20 --curriculum walk --arm z1
 ```
+
+起動メニューでも「歩行 → 簡単 → BCしてから PPO」を選べます。教師は対角トロットの位相振動子（脚 12 次元のみ）です。
 
 再生は学習せず、保存した重みで mp4 を書きます。
 
@@ -94,7 +99,9 @@ $env:PYTHONUTF8 = "1"
 | `--wrist-camera` | 手先カメラで箱を見てからつかむ |
 | `--terrain-steps` | 移動区間に段差を足す |
 | `--terrain-amplitude 0.045` | 波または段の高さ（メートル） |
-| `--resume latest` | そのログフォルダの最新の適合する重みから続ける |
+| `--resume latest` | そのログフォルダの最新の適合する重みから続ける（iteration 数値順） |
+| `--init-from PATH` | BC などから重みだけ載せて iteration 0 から PPO |
+| `--easy-walk` | 平坦・腕固定・押しなし。保存先 `*_walk_easy` |
 | `--play` | 学習せず再生する |
 | `--ros` | 推論だけ。状態を送り、実行中の運び先を受け取る。学習中に付けると止まる |
 
@@ -194,7 +201,7 @@ Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(
 
 ## 7. Colab
 
-手順は [docs/COLAB.md](docs/COLAB.md) です。ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。GPU ランタイムが必須で、CPU のままでは地形の準備で止まります。短い確認は 8 環境です。3D ウィンドウは使わず、mp4 をノートの中で再生します。
+手順は [docs/COLAB.md](docs/COLAB.md) です。ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。起動スクリプトと同じく段階（walk/reach/haul/carry/catch）と手法（PPO/GRPO/Symmetric PPO）を選び、同じ `logs/{algo}_*` に学習・推論します。GPU ランタイムが必須です。3D ウィンドウは使わず、mp4 をノートの中で再生します。
 
 ## 8. コードの場所
 

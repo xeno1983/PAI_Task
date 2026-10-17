@@ -125,8 +125,14 @@ def stage_log_dir(
     arm: str = "z1",
     root: Path | None = None,
     algo: str = "ppo",
+    *,
+    easy: bool = False,
 ) -> Path:
-    """Folder used by the launcher for this stage and learning algorithm."""
+    """Folder used by the launcher for this stage and learning algorithm.
+
+    ``easy`` only applies to walk: flat ground, no arm wander / pushes, separate folder
+    so a hard run is not overwritten.
+    """
     if arm != "z1":
         raise ValueError(f"the arm is z1, got {arm}.")
     from pick_and_carry.algorithms import normalize_algo
@@ -135,7 +141,7 @@ def stage_log_dir(
     if stage == "carry":
         relative = f"logs/{prefix}_z1"
     elif stage == "walk":
-        relative = f"logs/{prefix}_curriculum_walk"
+        relative = f"logs/{prefix}_curriculum_walk_easy" if easy else f"logs/{prefix}_curriculum_walk"
     elif stage == "reach":
         relative = f"logs/{prefix}_curriculum_reach"
     elif stage == "haul":
@@ -148,6 +154,16 @@ def stage_log_dir(
         raise ValueError(f"unknown curriculum stage {stage}")
     base = Path(root) if root is not None else Path()
     return base / relative
+
+
+def locomotion_action_mask(act_dim: int, device: torch.device | None = None) -> torch.Tensor:
+    """True for leg dims only. Walk / haul hold the arm outside the policy."""
+    from pick_and_carry.config import ACTION_LAYOUT, layout_slices
+
+    mask = torch.zeros(act_dim, dtype=torch.bool, device=device)
+    leg = layout_slices(ACTION_LAYOUT)["leg"]
+    mask[leg] = True
+    return mask
 
 
 def holds_arm_pose(stage: str) -> bool:

@@ -151,7 +151,8 @@ def augment_symmetric(
     mirrored_act = mirror_action(actions)
     if agent is not None:
         with torch.no_grad():
-            mirrored_logp, _ = agent.actor.log_prob(mirrored_obs, mirrored_act)
+            mask = getattr(agent, "action_mask", None)
+            mirrored_logp, _ = agent.actor.log_prob(mirrored_obs, mirrored_act, mask)
     else:
         mirrored_logp = old_log_prob
     parts = [

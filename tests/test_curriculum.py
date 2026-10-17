@@ -400,6 +400,37 @@ class TransferTests(unittest.TestCase):
             found = resolve_checkpoint(walk, "latest", 81, 19, "z1", "walk", root=root)
             self.assertEqual(found, walk / "ppo_0002.pt")
 
+    def test_latest_checkpoint_is_numeric_not_lexicographic(self):
+        """``ppo_9980.pt`` must not beat ``ppo_29980.pt`` under string sort."""
+        import tempfile
+        from pathlib import Path
+
+        import torch
+
+        from pick_and_carry.checkpoints import latest_matching
+
+        def save(directory: Path, name: str, iteration: int) -> None:
+            directory.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "obs_dim": 81,
+                    "act_dim": 19,
+                    "arm": "z1",
+                    "curriculum": "walk",
+                    "iteration": iteration,
+                    "model": {},
+                },
+                directory / name,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            walk = Path(tmp) / "logs" / "ppo_curriculum_walk"
+            save(walk, "ppo_9980.pt", 9980)
+            save(walk, "ppo_10000.pt", 10000)
+            save(walk, "ppo_29980.pt", 29980)
+            found = latest_matching(walk, 81, 19, "z1", "walk")
+            self.assertEqual(found, walk / "ppo_29980.pt")
+
     def test_a_removed_stage_has_no_folder(self):
         for gone in ("stand", "sit", "jump", "rough"):
             with self.assertRaises(ValueError):

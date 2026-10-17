@@ -25,6 +25,27 @@ class AlgoNameTests(unittest.TestCase):
         self.assertEqual(tuple(ALGORITHMS), ("ppo", "grpo", "sym_ppo"))
 
 
+class ActionMaskTests(unittest.TestCase):
+    def test_masked_entropy_ignores_arm_dims(self):
+        from pick_and_carry.curriculum import locomotion_action_mask
+
+        agent = ActorCritic(81, 19, init_std=0.5)
+        agent.set_action_mask(locomotion_action_mask(19))
+        with torch.no_grad():
+            agent.actor.log_std.fill_(0.0)  # std = 1 for all dims
+        obs = torch.zeros(4, 81)
+        action = torch.zeros(4, 19)
+        _, entropy_full = agent.actor.log_prob(obs, action, None)
+        _, entropy_legs = agent.actor.log_prob(obs, action, agent.action_mask)
+        # Full 19-dim entropy at std=1 is larger than legs-only (12 dims).
+        self.assertGreater(float(entropy_full.mean()), float(entropy_legs.mean()))
+        self.assertAlmostEqual(float(entropy_legs.mean()), float(entropy_full.mean()) * 12 / 19, places=3)
+
+    def test_easy_walk_log_dir(self):
+        self.assertTrue(str(stage_log_dir("walk", easy=True)).endswith("curriculum_walk_easy"))
+        self.assertTrue(str(stage_log_dir("walk", easy=False)).endswith("curriculum_walk"))
+
+
 class GroupRelativeTests(unittest.TestCase):
     def test_group_mean_is_zero(self):
         returns = torch.tensor([1.0, 3.0, 2.0, 4.0])

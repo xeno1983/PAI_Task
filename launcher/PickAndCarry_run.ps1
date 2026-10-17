@@ -62,9 +62,12 @@ function Get-LatestIteration {
 }
 
 function Get-StageFolder {
-    param([string]$Algo, [string]$Stage, [string]$Level = "static")
+    param([string]$Algo, [string]$Stage, [string]$Level = "static", [switch]$Easy)
     switch ($Stage) {
-        "walk" { return "logs/${Algo}_curriculum_walk" }
+        "walk" {
+            if ($Easy) { return "logs/${Algo}_curriculum_walk_easy" }
+            return "logs/${Algo}_curriculum_walk"
+        }
         "reach" { return "logs/${Algo}_curriculum_reach" }
         "haul" { return "logs/${Algo}_curriculum_haul" }
         "carry" { return "logs/${Algo}_z1" }
@@ -84,20 +87,25 @@ function Show-StageProgress {
     Write-Host " 学習済み iteration（最新の ppo_XXXX.pt）"
     Write-Host ("   {0,-14} {1,8} {2,8} {3,10}" -f "段階", "PPO", "GRPO", "Sym PPO")
     $rows = @(
-        @{ Label = "歩行"; Stage = "walk"; Level = "static" },
-        @{ Label = "到達"; Stage = "reach"; Level = "static" },
-        @{ Label = "持ち歩き"; Stage = "haul"; Level = "static" },
-        @{ Label = "箱運び"; Stage = "carry"; Level = "static" },
-        @{ Label = "キャッチ静止"; Stage = "catch"; Level = "static" },
-        @{ Label = "キャッチ遅い"; Stage = "catch"; Level = "slow" },
-        @{ Label = "キャッチばらす"; Stage = "catch"; Level = "random" },
-        @{ Label = "キャッチ飛ぶ"; Stage = "catch"; Level = "fly" },
-        @{ Label = "キャッチノイズ"; Stage = "catch"; Level = "noisy" }
+        @{ Label = "歩行"; Stage = "walk"; Level = "static"; Easy = $false },
+        @{ Label = "歩行(簡単)"; Stage = "walk"; Level = "static"; Easy = $true },
+        @{ Label = "到達"; Stage = "reach"; Level = "static"; Easy = $false },
+        @{ Label = "持ち歩き"; Stage = "haul"; Level = "static"; Easy = $false },
+        @{ Label = "箱運び"; Stage = "carry"; Level = "static"; Easy = $false },
+        @{ Label = "キャッチ静止"; Stage = "catch"; Level = "static"; Easy = $false },
+        @{ Label = "キャッチ遅い"; Stage = "catch"; Level = "slow"; Easy = $false },
+        @{ Label = "キャッチばらす"; Stage = "catch"; Level = "random"; Easy = $false },
+        @{ Label = "キャッチ飛ぶ"; Stage = "catch"; Level = "fly"; Easy = $false },
+        @{ Label = "キャッチノイズ"; Stage = "catch"; Level = "noisy"; Easy = $false }
     )
     foreach ($row in $rows) {
-        $ppo = Get-LatestIteration ((Get-StageFolder "ppo" $row.Stage $row.Level) -replace "/", "\")
-        $grpo = Get-LatestIteration ((Get-StageFolder "grpo" $row.Stage $row.Level) -replace "/", "\")
-        $sym = Get-LatestIteration ((Get-StageFolder "sym_ppo" $row.Stage $row.Level) -replace "/", "\")
+        $folderArgs = @{ Algo = "ppo"; Stage = $row.Stage; Level = $row.Level }
+        if ($row.Easy) { $folderArgs.Easy = $true }
+        $ppo = Get-LatestIteration ((Get-StageFolder @folderArgs) -replace "/", "\")
+        $folderArgs.Algo = "grpo"
+        $grpo = Get-LatestIteration ((Get-StageFolder @folderArgs) -replace "/", "\")
+        $folderArgs.Algo = "sym_ppo"
+        $sym = Get-LatestIteration ((Get-StageFolder @folderArgs) -replace "/", "\")
         Write-Host ("   {0,-14} {1,8} {2,8} {3,10}" -f $row.Label, (Format-Iter $ppo), (Format-Iter $grpo), (Format-Iter $sym))
     }
 }
@@ -128,11 +136,14 @@ function Select-Algo {
 }
 
 function Set-LogDirFromStage {
-    $script:logDir = Get-StageFolder $script:algo $script:stage $(if ($script:catchLevel) { $script:catchLevel } else { "static" })
+    $easy = [bool]$script:easyWalk
+    $script:logDir = Get-StageFolder $script:algo $script:stage $(if ($script:catchLevel) { $script:catchLevel } else { "static" }) -Easy:$easy
     if ($script:stage -eq "carry") {
         $script:videoName = "PickAndCarry_$($script:algo)_z1.mp4"
     } elseif ($script:stage -eq "catch") {
         $script:videoName = "PickAndCarry_$($script:algo)_catch_$($script:catchLevel).mp4"
+    } elseif ($script:stage -eq "walk" -and $easy) {
+        $script:videoName = "PickAndCarry_$($script:algo)_walk_easy.mp4"
     } else {
         $script:videoName = "PickAndCarry_$($script:algo)_$($script:stage).mp4"
     }
@@ -157,6 +168,9 @@ function Select-Curriculum {
     if ([string]::IsNullOrWhiteSpace($picked)) { $picked = "1" }
     $script:stage = "carry"
     $script:catchLevel = "static"
+    $script:easyWalk = $false
+    $script:runBcFirst = $false
+    $script:initFromArgs = @()
     $script:curriculumArgs = @()
     if ($picked -eq "2") {
         $script:stage = "reach"
@@ -195,18 +209,58 @@ function Select-Curriculum {
         }
     } else {
         $script:stage = "walk"
+        $script:easyWalk = $false
         $script:curriculumArgs = @("--curriculum", "walk")
         if ($picked -ne "1") {
             Write-Host "不明な番号なので、歩行から始めます。"
         }
-        Write-Host "歩行です。平地から始め、成績が良いと地形を広げます。"
-        Write-Host "止まる指令も混ぜ、腕は勝手に動かし、ときどき押し、床の摩擦もばらします。"
-        Write-Host "このあと選ぶのは段差の高さだけです。"
+        Write-Host "歩行です。"
+        Write-Host "   1  簡単。平坦・腕固定・押しなし（推奨のやり直し）。保存先 *_walk_easy"
+        Write-Host "   2  本番。地形・腕外乱・押し・摩擦ばらつきあり"
+        $walkMode = Read-Host "歩行モード [1]"
+        if ([string]::IsNullOrWhiteSpace($walkMode)) { $walkMode = "1" }
+        if ($walkMode -eq "2") {
+            Write-Host "本番歩行です。平地から始め、成績が良いと地形を広げます。"
+            Write-Host "止まる指令も混ぜ、腕は勝手に動かし、ときどき押し、床の摩擦もばらします。"
+            Write-Host "このあと選ぶのは段差の高さだけです。"
+        } else {
+            $script:easyWalk = $true
+            $script:curriculumArgs += @("--easy-walk")
+            Write-Host "簡単歩行です。平坦で腕は固定、押しと摩擦ばらつきはオフです。"
+            Write-Host "政策の腕アクションは学習から外します。段差の選択はスキップします。"
+        }
     }
     Set-LogDirFromStage
     Write-Host "保存先は $($script:logDir -replace '/', '\') です。今の iteration: $($script:activeIter)"
+    if (-not $ForPlay -and $script:easyWalk) {
+        Ask-BcWarmStart
+    }
     if (-not $ForPlay -and ($script:stage -in @("walk", "reach", "haul", "catch"))) {
         Ask-Retreat
+    }
+}
+
+function Ask-BcWarmStart {
+    $script:runBcFirst = $false
+    $script:initFromArgs = @()
+    Write-Host "   1  トロット教師を模倣学習（BC）してから PPO（推奨・初回）"
+    Write-Host "   2  既存の bc_trot.pt / PPO 重みから PPO のみ"
+    Write-Host "   3  ゼロから PPO のみ"
+    $answer = Read-Host "初期化 [1]"
+    if ([string]::IsNullOrWhiteSpace($answer)) { $answer = "1" }
+    if ($answer -eq "2") {
+        $bc = Join-Path (Get-Location) (($script:logDir -replace "/", "\") + "\bc_trot.pt")
+        if (Test-Path $bc) {
+            $script:initFromArgs = @("--init-from", $bc)
+            Write-Host "既存の BC 重みを初期値にします: $bc"
+        } else {
+            Write-Host "bc_trot.pt が無いので、PPO の latest（あれば）またはゼロからになります。"
+        }
+    } elseif ($answer -eq "3") {
+        Write-Host "BC なしで PPO します。"
+    } else {
+        $script:runBcFirst = $true
+        Write-Host "先にトロット教師のデモを集めて BC し、その重みで PPO を始めます。"
     }
 }
 
@@ -317,7 +371,9 @@ function Select-StageOptions {
         Select-Vision
         if ($ForPlay) { Select-Ros }
     } elseif ($script:stage -eq "walk") {
-        Select-Terrain -Walking
+        if (-not $script:easyWalk) {
+            Select-Terrain -Walking
+        }
     }
 }
 
@@ -394,7 +450,18 @@ switch ($choice) {
             Write-Host "足りなくなると学習が止まります。開始ログの GPU 使用量で確認できます。"
         }
         Select-StageOptions
-        & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
+        if ($script:runBcFirst) {
+            Write-Host "トロット教師のデモ収集と模倣学習（BC）を実行します…"
+            $bcEnvs = [Math]::Min(32, $numEnvs)
+            & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs $bcEnvs --seconds 90 --epochs 80 --log-dir $logDir @algoArgs @armArgs
+            $code = $LASTEXITCODE
+            if ($code -ne 0) { break }
+            $bcPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\bc_trot.pt")
+            Write-Host "BC 完了。PPO は $bcPath から iteration 0 で開始します（既存の ppo_*.pt は使いません）。"
+            & $python -u -m pick_and_carry.train_ppo --init-from $bcPath --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
+        } else {
+            & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs @initFromArgs
+        }
         $code = $LASTEXITCODE
         Open-Mlflow
         if ($code -eq 0) {
@@ -481,7 +548,7 @@ switch ($choice) {
         $dirs = @()
         $labels = @()
         foreach ($name in @("ppo", "grpo", "sym_ppo")) {
-            $folder = Get-StageFolder $name $script:stage $(if ($script:catchLevel) { $script:catchLevel } else { "static" })
+            $folder = Get-StageFolder $name $script:stage $(if ($script:catchLevel) { $script:catchLevel } else { "static" }) -Easy:([bool]$script:easyWalk)
             $metrics = Join-Path (Get-Location) (($folder -replace "/", "\") + "\metrics.jsonl")
             $hasPt = (Get-LatestIteration ($folder -replace "/", "\")) -gt 0
             if ((Test-Path $metrics) -or $hasPt) {

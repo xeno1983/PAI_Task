@@ -29,6 +29,25 @@ def torch_load(path: Path, device: torch.device):
         return torch.load(path, map_location=device)
 
 
+def checkpoint_iteration(path: Path) -> int:
+    """Numeric iteration from ``ppo_1234.pt``. Non-matching names sort as -1."""
+    stem = path.stem
+    if stem.startswith("ppo_") and stem[4:].isdigit():
+        return int(stem[4:])
+    return -1
+
+
+def iter_sorted_checkpoints(log_dir: Path) -> list[Path]:
+    """Checkpoints ordered by iteration number (not lexicographic name).
+
+    Lex sort puts ``ppo_9980.pt`` after ``ppo_29980.pt``, so ``--resume latest``
+    would reload the wrong file and overwrite later weights.
+    """
+    if not log_dir.is_dir():
+        return []
+    return sorted(log_dir.glob("ppo_*.pt"), key=checkpoint_iteration)
+
+
 def checkpoint_matches(
     blob: dict,
     obs_dim: int,
@@ -61,7 +80,7 @@ def latest_matching(
         return None
     compatible: list[Path] = []
     skipped_arm = 0
-    for path in sorted(log_dir.glob("ppo_*.pt")):
+    for path in iter_sorted_checkpoints(log_dir):
         blob = torch_load(path, torch.device("cpu"))
         saved_arm = str(blob["arm"]) if "arm" in blob else ""
         if match_arm and saved_arm != arm and int(blob.get("obs_dim", -1)) == obs_dim:
@@ -199,7 +218,7 @@ def save_checkpoint(
         },
         path,
     )
-    print(f"saved {path}", flush=True)
+    print(f"saved {path} (iteration {iteration})", flush=True)
 
 
 def archive_incompatible_logs(log_dir: Path, obs_dim: int, act_dim: int, arm: str, curriculum: str) -> Path | None:
@@ -207,7 +226,7 @@ def archive_incompatible_logs(log_dir: Path, obs_dim: int, act_dim: int, arm: st
 
     Nothing moves when a compatible checkpoint exists or the folder holds no checkpoint.
     """
-    weights = sorted(log_dir.glob("ppo_*.pt")) if log_dir.is_dir() else []
+    weights = iter_sorted_checkpoints(log_dir)
     if not weights:
         return None
     if latest_matching(log_dir, obs_dim, act_dim, arm, curriculum) is not None:

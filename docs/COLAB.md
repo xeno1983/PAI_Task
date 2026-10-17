@@ -1,6 +1,6 @@
 # Colab で実行する
 
-ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。セルは上から順に実行します。3D ウィンドウは使わず、確認用の mp4 をノートの中で再生します。
+ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。セルは上から順に実行します。起動スクリプトと同じく、段階・学習手法を選んで `train_ppo` で学習・推論します。3D ウィンドウは使わず、確認は mp4 です。
 
 ローカルの `.venv` は Windows 用なので zip に入れません。Colab には CUDA 付き PyTorch が入っているので、Windows 用の cu128 は入れません。
 
@@ -10,11 +10,22 @@
 2. 「ランタイム」→「ランタイムのタイプを変更」→ ハードウェア アクセラレータを **T4 GPU** または **L4 GPU** にする。
 3. 変更したあとは「ランタイムを再起動」し、先頭のセルからやり直す。
 
-CPU のまま実行すると、Genesis は GPU を見つけられず CPU に落ち、地形の準備で止まります。ノートの最初のセルは `nvidia-smi` が無いとそこで止まります。
+CPU のまま実行すると、Genesis は `gs.cpu` に落ち、地形の準備で止まります。GPU 確認セルは `nvidia-smi` が無いとそこで止まります。
 
-## 2. プロジェクトを置く
+## 2. Google Drive をマウントする（任意・推奨）
 
-ローカルでは、デスクトップの `起動スクリプト\PickAndCarry\PickAndCarry_run.bat` を開き、`4` を選びます。同じフォルダに `PAI_Task_colab.zip` ができます。`.venv`、`logs`、`__pycache__`、`.git` は除いてあります。
+ノート先頭付近の「Google Drive をマウント」セルを実行します。認証ダイアログが出たら許可してください。
+
+```python
+from google.colab import drive
+drive.mount("/content/drive")
+```
+
+Drive にリポジトリを置く場合の例: `MyDrive/PAI_Task`。以前退避した `MyDrive/PAI_Task_logs/logs` があれば、次のセットアップセルがローカルに `logs/` が無いときだけ復元します。
+
+## 3. プロジェクトを置く
+
+ローカルでは、デスクトップの `起動スクリプト\PickAndCarry\PickAndCarry_run.bat` を開き、`6` を選びます。同じフォルダに `PAI_Task_colab.zip` ができます。`.venv`、`logs`、`__pycache__`、`.git` は除いてあります。
 
 Colab のファイルパネルから、この zip をアップロードして展開します。
 
@@ -28,45 +39,51 @@ Colab のファイルパネルから、この zip をアップロードして展
 2. `/content/drive/MyDrive/PAI_Task`
 3. `/content/drive/MyDrive/content/PAI_Task`
 
-ドライブにだけ置いてある場合、先頭セルがドライブをマウントします。`pick_and_carry` が見えないときは、置いた場所をこのどれかに合わせてください。
+マウントセルを飛ばしても、セットアップセルが未マウントなら自動で `drive.mount` を試します。
 
-## 3. パッケージと GPU を確認する
+## 4. パッケージと GPU を確認する
 
-2 番目のコードセルが `requirements.txt` から Genesis と TensorBoard を入れ、PyTorch から GPU が見えることを確認します。`cuda True` と GPU 名が出れば続けます。`False` のときはランタイムを GPU にしてセッションを再起動します。
+セットアップの次のコードセルが `requirements.txt` から Genesis と TensorBoard を入れ、PyTorch から GPU が見えることを確認します。`cuda True` と GPU 名が出れば続けます。
 
-描画は EGL を使います。先頭セルが `PYOPENGL_PLATFORM=egl` を設定します。
+描画は EGL を使います。セットアップセルが `PYOPENGL_PLATFORM=egl` を設定します。
 
-## 4. URDF を確認する
+## 5. 設定セル（起動スクリプトと同じ）
 
-次のセルが観測の並びと Z1 URDF を表示します。観測 81、行動 19、`assets/urdf/quadruped_z1.urdf` です。腕の固定は `arm_mount_joint`、`xyz=(-0.05, 0.0, 0.08)` です。
+次の変数を選びます。保存先はローカルと同じです。
 
-## 5. 描画を確認する
+| 変数 | 内容 | 例 |
+| --- | --- | --- |
+| `STAGE` | 段階 | `walk` / `reach` / `haul` / `carry` / `catch` |
+| `CATCH_LEVEL` | キャッチの水準 | `static` / `slow` / `random` / `fly` / `noisy` |
+| `ALGO` | 学習手法 | `ppo` / `grpo` / `sym_ppo` |
+| `NUM_ENVS` | 並列数 | T4 は `8` から。通ったら `32` |
+| `ITERATIONS` | 追加学習回数 | `50` など |
+| `NUM_STEPS` | 1 iteration のステップ | 起動と同じ `128` |
 
-1 体を 4 秒録画し、`logs/colab_preview.mp4` をノートに表示します。初回の `scene.build` はカーネルのコンパイルで数分かかります。Genesis のデバイスが CPU になっていたら、そのセルは学習へ進まず止まります。
+保存先の例:
 
-ログに `Neutral robot position (qpos0) exceeds joint limits` と出ることがあります。URDF の中立角が一部の関節範囲の端にあるという警告で、`reset()` が立ち姿勢にしたあともシミュレーションは続きます。
+- 歩行 PPO → `logs/ppo_curriculum_walk`
+- 箱運び GRPO → `logs/grpo_z1`
+- キャッチ Symmetric PPO（静止）→ `logs/sym_ppo_curriculum_catch_static`
 
-## 6. 短く学習して再生する
+## 6. 学習
 
-T4 ではまず 8 環境、5 iteration、1 iteration あたり 16 ステップです。通ったら同じセルの `--num-envs` を 32 まで上げられます。64 以上は、このノートの短い確認には使いません。地形のメッシュが大きく、CPU に落ちた状態で環境数を増やすと準備に非常に時間がかかります。
+学習セルは次と同等です。
 
-チェックポイントは `logs/ppo` です。最後のセルが最新の重みを 1 体で 8 秒再生し、`logs/colab_ppo.mp4` を表示します。
-
-ローカルの `logs/ppo_curriculum_walk` とは別フォルダです。Colab の結果を続きに使うときは、観測 81・行動 19・Z1 であることを確認してからコピーします。
-
-TensorBoard をノートで見る場合は次です。
-
-```python
-%load_ext tensorboard
-%tensorboard --logdir logs/ppo
+```text
+python -m pick_and_carry.train_ppo --resume latest --algo ... --curriculum ... --log-dir ...
 ```
 
-## 7. セッションが切れたとき
+同じフォルダに重みがあれば続きから、無ければ前段階の重みから、それも無ければ初期値から始めます。
 
-無料枠は時間でセッションが切れ、ランタイムのディスクは消えます。切れたあとは「2. プロジェクトを置く」からやり直します。学習の続きを残すときは、切る前に `logs/` をドライブへコピーします。
+## 7. 推論
 
-```python
-from google.colab import drive
-drive.mount("/content/drive")
-!cp -r /content/PAI_Task/logs /content/drive/MyDrive/PAI_Task_logs
-```
+推論セルは `--play --resume latest --num-envs 1 --record ...` で mp4 を作り、ノート内で再生します。Colab ではクリック GUI と ROS 2 は使いません。
+
+## 8. 曲線と比較
+
+任意セルで `scripts/plot_curves.py` を呼びます。複数手法を同じ段階で学習していれば、比較 HTML も作れます。
+
+## 9. セッションが切れたとき（Drive へ退避）
+
+無料枠は時間でセッションが切れ、ランタイムのディスクは消えます。切れる前にノート末尾のセルを実行してください。未マウントならその場でマウントし、`logs/` を `MyDrive/PAI_Task_logs` へコピーします。
