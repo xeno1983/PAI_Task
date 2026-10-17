@@ -24,26 +24,17 @@ Write-Host ""
 Write-Host "   1  学習。段階を選んでから回数を入れる"
 Write-Host "      歩行、到達、歩きながら持つ、箱運び、キャッチ。到達と持ち歩きは歩行から、キャッチは到達から続ける。"
 Write-Host "      歩行は平地から始めて地形へ広げ、腕を動かしながら歩く。腕は Z1。観測 81、行動 19。"
-Write-Host "      歩行は段差の高さだけ。箱運びだけ、走行環境・学習の分け方・手先カメラを選ぶ。"
-Write-Host "      ROS 2 は学習では使わない。"
+Write-Host "      歩行→簡単を選ぶと、トロット模倣学習（BC）してから PPO も選べます（単独実行は 8）。"
 Write-Host "      Enter だけなら 1000 回、並列 64 体。同じ段階をもう一度選ぶと続きから学習する。"
-Write-Host "      終わると MLflow、その段階の学習曲線、録画を開いて、この画面は閉じます。5 の提出動画は、残った段階を順に流す。"
-Write-Host "      各学習は logs\mlflow にも残る。親の重みとチェックポイントが実行ごとに分かれる。"
-Write-Host "      キャッチは静止、ゆっくり、ばらす、飛ぶ、ノイズで別のファイルになる。"
 Write-Host "   2  推論。段階を選んで、その保存した重みを再生する"
-Write-Host "      箱運びだけ、クリックで物資と運び先を決める。ROS 2 を選ぶと rviz2 で運び先を変えられる。"
-Write-Host "      歩行、到達、持ち歩き、キャッチは録画だけ。ROS 2 は使わない。"
+Write-Host "      箱運びだけ、クリックで物資と運び先を決める。簡単歩行では BC 重みの再生も選べます。"
 Write-Host "   3  箱運びの途中経過を並べた比較動画（追加学習なし）"
-Write-Host "      使うのは logs\ppo_z1 だけ。走行環境、学習の分け方、手先カメラを選ぶ。"
-Write-Host "      動画: 起動スクリプトの PickAndCarry フォルダの PickAndCarry_z1_compare.mp4"
-Write-Host "   4  学習曲線を開く（追加学習なし）。段階を選ぶと、その保存先を開く"
-Write-Host "      箱運びは報酬、把持率、手先の距離、設置率。歩行は速度の一致。到達とキャッチは手先の距離。"
-Write-Host "      ブラウザ: 起動スクリプトの PickAndCarry フォルダの PickAndCarry_curves.html"
+Write-Host "   4  学習曲線を開く（追加学習なし）"
 Write-Host "   5  プレゼン用の動画を作る（追加学習なし）"
-Write-Host "      学習条件のスライドを作り直し、フォルダ内の録画を1本につなぐ。説明の音声も入る。"
-Write-Host "      動画: 起動スクリプトの PickAndCarry フォルダの PickAndCarry_presentation.mp4"
 Write-Host "   6  Colab 用 zip を起動スクリプトの PickAndCarry フォルダに作る"
 Write-Host "   7  学習手法の結果を比較する（PPO / GRPO / Symmetric PPO）"
+Write-Host "   8  模倣学習（トロット教師 → BC）。デモ動画も作る／既存デモだけ再生"
+Write-Host "      保存先: logs\<手法>_curriculum_walk_easy\ （bc_trot.pt / trot_teacher_demo.mp4 / bc_trot_demo.mp4）"
 Write-Host ""
 
 function Get-LatestIteration {
@@ -243,9 +234,10 @@ function Select-Curriculum {
 function Ask-BcWarmStart {
     $script:runBcFirst = $false
     $script:initFromArgs = @()
-    Write-Host "   1  トロット教師を模倣学習（BC）してから PPO（推奨・初回）"
+    Write-Host "   1  トロット教師を模倣学習（BC）してから PPO（推奨・初回）。デモ mp4 も作成"
     Write-Host "   2  既存の bc_trot.pt / PPO 重みから PPO のみ"
     Write-Host "   3  ゼロから PPO のみ"
+    Write-Host "   （模倣学習だけ・デモ再生だけはメニュー 8）"
     $answer = Read-Host "初期化 [1]"
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = "1" }
     if ($answer -eq "2") {
@@ -260,7 +252,26 @@ function Ask-BcWarmStart {
         Write-Host "BC なしで PPO します。"
     } else {
         $script:runBcFirst = $true
-        Write-Host "先にトロット教師のデモを集めて BC し、その重みで PPO を始めます。"
+        Write-Host "先にトロット教師のデモを集めて BC し、デモ動画のあと PPO を始めます。"
+    }
+}
+
+function Open-BcDemos {
+    param([string]$LogDirRel)
+    $folder = Join-Path (Get-Location) ($LogDirRel -replace "/", "\")
+    foreach ($name in @("trot_teacher_demo.mp4", "bc_trot_demo.mp4")) {
+        $path = Join-Path $folder $name
+        if (Test-Path $path) {
+            Write-Host "デモを開きます: $path"
+            Start-Process $path
+        }
+    }
+    # Also copy demos next to the launcher bat for easy finding.
+    foreach ($name in @("trot_teacher_demo.mp4", "bc_trot_demo.mp4")) {
+        $src = Join-Path $folder $name
+        if (Test-Path $src) {
+            Copy-Item -Force $src (Join-Path $out $name)
+        }
     }
 }
 
@@ -451,11 +462,12 @@ switch ($choice) {
         }
         Select-StageOptions
         if ($script:runBcFirst) {
-            Write-Host "トロット教師のデモ収集と模倣学習（BC）を実行します…"
+            Write-Host "トロット教師のデモ収集と模倣学習（BC）を実行します（デモ mp4 も作成）…"
             $bcEnvs = [Math]::Min(32, $numEnvs)
-            & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs $bcEnvs --seconds 90 --epochs 80 --log-dir $logDir @algoArgs @armArgs
+            & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs $bcEnvs --seconds 90 --epochs 80 --demo-seconds 20 --log-dir $logDir @algoArgs @armArgs
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
+            Open-BcDemos $logDir
             $bcPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\bc_trot.pt")
             Write-Host "BC 完了。PPO は $bcPath から iteration 0 で開始します（既存の ppo_*.pt は使いません）。"
             & $python -u -m pick_and_carry.train_ppo --init-from $bcPath --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
@@ -481,16 +493,42 @@ switch ($choice) {
         Write-Host ""
         Select-Algo
         Select-Curriculum -ForPlay
-        Write-Host "推論します。使う重み: iteration $script:activeIter （$logDir）"
         $video = Join-Path $out $videoName
         Select-StageOptions -ForPlay
         if ($script:stage -eq "carry") {
+            Write-Host "推論します。使う重み: iteration $script:activeIter （$logDir）"
             Write-Host "1回目のクリックが物資、2回目が運び先です。"
             & $python -u scripts\infer_gui.py --log-dir $logDir --record $video --seconds $script:inferSeconds @armArgs @terrainArgs @controlArgs @visionArgs @rosArgs
+        } elseif ($script:easyWalk) {
+            $bcPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\bc_trot.pt")
+            Write-Host "   1  PPO の最新重みを再生（iteration $script:activeIter）"
+            Write-Host "   2  模倣学習（bc_trot.pt）を再生"
+            Write-Host "   3  トロット教師のデモだけ録画"
+            $playPick = Read-Host "再生 [1]"
+            if ([string]::IsNullOrWhiteSpace($playPick)) { $playPick = "1" }
+            if ($playPick -eq "2") {
+                if (-not (Test-Path $bcPath)) {
+                    Write-Host "bc_trot.pt がありません。先にメニュー 8 で模倣学習してください。"
+                    $code = 1
+                } else {
+                    Write-Host "BC 重みを再生します: $bcPath"
+                    & $python -u -m pick_and_carry.train_ppo --play --resume $bcPath --num-envs 1 --record $video --seconds 20 --log-dir $logDir --easy-walk @algoArgs @armArgs @curriculumArgs
+                    $code = $LASTEXITCODE
+                }
+            } elseif ($playPick -eq "3") {
+                & $python -u -m pick_and_carry.train_bc --easy-walk --demo-only teacher --demo-seconds 20 --log-dir $logDir @algoArgs @armArgs
+                $code = $LASTEXITCODE
+                Open-BcDemos $logDir
+            } else {
+                Write-Host "推論します。使う重み: iteration $script:activeIter （$logDir）"
+                & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @curriculumArgs
+                $code = $LASTEXITCODE
+            }
         } else {
+            Write-Host "推論します。使う重み: iteration $script:activeIter （$logDir）"
             & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @curriculumArgs
+            $code = $LASTEXITCODE
         }
-        $code = $LASTEXITCODE
         if ($code -eq 0 -and (Test-Path $video)) {
             Write-Host "提出動画用に残しました: $videoName"
             Start-Process $video
@@ -564,6 +602,45 @@ switch ($choice) {
             & $python -u scripts\plot_curves.py --compare @dirs --labels @labels --output $curves
             $code = $LASTEXITCODE
             if ($code -eq 0 -and (Test-Path $curves)) { Start-Process $curves }
+        }
+    }
+    "8" {
+        Write-Host ""
+        Write-Host "模倣学習（トロット教師 → BC）。保存先は logs\<手法>_curriculum_walk_easy です。"
+        Select-Algo
+        $script:stage = "walk"
+        $script:easyWalk = $true
+        $script:catchLevel = "static"
+        $script:curriculumArgs = @("--curriculum", "walk", "--easy-walk")
+        Set-LogDirFromStage
+        Write-Host "保存先: $($script:logDir -replace '/', '\')"
+        Write-Host "   1  BC を実行し、教師デモ＋BC デモの mp4 も作る（推奨）"
+        Write-Host "   2  既存の BC デモだけ再生（bc_trot.pt が必要）"
+        Write-Host "   3  トロット教師のデモだけ録画"
+        Write-Host "   4  教師＋BC のデモを両方作り直す（学習なし）"
+        $bcPick = Read-Host "模倣学習 [1]"
+        if ([string]::IsNullOrWhiteSpace($bcPick)) { $bcPick = "1" }
+        $logDir = $script:logDir
+        if ($bcPick -eq "2") {
+            & $python -u -m pick_and_carry.train_bc --easy-walk --demo-only bc --demo-seconds 20 --log-dir $logDir @algoArgs @armArgs
+            $code = $LASTEXITCODE
+            if ($code -eq 0) { Open-BcDemos $logDir }
+        } elseif ($bcPick -eq "3") {
+            & $python -u -m pick_and_carry.train_bc --easy-walk --demo-only teacher --demo-seconds 20 --log-dir $logDir @algoArgs @armArgs
+            $code = $LASTEXITCODE
+            if ($code -eq 0) { Open-BcDemos $logDir }
+        } elseif ($bcPick -eq "4") {
+            & $python -u -m pick_and_carry.train_bc --easy-walk --demo-only all --demo-seconds 20 --log-dir $logDir @algoArgs @armArgs
+            $code = $LASTEXITCODE
+            if ($code -eq 0) { Open-BcDemos $logDir }
+        } else {
+            Write-Host "デモ収集（約90秒相当）→ BC → デモ録画を実行します。"
+            & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs 80 --demo-seconds 20 --log-dir $logDir @algoArgs @armArgs
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+                Open-BcDemos $logDir
+                Write-Host "次はメニュー 1 で歩行→簡単→「既存 BC から PPO」を選ぶか、そのまま PPO を回せます。"
+            }
         }
     }
     default {

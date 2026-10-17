@@ -4,10 +4,16 @@ Typical use (easy walk folder):
 
     python -m pick_and_carry.train_bc --easy-walk --seconds 90 --epochs 80
 
+Demos only (teacher / BC policy):
+
+    python -m pick_and_carry.train_bc --demo-only teacher
+    python -m pick_and_carry.train_bc --demo-only bc
+    python -m pick_and_carry.train_bc --demo-only all
+
 Then warm-start PPO:
 
     python -m pick_and_carry.train_ppo --curriculum walk --easy-walk --init-from \\
-        logs/ppo_curriculum_walk_easy/bc_trot.pt --resume latest --iterations 1000
+        logs/ppo_curriculum_walk_easy/bc_trot.pt --iterations 1000
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import torch
 
 from pick_and_carry.agents import ActorCritic
 from pick_and_carry.algorithms import normalize_algo
-from pick_and_carry.checkpoints import save_checkpoint
+from pick_and_carry.checkpoints import save_checkpoint, torch_load
 from pick_and_carry.curriculum import locomotion_action_mask, stage_log_dir
 from pick_and_carry.train_ppo import initial_action_std, make_config
 from pick_and_carry.trot_teacher import TrotTeacher
@@ -42,8 +48,25 @@ def parse_args():
     parser.add_argument("--log-dir", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None, help="Checkpoint path. Default: <log-dir>/bc_trot.pt")
     parser.add_argument("--frequency", type=float, default=2.0, help="Trot frequency in Hz.")
-    parser.add_argument("--play-seconds", type=float, default=0.0, help="If >0, record teacher mp4 after BC.")
-    parser.add_argument("--record", type=str, default=None)
+    parser.add_argument(
+        "--demo-seconds",
+        type=float,
+        default=20.0,
+        help="Record teacher/BC mp4s for this many seconds. 0 skips demos after training.",
+    )
+    parser.add_argument(
+        "--play-seconds",
+        type=float,
+        default=None,
+        help="Alias of --demo-seconds (kept for older scripts).",
+    )
+    parser.add_argument(
+        "--demo-only",
+        choices=("all", "teacher", "bc", "none"),
+        default="none",
+        help="Skip training; only record demos. 'bc' needs an existing bc_trot.pt.",
+    )
+    parser.add_argument("--record", type=str, default=None, help="Ignored; demos use fixed names under --log-dir.")
     return parser.parse_args()
 
 
@@ -79,6 +102,39 @@ def _build_walk_args(bc_args):
         arm_init_std=0.4,
     )
     return ns, easy
+
+
+def _demo_cfg(base_cfg, log_dir: Path, record_path: Path):
+    cfg = make_config(
+        argparse.Namespace(
+            num_envs=1,
+            backend=base_cfg.backend,
+            viewer=False,
+            record=str(record_path),
+            seed=base_cfg.seed,
+            terrain_steps=False,
+            terrain_amplitude=0.0,
+            control_split="walk",
+            arm=base_cfg.arm,
+            wrist_camera=False,
+            object_xy=None,
+            goal_xy=None,
+            curriculum="walk",
+            catch_level="static",
+            easy_walk=True,
+            no_arm_disturb=True,
+            play=False,
+            ros=False,
+            log_dir=log_dir,
+        )
+    )
+    cfg.terrain = False
+    cfg.arm_disturb = False
+    cfg.push_robots = False
+    cfg.randomize_friction = False
+    cfg.num_envs = 1
+    cfg.record_path = str(record_path)
+    return cfg
 
 
 def collect_demos(env, teacher: TrotTeacher, seconds: float) -> tuple[torch.Tensor, torch.Tensor]:
@@ -137,19 +193,98 @@ def train_bc(
             print(f"  bc epoch {epoch}/{epochs}  leg_mse {total / max(count, 1):.5f}", flush=True)
 
 
+def record_demos(
+    cfg,
+    *,
+    log_dir: Path,
+    seconds: float,
+    frequency_hz: float,
+    agent: ActorCritic | None,
+    which: str = "all",
+) -> list[Path]:
+    """Record teacher and/or BC policy demos under ``log_dir``."""
+    from pick_and_carry.env import PickAndCarryEnv
+
+    paths: list[Path] = []
+    if which in ("all", "teacher"):
+        teacher_path = log_dir / "trot_teacher_demo.mp4"
+        demo_cfg = _demo_cfg(cfg, log_dir, teacher_path)
+        env = PickAndCarryEnv(cfg=demo_cfg)
+        teacher = TrotTeacher(
+            1,
+            dt=demo_cfg.dt,
+            frequency_hz=frequency_hz,
+            leg_action_scale=demo_cfg.leg_action_scale,
+            device=env.device,
+        )
+        obs = env.reset()
+        steps = max(1, int(round(seconds / demo_cfg.dt)))
+        print(f"recording teacher {seconds:.0f}s → {teacher_path}", flush=True)
+        for _ in range(steps):
+            action = teacher.act(env.command)
+            obs, _, done, _ = env.step(action)
+            if bool(done.any()):
+                teacher.reset(torch.nonzero(done, as_tuple=False).squeeze(-1))
+        env.close()
+        print(f"video: {teacher_path.resolve()}", flush=True)
+        paths.append(teacher_path)
+
+    if which in ("all", "bc"):
+        if agent is None:
+            raise SystemExit("BC デモには学習済みの agent か bc_trot.pt が必要です。")
+        bc_path = log_dir / "bc_trot_demo.mp4"
+        demo_cfg = _demo_cfg(cfg, log_dir, bc_path)
+        env = PickAndCarryEnv(cfg=demo_cfg)
+        agent = agent.to(env.device)
+        obs = env.reset()
+        steps = max(1, int(round(seconds / demo_cfg.dt)))
+        print(f"recording BC policy {seconds:.0f}s → {bc_path}", flush=True)
+        with torch.no_grad():
+            for _ in range(steps):
+                action = agent.act_mean(obs)
+                obs, _, _, _ = env.step(action)
+        env.close()
+        print(f"video: {bc_path.resolve()}", flush=True)
+        paths.append(bc_path)
+    return paths
+
+
 def main() -> None:
     args = parse_args()
     ns, easy = _build_walk_args(args)
     from pick_and_carry.env import PickAndCarryEnv
 
+    demo_seconds = args.demo_seconds if args.play_seconds is None else float(args.play_seconds)
     cfg = make_config(ns)
-    # BC collection should not push or disturb even if hard walk was requested with no-easy.
     if easy:
         cfg.terrain = False
         cfg.arm_disturb = False
         cfg.push_robots = False
         cfg.randomize_friction = False
     ns.log_dir.mkdir(parents=True, exist_ok=True)
+    out = args.output or (ns.log_dir / "bc_trot.pt")
+
+    if args.demo_only != "none":
+        agent = None
+        if args.demo_only in ("all", "bc"):
+            if not out.is_file():
+                raise SystemExit(f"BC デモ用の重みがありません: {out}")
+            blob = torch_load(out, torch.device("cpu"))
+            agent = ActorCritic(int(blob["obs_dim"]), int(blob["act_dim"]), init_std=0.3)
+            agent.load_state_dict(blob["model"])
+            agent.set_action_mask(locomotion_action_mask(int(blob["act_dim"])))
+        videos = record_demos(
+            cfg,
+            log_dir=ns.log_dir,
+            seconds=demo_seconds if demo_seconds > 0 else 20.0,
+            frequency_hz=args.frequency,
+            agent=agent,
+            which="all" if args.demo_only == "all" else args.demo_only,
+        )
+        for path in videos:
+            print(f"demo ready: {path.resolve()}", flush=True)
+        return
+
     env = PickAndCarryEnv(cfg=cfg)
     device = env.device
     teacher = TrotTeacher(
@@ -160,63 +295,56 @@ def main() -> None:
         device=device,
     )
     obs, actions = collect_demos(env, teacher, args.seconds)
+    env.close()
 
-    init_std = initial_action_std(env.num_actions, ns.leg_init_std, ns.arm_init_std)
-    agent = ActorCritic(env.num_obs, env.num_actions, init_std=init_std).to(device)
-    mask = locomotion_action_mask(env.num_actions, device=device)
+    init_std = initial_action_std(int(actions.shape[-1]), ns.leg_init_std, ns.arm_init_std)
+    agent = ActorCritic(int(obs.shape[-1]), int(actions.shape[-1]), init_std=init_std).to(device)
+    mask = locomotion_action_mask(int(actions.shape[-1]), device=device)
     agent.set_action_mask(mask)
     train_bc(
         agent,
-        obs,
-        actions,
+        obs.to(device),
+        actions.to(device),
         epochs=args.epochs,
         batch_size=min(args.batch_size, obs.shape[0]),
         lr=args.lr,
         action_mask=mask,
     )
 
-    out = args.output or (ns.log_dir / "bc_trot.pt")
-    # Optimizer state is empty Adam so PPO can replace it on --init-from.
     optimizer = torch.optim.Adam(agent.parameters(), lr=1e-3)
     save_checkpoint(
         out,
         agent,
         optimizer,
         iteration=0,
-        obs_dim=env.num_obs,
-        act_dim=env.num_actions,
+        obs_dim=int(obs.shape[-1]),
+        act_dim=int(actions.shape[-1]),
         arm=cfg.arm,
         curriculum="walk",
         algo=normalize_algo(ns.algo),
     )
-    # Also tag the file so resume logic can tell BC from PPO if needed.
     blob = torch.load(out, map_location="cpu", weights_only=False)
     blob["bc_trot"] = True
     blob["easy_walk"] = easy
     torch.save(blob, out)
     print(f"saved BC checkpoint {out.resolve()}", flush=True)
 
-    if args.play_seconds and args.play_seconds > 0:
-        record = args.record or str(ns.log_dir / "bc_trot_preview.mp4")
-        print(f"preview teacher {args.play_seconds}s → {record}", flush=True)
-        # Rebuild one env with recording.
-        cfg.num_envs = 1
-        cfg.record_path = record
-        env.close()
-        env = PickAndCarryEnv(cfg=cfg)
-        teacher = TrotTeacher(1, dt=cfg.dt, frequency_hz=args.frequency, leg_action_scale=cfg.leg_action_scale, device=env.device)
-        obs = env.reset()
-        steps = max(1, int(round(args.play_seconds / cfg.dt)))
-        for _ in range(steps):
-            action = teacher.act(env.command)
-            obs, _, done, _ = env.step(action)
-            if bool(done.any()):
-                teacher.reset(torch.nonzero(done, as_tuple=False).squeeze(-1))
-        env.close()
-        print(f"video: {Path(record).resolve()}", flush=True)
-    else:
-        env.close()
-    print(f"next: python -m pick_and_carry.train_ppo --curriculum walk --easy-walk --init-from {out} --resume latest --iterations 1000")
+    if demo_seconds and demo_seconds > 0:
+        videos = record_demos(
+            cfg,
+            log_dir=ns.log_dir,
+            seconds=demo_seconds,
+            frequency_hz=args.frequency,
+            agent=agent.cpu(),
+            which="all",
+        )
+        for path in videos:
+            print(f"demo ready: {path.resolve()}", flush=True)
+    print(
+        f"next: python -m pick_and_carry.train_ppo --curriculum walk --easy-walk "
+        f"--init-from {out} --iterations 1000",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

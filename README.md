@@ -81,7 +81,13 @@ $env:PYTHONUTF8 = "1"
 .\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --easy-walk --init-from logs/ppo_curriculum_walk_easy/bc_trot.pt --num-envs 64 --iterations 1000 --num-steps 128 --save-interval 20 --curriculum walk --arm z1
 ```
 
-起動メニューでも「歩行 → 簡単 → BCしてから PPO」を選べます。教師は対角トロットの位相振動子（脚 12 次元のみ）です。
+起動メニュー:
+
+- **8** … 模倣学習だけ（BC＋デモ mp4）。教員デモ `trot_teacher_demo.mp4` / BC デモ `bc_trot_demo.mp4`
+- **1 → 歩行 → 簡単 → BCしてから PPO** … 学習の一連
+- **2 → 歩行 → 簡単** … BC 重みや教師デモの再生
+
+教師は対角トロットの位相振動子（脚 12 次元のみ）です。
 
 再生は学習せず、保存した重みで mp4 を書きます。
 
