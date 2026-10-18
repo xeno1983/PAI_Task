@@ -34,6 +34,7 @@ from pick_and_carry.algorithms import normalize_algo
 from pick_and_carry.checkpoints import save_checkpoint, torch_load
 from pick_and_carry.curriculum import locomotion_action_mask
 from pick_and_carry.gail import Discriminator, apply_action_mask, train_discriminator
+from pick_and_carry.mlflow_log import LocalTracker
 from pick_and_carry.train_bc import (
     _build_walk_args,
     _resolve_demo_which,
@@ -198,6 +199,7 @@ def run_gail(
     easy: bool = True,
     arm: str = "z1",
     algo: str = "ppo",
+    tracker: LocalTracker | None = None,
 ) -> int:
     device = env.device
     opt_pi = torch.optim.Adam(agent.parameters(), lr=args.lr)
@@ -282,15 +284,28 @@ def run_gail(
         )
         elapsed = time.perf_counter() - started
         finished = iteration
+        r_gail = gail_sum / args.num_steps
+        r_env = env_sum / args.num_steps
+        r_mix = args.gail_coef * r_gail + args.env_coef * r_env
+        if tracker is not None:
+            tracker.log_row(
+                {
+                    "iteration": iteration,
+                    "r_gail": r_gail,
+                    "r_env": r_env,
+                    "r_mix": r_mix,
+                    "disc_loss": disc_metrics["disc_loss"],
+                    "disc_acc": disc_metrics["disc_acc"],
+                    "policy_loss": metrics["policy_loss"],
+                }
+            )
         span = max(1, args.iterations)
         if iteration == start_iteration + 1 or iteration % max(1, span // 20) == 0 or iteration == last_iteration:
-            r_gail = gail_sum / args.num_steps
-            r_env = env_sum / args.num_steps
             print(
                 f"  gail {iteration}/{last_iteration}  "
                 f"r_gail {r_gail:.3f}  "
                 f"r_env {r_env:.3f}  "
-                f"r_mix {args.gail_coef * r_gail + args.env_coef * r_env:.3f}  "
+                f"r_mix {r_mix:.3f}  "
                 f"disc_loss {disc_metrics['disc_loss']:.3f}  "
                 f"disc_acc {disc_metrics['disc_acc']:.2f}  "
                 f"pi_loss {metrics['policy_loss']:.3f}  "
@@ -312,6 +327,8 @@ def run_gail(
                 algo=algo,
                 easy=easy,
             )
+            if tracker is not None:
+                tracker.log_checkpoint(save_path)
     return finished
 
 
@@ -407,49 +424,80 @@ def main() -> None:
     else:
         bc_epochs = int(args.bc_epochs)
 
-    if bc_epochs > 0:
-        print(f"BC warm-start epochs={bc_epochs}…", flush=True)
-        train_bc(
-            agent,
-            expert_obs,
-            expert_act,
-            epochs=bc_epochs,
-            batch_size=min(args.bc_batch_size, expert_obs.shape[0]),
-            lr=3e-4,
+    finished = start_iteration
+    tracker = LocalTracker()
+    tracker.start(
+        ns.log_dir,
+        {
+            "algorithm": "gail",
+            "curriculum": "walk",
+            "arm": cfg.arm,
+            "obs_dim": int(expert_obs.shape[-1]),
+            "act_dim": int(expert_act.shape[-1]),
+            "num_envs": cfg.num_envs,
+            "num_steps": args.num_steps,
+            "iterations_requested": args.iterations,
+            "start_iteration": start_iteration,
+            "bc_epochs": bc_epochs,
+            "learning_rate": args.lr,
+            "seed": args.seed,
+            "easy_walk": easy,
+            "gail_coef": args.gail_coef,
+            "env_coef": args.env_coef,
+            "disc_epochs": args.disc_epochs,
+            "demo_seconds": args.seconds,
+            "resumed_from": str(resume_path) if resume_path is not None else None,
+        },
+    )
+    try:
+        if bc_epochs > 0:
+            print(f"BC warm-start epochs={bc_epochs}…", flush=True)
+            train_bc(
+                agent,
+                expert_obs,
+                expert_act,
+                epochs=bc_epochs,
+                batch_size=min(args.bc_batch_size, expert_obs.shape[0]),
+                lr=3e-4,
+                action_mask=mask,
+                tracker=tracker,
+            )
+
+        finished = run_gail(
+            env=env,
+            agent=agent,
+            disc=disc,
+            expert_obs=expert_obs,
+            expert_act=expert_act,
+            args=args,
             action_mask=mask,
+            start_iteration=start_iteration,
+            save_path=out,
+            easy=easy,
+            arm=cfg.arm,
+            algo=normalize_algo(ns.algo),
+            tracker=tracker,
         )
+        env.close()
 
-    finished = run_gail(
-        env=env,
-        agent=agent,
-        disc=disc,
-        expert_obs=expert_obs,
-        expert_act=expert_act,
-        args=args,
-        action_mask=mask,
-        start_iteration=start_iteration,
-        save_path=out,
-        easy=easy,
-        arm=cfg.arm,
-        algo=normalize_algo(ns.algo),
-    )
-    env.close()
-
-    # Final save (also covered by last-iter save inside run_gail, but keep explicit).
-    optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
-    _save_gail_blob(
-        out,
-        agent=agent,
-        disc=disc,
-        optimizer=optimizer,
-        iteration=finished,
-        obs_dim=int(expert_obs.shape[-1]),
-        act_dim=int(expert_act.shape[-1]),
-        arm=cfg.arm,
-        algo=normalize_algo(ns.algo),
-        easy=easy,
-    )
-    print(f"saved GAIL checkpoint {out.resolve()} (gail_iteration={finished})", flush=True)
+        # Final save (also covered by last-iter save inside run_gail, but keep explicit).
+        optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
+        _save_gail_blob(
+            out,
+            agent=agent,
+            disc=disc,
+            optimizer=optimizer,
+            iteration=finished,
+            obs_dim=int(expert_obs.shape[-1]),
+            act_dim=int(expert_act.shape[-1]),
+            arm=cfg.arm,
+            algo=normalize_algo(ns.algo),
+            easy=easy,
+        )
+        tracker.log_checkpoint(out)
+        print(f"saved GAIL checkpoint {out.resolve()} (gail_iteration={finished})", flush=True)
+    finally:
+        tracker.close()
 
     which = _resolve_demo_which("none", args.save_demos)
     if which is None:

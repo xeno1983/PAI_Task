@@ -48,7 +48,7 @@ Genesis がなくても、報酬と方策のテストは通ります。
 
 | 番号 | 内容 | 主な出力 |
 | --- | --- | --- |
-| 1 | 模倣学習（トロット教師 → BC / GAIL）。デモ保存の有無を選べる | `bc_trot.pt` / `gail_trot.pt`、`videos/...` |
+| 1 | 模倣学習（トロット教師 → BC / GAIL）。デモ保存の有無を選べる。終了後に MLflow も開く | `bc_trot.pt` / `gail_trot.pt`、`videos/...`、`logs/mlflow` |
 | 2 | 段階を選んで学習（歩行 / 到達 / 持ち運び / 箱運び / キャッチ） | 各 `logs/{algo}_*` |
 | 3 | 推論。段階を選んで保存した重みを再生 | mp4（`videos/<タスク>/...`） |
 | 4 | 箱運びの途中経過を並べた比較動画 | `PickAndCarry_z1_compare.mp4` |
@@ -92,7 +92,7 @@ $env:PYTHONUTF8 = "1"
 
 起動メニュー:
 
-- **1** … 模倣学習（BC / GAIL）。教師デモ mp4 の保存有無を選べます。GAIL では BC エポック数・GAIL iterations・`env-coef` / `disc-epochs` も聞けます。動画は `logs/.../videos/<タスク>/<種別>_ep####_iter######_<時刻>/` に分けて保存（リール `*_demo.mp4` とスキル別クリップ）
+- **1** … 模倣学習（BC / GAIL）。教師デモ mp4 の保存有無を選べます。GAIL では BC エポック数・GAIL iterations・`env-coef` / `disc-epochs` も聞けます。学習曲線は PPO と同じ `logs/mlflow`（run 名 `bc-walk-easy` / `gail-walk-easy`）に残し、終了後に MLflow を開きます。動画は `logs/.../videos/<タスク>/<種別>_ep####_iter######_<時刻>/` に分けて保存（リール `*_demo.mp4` とスキル別クリップ）
 - **2 → 歩行 → 簡単 → BC / GAIL してから PPO** … 学習の一連（ここでも教師デモ保存の有無を選べます）
 - **3 → 歩行 → 簡単** … 模倣重みや教師デモの再生
 

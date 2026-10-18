@@ -619,6 +619,7 @@ switch ($choice) {
             & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --disc-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) {
+                Open-Mlflow
                 if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
                 Write-Host "続けてメニュー 2 → 歩行 → 簡単 →「既存の重みから PPO」を選ぶと gail_trot.pt を使えます。"
             }
@@ -651,6 +652,7 @@ switch ($choice) {
             & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs $bcEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) {
+                Open-Mlflow
                 if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
                 Write-Host "続けてメニュー 2 → 歩行 → 簡単 →「既存の重みから PPO」を選ぶと、続けて PPO できます。"
             }

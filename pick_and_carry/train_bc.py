@@ -34,6 +34,7 @@ from pick_and_carry.checkpoints import save_checkpoint, torch_load
 from pick_and_carry.config import ACTION_LAYOUT, OBS_LAYOUT, layout_slices
 from pick_and_carry.cpg import command_is_moving
 from pick_and_carry.curriculum import locomotion_action_mask, stage_log_dir
+from pick_and_carry.mlflow_log import LocalTracker
 from pick_and_carry.train_ppo import initial_action_std, make_config
 from pick_and_carry.trot_teacher import (
     DEMO_SKILL_SECONDS,
@@ -225,12 +226,16 @@ def train_bc(
     lr: float,
     action_mask: torch.Tensor,
     still_amp_weight: float = 8.0,
+    tracker: LocalTracker | None = None,
+    log_every: int | None = None,
 ) -> None:
     optimizer = torch.optim.Adam(agent.parameters(), lr=lr)
     n = obs.shape[0]
     mask = action_mask.to(dtype=obs.dtype, device=obs.device)
     cmd_slice = layout_slices(OBS_LAYOUT)["command"]
     amp_index = layout_slices(ACTION_LAYOUT)["cpg"].start + 1
+    # Dense enough for MLflow curves without flooding 3000-epoch runs.
+    every = int(log_every) if log_every and log_every > 0 else max(1, epochs // 100)
     print(
         f"BC epochs={epochs} batch={batch_size} samples={n} "
         f"still_amp_weight={still_amp_weight}",
@@ -260,8 +265,12 @@ def train_bc(
             optimizer.step()
             total += float(loss.detach())
             count += 1
-        if epoch == 1 or epoch % max(1, epochs // 10) == 0 or epoch == epochs:
-            print(f"  bc epoch {epoch}/{epochs}  leg_mse {total / max(count, 1):.5f}", flush=True)
+        leg_mse = total / max(count, 1)
+        if epoch == 1 or epoch % every == 0 or epoch == epochs:
+            if tracker is not None:
+                tracker.log_row({"iteration": epoch, "bc_leg_mse": leg_mse})
+            if epoch == 1 or epoch % max(1, epochs // 10) == 0 or epoch == epochs:
+                print(f"  bc epoch {epoch}/{epochs}  leg_mse {leg_mse:.5f}", flush=True)
 
 
 def _record_skill_clip(
@@ -554,33 +563,56 @@ def main() -> None:
     agent = ActorCritic(int(obs.shape[-1]), int(actions.shape[-1]), init_std=init_std).to(device)
     mask = locomotion_action_mask(int(actions.shape[-1]), device=device)
     agent.set_action_mask(mask)
-    train_bc(
-        agent,
-        obs.to(device),
-        actions.to(device),
-        epochs=args.epochs,
-        batch_size=min(args.batch_size, obs.shape[0]),
-        lr=args.lr,
-        action_mask=mask,
-    )
 
-    optimizer = torch.optim.Adam(agent.parameters(), lr=1e-3)
-    save_checkpoint(
-        out,
-        agent,
-        optimizer,
-        iteration=0,
-        obs_dim=int(obs.shape[-1]),
-        act_dim=int(actions.shape[-1]),
-        arm=cfg.arm,
-        curriculum="walk",
-        algo=normalize_algo(ns.algo),
+    tracker = LocalTracker()
+    tracker.start(
+        ns.log_dir,
+        {
+            "algorithm": "bc",
+            "curriculum": "walk",
+            "arm": cfg.arm,
+            "obs_dim": int(obs.shape[-1]),
+            "act_dim": int(actions.shape[-1]),
+            "num_envs": cfg.num_envs,
+            "epochs": args.epochs,
+            "learning_rate": args.lr,
+            "seed": args.seed,
+            "easy_walk": easy,
+            "demo_seconds": args.seconds,
+        },
     )
-    blob = torch.load(out, map_location="cpu", weights_only=False)
-    blob["bc_trot"] = True
-    blob["easy_walk"] = easy
-    torch.save(blob, out)
-    print(f"saved BC checkpoint {out.resolve()}", flush=True)
+    try:
+        train_bc(
+            agent,
+            obs.to(device),
+            actions.to(device),
+            epochs=args.epochs,
+            batch_size=min(args.batch_size, obs.shape[0]),
+            lr=args.lr,
+            action_mask=mask,
+            tracker=tracker,
+        )
+
+        optimizer = torch.optim.Adam(agent.parameters(), lr=1e-3)
+        save_checkpoint(
+            out,
+            agent,
+            optimizer,
+            iteration=0,
+            obs_dim=int(obs.shape[-1]),
+            act_dim=int(actions.shape[-1]),
+            arm=cfg.arm,
+            curriculum="walk",
+            algo=normalize_algo(ns.algo),
+        )
+        blob = torch.load(out, map_location="cpu", weights_only=False)
+        blob["bc_trot"] = True
+        blob["easy_walk"] = easy
+        torch.save(blob, out)
+        tracker.log_checkpoint(out)
+        print(f"saved BC checkpoint {out.resolve()}", flush=True)
+    finally:
+        tracker.close()
 
     which = _resolve_demo_which("none", args.save_demos)
     if which is None:

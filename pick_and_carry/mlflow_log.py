@@ -40,7 +40,12 @@ class LocalTracker:
         mlflow.set_experiment("pick-and-carry")
         stage = str(info.get("curriculum", "carry"))
         level = str(info.get("catch_level", "static"))
+        algo = str(info.get("algorithm", "ppo")).lower()
         run_name = f"{stage}-{level}" if stage == "catch" else stage
+        # BC / GAIL share the walk log dir with PPO; prefix so runs are easy to filter.
+        if algo in ("bc", "gail"):
+            easy = bool(info.get("easy_walk", False))
+            run_name = f"{algo}-{run_name}{'-easy' if easy and stage == 'walk' else ''}"
         mlflow.start_run(run_name=run_name)
         self._mlflow = mlflow
         self.active = True
@@ -62,12 +67,21 @@ class LocalTracker:
             "terrain_amplitude_m": info.get("terrain_amplitude_m"),
             "control_split": info.get("control_split"),
             "wrist_camera": info.get("wrist_camera"),
+            "easy_walk": info.get("easy_walk"),
+            "bc_epochs": info.get("bc_epochs"),
+            "epochs": info.get("epochs"),
+            "gail_coef": info.get("gail_coef"),
+            "env_coef": info.get("env_coef"),
+            "disc_epochs": info.get("disc_epochs"),
+            "demo_seconds": info.get("demo_seconds"),
             "log_dir": str(log_dir),
         }
+        params = {key: value for key, value in params.items() if value is not None}
         self._call(lambda: mlflow.log_params({key: "" if value is None else str(value) for key, value in params.items()}))
         resumed = info.get("resumed_from")
         if resumed:
             self._call(lambda: mlflow.set_tag("resumed_from", str(resumed)))
+        self._call(lambda: mlflow.set_tag("algorithm", algo))
         print(f"MLflow に残します: {store}", flush=True)
         print(
             r"見るときは .\.venv\Scripts\mlflow ui --backend-store-uri sqlite:///logs/mlflow/mlflow.db --workers 1",

@@ -60,3 +60,41 @@ class LocalTrackerTests(unittest.TestCase):
                 self.assertEqual([item.path for item in artifacts], ["checkpoints/ppo_0020.pt"])
             finally:
                 release_store()
+
+    def test_bc_run_name_and_metrics(self):
+        import mlflow
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "logs" / "ppo_curriculum_walk_easy"
+            log_dir.mkdir(parents=True)
+            ckpt = log_dir / "bc_trot.pt"
+            ckpt.write_bytes(b"bc")
+            tracker = LocalTracker()
+            try:
+                tracker.start(
+                    log_dir,
+                    {
+                        "algorithm": "bc",
+                        "curriculum": "walk",
+                        "easy_walk": True,
+                        "arm": "z1",
+                        "obs_dim": 81,
+                        "act_dim": 22,
+                        "num_envs": 32,
+                        "epochs": 100,
+                    },
+                )
+                tracker.log_row({"iteration": 10, "bc_leg_mse": 0.05})
+                tracker.log_checkpoint(ckpt)
+                tracker.close()
+
+                mlflow.set_tracking_uri("sqlite:///" + (root / "logs" / "mlflow" / "mlflow.db").resolve().as_posix())
+                experiment = mlflow.get_experiment_by_name("pick-and-carry")
+                runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
+                self.assertEqual(len(runs), 1)
+                self.assertEqual(runs.iloc[0]["tags.mlflow.runName"], "bc-walk-easy")
+                self.assertEqual(runs.iloc[0]["params.algorithm"], "bc")
+                self.assertAlmostEqual(float(runs.iloc[0]["metrics.bc_leg_mse"]), 0.05)
+            finally:
+                release_store()
