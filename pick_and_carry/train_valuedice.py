@@ -524,6 +524,7 @@ def main(argv: list[str] | None = None) -> None:
             "resumed_from": str(resume_path) if resume_path is not None else None,
         },
     )
+    teacher_demos_done = False
     try:
         if bc_epochs > 0:
             print(f"BC warm-start epochs={bc_epochs}…", flush=True)
@@ -537,6 +538,44 @@ def main(argv: list[str] | None = None) -> None:
                 action_mask=mask,
                 tracker=tracker,
             )
+            bc_path = ns.log_dir / "bc_trot.pt"
+            _save_bc_warmstart_checkpoint(
+                bc_path,
+                agent=agent,
+                obs_dim=int(expert_obs.shape[-1]),
+                act_dim=int(expert_act.shape[-1]),
+                arm=cfg.arm,
+                algo=normalize_algo(ns.algo),
+                easy=easy,
+            )
+            tracker.log_checkpoint(bc_path)
+            print(f"saved BC warm-start checkpoint {bc_path.resolve()}", flush=True)
+            # Mid-run videos of the BC result (before ValueDICE overwrites the policy).
+            # Close the training env first — Genesis is effectively one scene.
+            mid_which = _resolve_demo_which("none", args.save_demos)
+            if mid_which is not None:
+                env.close()
+                teacher_demos_done = _record_save_demos(
+                    cfg,
+                    args=args,
+                    log_dir=ns.log_dir,
+                    demo_seconds=demo_seconds,
+                    easy=easy,
+                    agent=agent,
+                    kind="bc",
+                    epochs=bc_epochs,
+                    iteration=0,
+                    checkpoint_name=bc_path.name,
+                    rename_to_valuedice=False,
+                    include_teacher=True,
+                    include_policy=True,
+                )
+                env = PickAndCarryEnv(cfg=cfg)
+                device = env.device
+                expert_obs = expert_obs.to(device)
+                expert_act = expert_act.to(device)
+                agent = agent.to(device)
+                nu_net = nu_net.to(device)
 
         finished = run_valuedice(
             env=env,
@@ -573,58 +612,22 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         tracker.close()
 
-    which = _resolve_demo_which("none", args.save_demos)
-    if which is None:
-        print("save-demos=none → デモ mp4 はスキップします。", flush=True)
-    else:
-        from pick_and_carry.video_paths import make_video_run_dir, video_task_name
-
-        task = video_task_name("walk", easy=easy)
-        video_dir = make_video_run_dir(
-            ns.log_dir,
-            task=task,
-            kind="valuedice",
-            iteration=int(finished),
-            epochs=int(bc_epochs) if bc_epochs else None,
-            extra={"checkpoint": str(out.name)},
-        )
-        if which == "all":
-            teacher_videos = record_demos(
-                cfg,
-                log_dir=ns.log_dir,
-                seconds=demo_seconds,
-                frequency_hz=args.frequency,
-                agent=None,
-                which="teacher",
-            )
-            cfg._demo_epochs = int(bc_epochs)
-            policy_videos = record_demos(
-                cfg,
-                log_dir=ns.log_dir,
-                seconds=demo_seconds,
-                frequency_hz=args.frequency,
-                agent=agent.cpu(),
-                which="bc",
-                video_dir=video_dir,
-            )
-            _rename_policy_demos(video_dir)
-            videos = teacher_videos + policy_videos
-        else:
-            videos = record_demos(
-                cfg,
-                log_dir=ns.log_dir,
-                seconds=demo_seconds,
-                frequency_hz=args.frequency,
-                agent=agent.cpu(),
-                which=which,
-                video_dir=video_dir if which == "bc" else None,
-            )
-            if which == "bc":
-                _rename_policy_demos(video_dir)
-        for path in videos:
-            print(f"demo ready: {path.resolve()}", flush=True)
-        if videos:
-            print(f"demo folder: {videos[-1].parent.resolve()}", flush=True)
+    # Final demos: ValueDICE policy (and teacher only if BC phase did not already write it).
+    _record_save_demos(
+        cfg,
+        args=args,
+        log_dir=ns.log_dir,
+        demo_seconds=demo_seconds,
+        easy=easy,
+        agent=agent,
+        kind="valuedice",
+        epochs=int(bc_epochs) if bc_epochs else None,
+        iteration=int(finished),
+        checkpoint_name=out.name,
+        rename_to_valuedice=True,
+        include_teacher=not teacher_demos_done,
+        include_policy=True,
+    )
     print(
         f"next: python -m pick_and_carry.train_ppo --curriculum walk --easy-walk "
         f"--init-from {out} --iterations 1000",
@@ -653,6 +656,112 @@ def _rename_policy_demos(folder: Path) -> None:
             src.replace(valuedice)
         if valuedice.is_file() and not gail.is_file():
             shutil.copy2(valuedice, gail)
+
+
+def _save_bc_warmstart_checkpoint(
+    path: Path,
+    *,
+    agent: ActorCritic,
+    obs_dim: int,
+    act_dim: int,
+    arm: str,
+    algo: str,
+    easy: bool,
+) -> None:
+    """Persist BC weights so mid-run demos match a reloadable checkpoint."""
+    optimizer = torch.optim.Adam(agent.parameters(), lr=3e-4)
+    save_checkpoint(
+        path,
+        agent,
+        optimizer,
+        iteration=0,
+        obs_dim=obs_dim,
+        act_dim=act_dim,
+        arm=arm,
+        curriculum="walk",
+        algo=algo,
+    )
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    blob["bc_trot"] = True
+    blob["easy_walk"] = easy
+    torch.save(blob, path)
+
+
+def _record_save_demos(
+    cfg,
+    *,
+    args,
+    log_dir: Path,
+    demo_seconds: float,
+    easy: bool,
+    agent: ActorCritic,
+    kind: str,
+    epochs: int | None,
+    iteration: int,
+    checkpoint_name: str,
+    rename_to_valuedice: bool,
+    include_teacher: bool,
+    include_policy: bool,
+) -> bool:
+    """Write teacher/policy demos according to ``--save-demos``.
+
+    Returns True if teacher demos were written (so a later phase can skip them).
+    """
+    from pick_and_carry.video_paths import make_video_run_dir, video_task_name
+
+    which = _resolve_demo_which("none", args.save_demos)
+    if which is None:
+        print("save-demos=none → デモ mp4 はスキップします。", flush=True)
+        return False
+
+    want_teacher = include_teacher and which in ("all", "teacher")
+    want_policy = include_policy and which in ("all", "bc")
+    if not want_teacher and not want_policy:
+        return False
+
+    teacher_written = False
+    videos: list[Path] = []
+    if want_teacher:
+        teacher_videos = record_demos(
+            cfg,
+            log_dir=log_dir,
+            seconds=demo_seconds,
+            frequency_hz=args.frequency,
+            agent=None,
+            which="teacher",
+        )
+        videos.extend(teacher_videos)
+        teacher_written = True
+
+    if want_policy:
+        task = video_task_name("walk", easy=easy)
+        video_dir = make_video_run_dir(
+            log_dir,
+            task=task,
+            kind=kind,
+            iteration=int(iteration),
+            epochs=int(epochs) if epochs else None,
+            extra={"checkpoint": str(checkpoint_name), "phase": kind},
+        )
+        cfg._demo_epochs = int(epochs) if epochs else 0
+        policy_videos = record_demos(
+            cfg,
+            log_dir=log_dir,
+            seconds=demo_seconds,
+            frequency_hz=args.frequency,
+            agent=agent.cpu(),
+            which="bc",
+            video_dir=video_dir,
+        )
+        if rename_to_valuedice:
+            _rename_policy_demos(video_dir)
+        videos.extend(policy_videos)
+
+    for path in videos:
+        print(f"demo ready: {path.resolve()}", flush=True)
+    if videos:
+        print(f"demo folder ({kind}): {videos[-1].parent.resolve()}", flush=True)
+    return teacher_written
 
 
 if __name__ == "__main__":
