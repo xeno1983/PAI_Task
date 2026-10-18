@@ -5,6 +5,9 @@ cloning and GAIL warm-start the same action space as PPO. Leg joints are expande
 inside the environment by ``LegCPG``.
 
 Convention: gripper / FL–FR side is front (+X). ``vx > 0`` must walk toward +X.
+Sagittal polarity is Genesis-locked in ``cpg._SAGITTAL_SIGN`` / ``cpg._CALF_SWING_SIGN``
+(both +1, thigh and calf same swing sign). Re-check with
+``scripts/diag_trot_direction.py`` after any swing-sign edit.
 """
 
 from __future__ import annotations

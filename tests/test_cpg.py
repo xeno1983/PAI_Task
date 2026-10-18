@@ -8,12 +8,18 @@ import unittest
 import torch
 
 from pick_and_carry.config import CPG_PARAM_DIM, NUM_ACTIONS
-from pick_and_carry.cpg import LegCPG, command_to_cpg_params, decode_cpg_params, encode_cpg_params
+from pick_and_carry.cpg import (
+    LegCPG,
+    command_to_cpg_params,
+    decode_cpg_params,
+    encode_cpg_params,
+    nominal_leg_phases,
+)
 
 
 class CpgTests(unittest.TestCase):
     def test_action_layout_uses_cpg(self):
-        self.assertEqual(CPG_PARAM_DIM, 10)
+        self.assertEqual(CPG_PARAM_DIM, 15)
         self.assertEqual(NUM_ACTIONS, CPG_PARAM_DIM + 6 + 1)
 
     def test_encode_decode_roundtrip_amp(self):
@@ -26,6 +32,13 @@ class CpgTests(unittest.TestCase):
         self.assertAlmostEqual(float(decoded_b["amp"][0]), 0.7, places=2)
         self.assertEqual(float(decoded_b["going_back"][0]), 1.0)
 
+    def test_encode_decode_phase_adapt_defaults(self):
+        raw = encode_cpg_params(amp=0.5, couple=1.0, entrain=0.0, n=1)
+        p = decode_cpg_params(raw)
+        self.assertAlmostEqual(float(p["dphi_ab"][0]), 0.0, places=3)
+        self.assertAlmostEqual(float(p["couple"][0]), 1.0, places=2)
+        self.assertAlmostEqual(float(p["entrain"][0]), 0.0, places=2)
+
     def test_step_stand_near_zero(self):
         cpg = LegCPG(2, device=torch.device("cpu"))
         raw = encode_cpg_params(amp=0.0, n=2)
@@ -36,7 +49,7 @@ class CpgTests(unittest.TestCase):
     def test_step_forward_moves_thigh(self):
         cpg = LegCPG(1, device=torch.device("cpu"))
         raw = command_to_cpg_params(torch.tensor([[0.35, 0.0, 0.0]]))
-        cpg.phase.fill_(math.pi / 2)
+        cpg.phase = math.pi / 2
         leg = cpg.step(raw)
         self.assertGreater(float(leg[0, 1].abs()), 0.05)
 
@@ -45,18 +58,105 @@ class CpgTests(unittest.TestCase):
         bwd = command_to_cpg_params(torch.tensor([[-0.30, 0.0, 0.0]]))
         self.assertGreater(float(fwd[0, 1]), 0.0)
         self.assertLess(float(bwd[0, 1]), 0.0)
+        self.assertEqual(fwd.shape[-1], CPG_PARAM_DIM)
 
-    def test_forward_thigh_and_calf_swing_opposite(self):
-        """Matching thigh/calf signs walk aft on Go2; opposite signs go +X."""
+    def test_forward_thigh_and_calf_same_swing_sign(self):
+        """Genesis-locked: same thigh/calf swing sign + sagittal=+1 walks toward +X."""
+        from pick_and_carry.cpg import _CALF_SWING_SIGN, _SAGITTAL_SIGN
+
         cpg = LegCPG(1, device=torch.device("cpu"))
         raw = command_to_cpg_params(torch.tensor([[0.35, 0.0, 0.0]]))
-        cpg.phase.fill_(math.pi / 2)
+        cpg.phase = math.pi / 2
         leg = cpg.step(raw)
         thigh = float(leg[0, 1])
         calf = float(leg[0, 2])
         self.assertGreater(abs(thigh), 0.05)
         self.assertGreater(abs(calf), 0.05)
-        self.assertLess(thigh * calf, 0.0)
+        self.assertEqual(_SAGITTAL_SIGN, 1.0)
+        self.assertEqual(_CALF_SWING_SIGN, 1.0)
+        self.assertGreater(thigh * calf, 0.0)
+        self.assertGreater(thigh, 0.0)
+
+    def test_forward_and_backward_leg_actions_flip(self):
+        """Backward (amp channel < 0) must invert calf phase relative to forward."""
+        cpg_f = LegCPG(1, device=torch.device("cpu"))
+        cpg_b = LegCPG(1, device=torch.device("cpu"))
+        fwd = command_to_cpg_params(torch.tensor([[0.35, 0.0, 0.0]]))
+        bwd = command_to_cpg_params(torch.tensor([[-0.35, 0.0, 0.0]]))
+        cpg_f.phase = math.pi / 2
+        cpg_b.phase = math.pi / 2
+        leg_f = cpg_f.step(fwd)
+        leg_b = cpg_b.step(bwd)
+        self.assertAlmostEqual(float(leg_f[0, 1]), float(leg_b[0, 1]), places=3)
+        self.assertLess(float(leg_f[0, 2] * leg_b[0, 2]), 0.0)
+
+    def test_dphi_ab_shifts_pair_b(self):
+        """Pair-B offset changes FR/RL phases relative to rigid π."""
+        cpg0 = LegCPG(1, device=torch.device("cpu"))
+        cpg1 = LegCPG(1, device=torch.device("cpu"))
+        base = encode_cpg_params(amp=0.8, couple=1.0, entrain=0.0, n=1)
+        shifted = encode_cpg_params(amp=0.8, dphi_ab=0.5, couple=1.0, entrain=0.0, n=1)
+        cpg0.phase = 0.0
+        cpg1.phase = 0.0
+        # One coupling step from aligned state.
+        cpg0.step(base)
+        cpg1.step(shifted)
+        # FR (1) and RL (2) should differ when dphi_ab ≠ 0.
+        self.assertGreater(
+            float((cpg0.phase_legs[0, 1] - cpg1.phase_legs[0, 1]).abs()),
+            0.2,
+        )
+
+    def test_soft_couple_pulls_toward_diagonal(self):
+        cpg = LegCPG(1, device=torch.device("cpu"))
+        # Break diagonal: set FR equal to FL instead of FL+π.
+        cpg.phase_legs[0] = torch.tensor([0.0, 0.0, math.pi, 0.0])
+        raw = encode_cpg_params(amp=0.8, couple=1.0, entrain=0.0, n=1)
+        cpg.step(raw)
+        # After stiff coupling, FR should be near π (mod 2π).
+        fr = float(cpg.phase_legs[0, 1])
+        err = abs(math.atan2(math.sin(fr - math.pi), math.cos(fr - math.pi)))
+        self.assertLess(err, 0.35)
+
+    def test_contact_entrainment_pulls_toward_stance(self):
+        cpg = LegCPG(1, device=torch.device("cpu"))
+        raw = encode_cpg_params(amp=0.8, couple=0.2, entrain=0.8, n=1)
+        # Seed edge history (post-reset warm-up); no rising pull yet.
+        cpg.step(raw, foot_contact=torch.zeros(1, 4))
+        cpg.phase = math.pi  # mid-swing-ish for sin-based lift
+        contact = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        before = float(cpg.phase_legs[0, 0])
+        cpg.step(raw, foot_contact=contact)
+        after = float(cpg.phase_legs[0, 0])
+        dist_before = abs(math.atan2(math.sin(before), math.cos(before)))
+        dist_after = abs(math.atan2(math.sin(after), math.cos(after)))
+        self.assertLess(dist_after, dist_before)
+
+    def test_reset_suppresses_false_touchdown_entrainment(self):
+        """Stance feet already down after reset must not look like rising edges."""
+        cpg = LegCPG(1, device=torch.device("cpu"))
+        cpg.reset()
+        cpg.phase = math.pi / 2
+        raw = encode_cpg_params(amp=0.8, couple=0.05, entrain=0.9, n=1)
+        stance = torch.ones(1, 4)
+        cpg.step(raw, foot_contact=stance)
+        # First contact sample only seeds history. A buggy rising pull would yank
+        # every stance leg toward 0 (wrapped distance ≪ π/2).
+        for i in range(4):
+            dist0 = abs(
+                math.atan2(math.sin(float(cpg.phase_legs[0, i])), math.cos(float(cpg.phase_legs[0, i])))
+            )
+            self.assertGreater(dist0, 0.9)
+
+
+    def test_nominal_leg_phases_diagonal(self):
+        carrier = torch.tensor([0.0])
+        z = torch.zeros(1)
+        ph = nominal_leg_phases(carrier, z, z, z)
+        self.assertAlmostEqual(float(ph[0, 0]), 0.0, places=5)
+        self.assertAlmostEqual(float(ph[0, 1]), math.pi, places=5)
+        self.assertAlmostEqual(float(ph[0, 2]), math.pi, places=5)
+        self.assertAlmostEqual(float(ph[0, 3]), 0.0, places=5)
 
 
 if __name__ == "__main__":
