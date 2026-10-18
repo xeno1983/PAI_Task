@@ -694,7 +694,7 @@ switch ($choice) {
                 "--easy-walk", "--num-envs", "32", "--seconds", "90",
                 "--iterations", "$gailIters", "--env-coef", "$envCoef",
                 "--nu-epochs", "$discEpochs", "--log-dir", "$logDir"
-            ) + @algoArgs + @armArgs + @demoArgs
+            ) + $algoArgs + $armArgs + $demoArgs
             if ($script:vdExtraArgs -and $script:vdExtraArgs.Count -gt 0) {
                 $gailCmd += $script:vdExtraArgs
             } else {
@@ -815,7 +815,7 @@ switch ($choice) {
                 "--easy-walk", "--num-envs", "$gailEnvs", "--seconds", "90",
                 "--iterations", "$gailIters", "--env-coef", "$envCoef",
                 "--nu-epochs", "$discEpochs", "--log-dir", "$logDir"
-            ) + @algoArgs + @armArgs + @demoArgs
+            ) + $algoArgs + $armArgs + $demoArgs
             if ($script:vdExtraArgs -and $script:vdExtraArgs.Count -gt 0) {
                 $gailCmd += $script:vdExtraArgs
             } else {
