@@ -193,6 +193,9 @@ class PickAndCarryEnv:
         except Exception as exc:
             if not _already_initialized(exc):
                 raise
+        from pick_and_carry.genesis_fps import install_inplace_fps_logging
+
+        install_inplace_fps_logging()
         self.device = torch.device(gs.device if not isinstance(gs.device, torch.device) else gs.device)
         torch.manual_seed(self.cfg.seed)
 
