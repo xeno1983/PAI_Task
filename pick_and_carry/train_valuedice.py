@@ -521,6 +521,15 @@ def main(argv: list[str] | None = None) -> None:
     ns.log_dir.mkdir(parents=True, exist_ok=True)
     out = args.output or (ns.log_dir / "valuedice_trot.pt")
     resume_path = _resolve_resume_path(args.resume, ns.log_dir, out)
+    planned_init = None if resume_path is not None else _resolve_init_from(args.init_from, ns.log_dir)
+    if planned_init is not None:
+        print(
+            f"Plan: load policy from {planned_init.resolve()} and skip BC warm-start "
+            f"(will still collect teacher demos for ValueDICE).",
+            flush=True,
+        )
+    elif resume_path is not None:
+        print(f"Plan: resume ValueDICE from {resume_path} (BC warm-start skipped).", flush=True)
 
     if args.demo_only != "none":
         which = _resolve_demo_which(args.demo_only, args.save_demos)
@@ -622,7 +631,7 @@ def main(argv: list[str] | None = None) -> None:
                 kind = "init"
             print(
                 f"{kind} weights from {init_path.resolve()} "
-                f"(ValueDICE starts at iteration 0, BC retrain skipped by default)",
+                f"(ValueDICE starts at iteration 0)",
                 flush=True,
             )
 
@@ -630,6 +639,22 @@ def main(argv: list[str] | None = None) -> None:
         bc_epochs = 0 if (resume_path is not None or init_path is not None) else 3000
     else:
         bc_epochs = int(args.bc_epochs)
+    # Reusing a saved policy: never run full BC warm-start. (Launcher may still
+    # pass a stale --bc-epochs; --init-from / --resume win.)
+    if (init_path is not None or resume_path is not None) and bc_epochs > 0:
+        print(
+            f"NOTE: ignoring --bc-epochs {bc_epochs} because "
+            f"{'--init-from' if init_path is not None else '--resume'} is set "
+            f"(BC warm-start skipped).",
+            flush=True,
+        )
+        bc_epochs = 0
+    if init_path is not None:
+        print(
+            "BC training disabled (--init-from). "
+            "Expert demos are still collected for ValueDICE ν.",
+            flush=True,
+        )
 
     finished = start_iteration
     tracker = LocalTracker()
@@ -684,9 +709,15 @@ def main(argv: list[str] | None = None) -> None:
             )
             tracker.log_checkpoint(bc_path)
             print(f"saved BC warm-start checkpoint {bc_path.resolve()}", flush=True)
+        elif init_path is not None:
+            print(
+                f"BC warm-start SKIPPED (using saved weights: {init_path.resolve()})",
+                flush=True,
+            )
 
-        # Mid-run videos of the BC policy (trained now, or loaded via --init-from).
-        record_bc_demos = bc_epochs > 0 or init_path is not None
+        # Mid-run BC demos only after a fresh BC train — not when reusing --init-from
+        # (that path used to print "recording BC demos" and look like a retrain).
+        record_bc_demos = bc_epochs > 0
         mid_which = _resolve_demo_which("none", args.save_demos) if record_bc_demos else None
         if mid_which is not None:
             env.close()
