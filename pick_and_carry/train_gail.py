@@ -6,7 +6,7 @@ Typical use (easy walk folder):
 
 Optional BC warm-start (recommended on a fresh run):
 
-    python -m pick_and_carry.train_gail --easy-walk --bc-epochs 40 --iterations 1000
+    python -m pick_and_carry.train_gail --easy-walk --bc-epochs 3000 --iterations 1000
 
 Continue from an existing ``gail_trot.pt`` (skips BC by default):
 
@@ -52,7 +52,7 @@ def parse_args():
         "--bc-epochs",
         type=int,
         default=None,
-        help="BC warm-start epochs before GAIL. Default 40 on a fresh run, 0 when --resume is set. 0 skips.",
+        help="BC warm-start epochs before GAIL. Default 3000 on a fresh run, 0 when --resume is set. 0 skips.",
     )
     parser.add_argument("--bc-batch-size", type=int, default=4096)
     parser.add_argument("--disc-epochs", type=int, default=1, help="Discriminator passes per iteration.")
@@ -385,7 +385,7 @@ def main() -> None:
         print(f"resumed GAIL from {resume_path} at gail_iteration={start_iteration}", flush=True)
 
     if args.bc_epochs is None:
-        bc_epochs = 0 if resume_path is not None else 40
+        bc_epochs = 0 if resume_path is not None else 3000
     else:
         bc_epochs = int(args.bc_epochs)
 

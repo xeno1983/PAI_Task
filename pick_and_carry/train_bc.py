@@ -2,7 +2,7 @@
 
 Typical use (easy walk folder):
 
-    python -m pick_and_carry.train_bc --easy-walk --seconds 90 --epochs 80
+    python -m pick_and_carry.train_bc --easy-walk --seconds 90 --epochs 3000
 
 Demos only (teacher / BC policy):
 
@@ -45,7 +45,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Collect trot demos and train behavioral cloning.")
     parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--seconds", type=float, default=60.0, help="Simulated seconds of teacher rollouts.")
-    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--epochs", type=int, default=3000)
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")

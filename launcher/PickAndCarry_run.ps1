@@ -277,7 +277,7 @@ function Ask-TeacherDemoSave {
 }
 
 function Ask-BcEpochs {
-    param([int]$Default = 80)
+    param([int]$Default = 3000)
     $epochs = 0
     while ($epochs -lt 1) {
         $raw = Read-Host "BC エポック数 [$Default]"
@@ -554,7 +554,7 @@ switch ($choice) {
             $demoArgs = Ask-TeacherDemoSave
             $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
             $resumeArgs = @()
-            $bcEpochs = 40
+            $bcEpochs = 3000
             if (Test-Path $gailPath) {
                 Write-Host "既存の gail_trot.pt があります。"
                 Write-Host "   1  最初から（BC 温め直し）"
@@ -599,7 +599,7 @@ switch ($choice) {
         } else {
             $demoArgs = Ask-TeacherDemoSave
             Write-Host "デモを集め（約90秒相当）て BC を実行します。"
-            $bcEpochs = Ask-BcEpochs -Default 80
+            $bcEpochs = Ask-BcEpochs -Default 3000
             & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs $bcEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) {
@@ -646,7 +646,7 @@ switch ($choice) {
             Write-Host "トロット教師のデモを集めて模倣学習（BC）を実行します…"
             $demoArgs = Ask-TeacherDemoSave
             $bcEnvs = [Math]::Min(32, $numEnvs)
-            $bcEpochs = Ask-BcEpochs -Default 80
+            $bcEpochs = Ask-BcEpochs -Default 3000
             & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs $bcEnvs --seconds 90 --epochs $bcEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
@@ -660,7 +660,7 @@ switch ($choice) {
             $gailEnvs = [Math]::Min(32, $numEnvs)
             $gailPathResume = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
             $resumeArgs = @()
-            $bcEpochs = 40
+            $bcEpochs = 3000
             if (Test-Path $gailPathResume) {
                 Write-Host "既存の gail_trot.pt があります。追加学習しますか？"
                 Write-Host "   1  最初から（BC 温め直し）"
