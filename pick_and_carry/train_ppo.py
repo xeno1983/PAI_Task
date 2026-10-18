@@ -44,6 +44,7 @@ from pick_and_carry.curriculum import (
     locomotion_action_mask,
     stage_log_dir,
 )
+from pick_and_carry.console import format_abs_metric, format_metric
 from pick_and_carry.env import PickAndCarryEnv
 from pick_and_carry.ros_bridge import FileBridge, pack_rgb_image, ros_usage_error
 from pick_and_carry.mlflow_log import LocalTracker
@@ -515,6 +516,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         flush=True,
     )
     step_times: list[float] = []
+    prev_log: dict[str, float] | None = None
     difficulty = Difficulty(cfg.curriculum, cfg.catch_level)
     difficulty.start(env)
     for iteration in range(start_iteration + 1, last_iteration + 1):
@@ -669,22 +671,56 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             row["success"] = float(env.extras["success_rate"])
         step_times.append(elapsed)
         remaining = (last_iteration - iteration) * (sum(step_times) / len(step_times))
+        tracking_avg = tracking_sum / args.num_steps
+        gait_avg = gait_sum / args.num_steps
+        steady_avg = steady_sum / args.num_steps
+        jerk_avg = jerk_sum / args.num_steps
+        grip_avg = grip_sum / args.num_steps
+        policy_loss = float(metrics["policy_loss"])
+        prev = prev_log or {}
+        pieces = [
+            format_metric("reward", mean_reward, prev.get("reward"), higher_is_better=True, fmt=".3f"),
+        ]
         if progress_key == "ee_dist":
-            detail = f"ee_dist {mean_dist:.3f} grasp {grasp_rate:.2f} grip {grip_sum / args.num_steps:.3f}"
+            pieces.append(
+                format_metric("ee_dist", mean_dist, prev.get("ee_dist"), higher_is_better=False, fmt=".3f")
+            )
+            pieces.append(
+                format_metric("grasp", grasp_rate, prev.get("grasp"), higher_is_better=True, fmt=".2f")
+            )
+            pieces.append(
+                format_metric("grip", grip_avg, prev.get("grip"), higher_is_better=True, fmt=".3f")
+            )
         elif progress_key == "approach":
-            detail = f"approach {mean_dist:.3f} grasp {grasp_rate:.2f}"
+            pieces.append(
+                format_metric("approach", mean_dist, prev.get("approach"), higher_is_better=True, fmt=".3f")
+            )
+            pieces.append(
+                format_metric("grasp", grasp_rate, prev.get("grasp"), higher_is_better=True, fmt=".2f")
+            )
         else:
-            detail = f"walk {mean_dist:.3f} tracking {tracking_sum / args.num_steps:.3f}"
-            row["tracking"] = tracking_sum / args.num_steps
+            pieces.append(
+                format_metric("walk", mean_dist, prev.get("walk"), higher_is_better=True, fmt=".3f")
+            )
+            pieces.append(
+                format_metric("tracking", tracking_avg, prev.get("tracking"), higher_is_better=True, fmt=".3f")
+            )
+            row["tracking"] = tracking_avg
             if cfg.curriculum in LOCOMOTION_STAGES:
-                detail = (
-                    f"{detail} gait {gait_sum / args.num_steps:.3f} "
-                    f"steady {steady_sum / args.num_steps:.3f} "
-                    f"jerk {jerk_sum / args.num_steps:.3f}"
+                pieces.append(
+                    format_metric("gait", gait_avg, prev.get("gait"), higher_is_better=True, fmt=".3f")
                 )
-                row["gait"] = gait_sum / args.num_steps
-                row["steady"] = steady_sum / args.num_steps
-                row["jerk"] = jerk_sum / args.num_steps
+                pieces.append(
+                    format_metric("steady", steady_avg, prev.get("steady"), higher_is_better=True, fmt=".3f")
+                )
+                pieces.append(
+                    format_metric("jerk", jerk_avg, prev.get("jerk"), higher_is_better=False, fmt=".3f")
+                )
+                row["gait"] = gait_avg
+                row["steady"] = steady_avg
+                row["jerk"] = jerk_avg
+        pieces.append(format_abs_metric("policy", policy_loss, prev.get("policy"), fmt=".3f"))
+        pieces.append(format_metric("fps", fps, prev.get("fps"), higher_is_better=True, fmt=".0f"))
         row["kl"] = float(metrics["kl"])
         row["lr"] = float(metrics["lr"])
         row["entropy"] = float(metrics["entropy"])
@@ -697,14 +733,31 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         else:
             live_score = None
         active = difficulty.update(env, live_score)
+        detail = " ".join(pieces)
         if active:
             detail = f"{detail}  設定 {active}"
         print(
-            f"iter {iteration}/{last_iteration}  残り {format_remaining(remaining)}  "
-            f"reward {mean_reward:.3f} {detail} "
-            f"policy {metrics['policy_loss']:.3f} fps {fps:.0f}",
+            f"iter {iteration}/{last_iteration}  残り {format_remaining(remaining)}  {detail}",
             flush=True,
         )
+        prev_log = {
+            "reward": mean_reward,
+            "grasp": grasp_rate,
+            "policy": policy_loss,
+            "fps": fps,
+        }
+        if progress_key == "ee_dist":
+            prev_log["ee_dist"] = mean_dist
+            prev_log["grip"] = grip_avg
+        elif progress_key == "approach":
+            prev_log["approach"] = mean_dist
+        else:
+            prev_log["walk"] = mean_dist
+            prev_log["tracking"] = tracking_avg
+            if cfg.curriculum in LOCOMOTION_STAGES:
+                prev_log["gait"] = gait_avg
+                prev_log["steady"] = steady_avg
+                prev_log["jerk"] = jerk_avg
         if iteration % args.save_interval == 0 or iteration == last_iteration:
             # Zero-pad to 6 so names sort in iteration order even as plain strings.
             saved = args.log_dir / f"ppo_{iteration:06d}.pt"

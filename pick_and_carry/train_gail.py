@@ -33,7 +33,7 @@ from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
 from pick_and_carry.algorithms import normalize_algo
 from pick_and_carry.checkpoints import save_checkpoint, torch_load
 from pick_and_carry.curriculum import locomotion_action_mask
-from pick_and_carry.console import format_metric, paint
+from pick_and_carry.console import format_abs_metric, format_metric, format_toward_metric
 from pick_and_carry.gail import Discriminator, apply_action_mask, train_discriminator
 from pick_and_carry.mlflow_log import LocalTracker
 from pick_and_carry.train_bc import (
@@ -306,27 +306,15 @@ def run_gail(
             disc_loss = float(disc_metrics["disc_loss"])
             disc_acc = float(disc_metrics["disc_acc"])
             pi_loss = float(metrics["policy_loss"])
-            # disc_acc≈0.65 is healthier than saturation at 1.0; pi_loss by |·|.
-            prev_acc = None if prev_log is None else prev_log["disc_acc"]
-            acc_better = None
-            if prev_acc is not None:
-                target = 0.65
-                d_now = abs(disc_acc - target)
-                d_prev = abs(prev_acc - target)
-                if abs(d_now - d_prev) > 1e-9:
-                    acc_better = d_now < d_prev
-            prev_pi = None if prev_log is None else prev_log["pi_loss"]
-            pi_better = None
-            if prev_pi is not None and abs(abs(pi_loss) - abs(prev_pi)) > 1e-9:
-                pi_better = abs(pi_loss) < abs(prev_pi)
+            prev = prev_log or {}
             print(
                 f"  gail {iteration}/{last_iteration}  "
-                f"{format_metric('r_gail', r_gail, None if prev_log is None else prev_log['r_gail'], higher_is_better=True, fmt='.3f')}  "
-                f"{format_metric('r_env', r_env, None if prev_log is None else prev_log['r_env'], higher_is_better=True, fmt='.3f')}  "
-                f"{format_metric('r_mix', r_mix, None if prev_log is None else prev_log['r_mix'], higher_is_better=True, fmt='.3f')}  "
-                f"{format_metric('disc_loss', disc_loss, None if prev_log is None else prev_log['disc_loss'], higher_is_better=False, fmt='.3f')}  "
-                f"{paint(f'disc_acc {disc_acc:.2f}', better=acc_better)}  "
-                f"{paint(f'pi_loss {pi_loss:.3f}', better=pi_better)}  "
+                f"{format_metric('r_gail', r_gail, prev.get('r_gail'), higher_is_better=True, fmt='.3f')}  "
+                f"{format_metric('r_env', r_env, prev.get('r_env'), higher_is_better=True, fmt='.3f')}  "
+                f"{format_metric('r_mix', r_mix, prev.get('r_mix'), higher_is_better=True, fmt='.3f')}  "
+                f"{format_metric('disc_loss', disc_loss, prev.get('disc_loss'), higher_is_better=False, fmt='.3f')}  "
+                f"{format_toward_metric('disc_acc', disc_acc, prev.get('disc_acc'), target=0.65, fmt='.2f')}  "
+                f"{format_abs_metric('pi_loss', pi_loss, prev.get('pi_loss'), fmt='.3f')}  "
                 f"{elapsed:.1f}s",
                 flush=True,
             )

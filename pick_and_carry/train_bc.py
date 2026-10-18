@@ -34,6 +34,7 @@ from pick_and_carry.checkpoints import save_checkpoint, torch_load
 from pick_and_carry.config import ACTION_LAYOUT, OBS_LAYOUT, layout_slices
 from pick_and_carry.cpg import command_is_moving
 from pick_and_carry.curriculum import locomotion_action_mask, stage_log_dir
+from pick_and_carry.console import format_metric
 from pick_and_carry.mlflow_log import LocalTracker
 from pick_and_carry.train_ppo import initial_action_std, make_config
 from pick_and_carry.trot_teacher import (
@@ -241,6 +242,7 @@ def train_bc(
         f"still_amp_weight={still_amp_weight}",
         flush=True,
     )
+    prev_mse: float | None = None
     for epoch in range(1, epochs + 1):
         order = torch.randperm(n, device=obs.device)
         total = 0.0
@@ -270,7 +272,15 @@ def train_bc(
             if tracker is not None:
                 tracker.log_row({"iteration": epoch, "bc_leg_mse": leg_mse})
             if epoch == 1 or epoch % max(1, epochs // 10) == 0 or epoch == epochs:
-                print(f"  bc epoch {epoch}/{epochs}  leg_mse {leg_mse:.5f}", flush=True)
+                colored = format_metric(
+                    "leg_mse",
+                    leg_mse,
+                    prev_mse,
+                    higher_is_better=False,
+                    fmt=".5f",
+                )
+                print(f"  bc epoch {epoch}/{epochs}  {colored}", flush=True)
+                prev_mse = leg_mse
 
 
 def _record_skill_clip(

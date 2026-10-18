@@ -59,6 +59,33 @@ def delta_better(current: float, previous: float | None, *, higher_is_better: bo
     return (diff > 0) if higher_is_better else (diff < 0)
 
 
+def abs_delta_better(current: float, previous: float | None, *, eps: float = 1e-9) -> bool | None:
+    """True when ``|current|`` shrank (useful for signed losses)."""
+    if previous is None:
+        return None
+    diff = abs(current) - abs(previous)
+    if abs(diff) <= eps:
+        return None
+    return diff < 0
+
+
+def toward_target_better(
+    current: float,
+    previous: float | None,
+    *,
+    target: float,
+    eps: float = 1e-9,
+) -> bool | None:
+    """True when ``current`` moved closer to ``target``."""
+    if previous is None:
+        return None
+    d_now = abs(current - target)
+    d_prev = abs(previous - target)
+    if abs(d_now - d_prev) <= eps:
+        return None
+    return d_now < d_prev
+
+
 def format_metric(
     name: str,
     value: float,
@@ -69,3 +96,20 @@ def format_metric(
 ) -> str:
     body = f"{name} {value:{fmt}}"
     return paint(body, better=delta_better(value, previous, higher_is_better=higher_is_better))
+
+
+def format_abs_metric(name: str, value: float, previous: float | None, *, fmt: str) -> str:
+    body = f"{name} {value:{fmt}}"
+    return paint(body, better=abs_delta_better(value, previous))
+
+
+def format_toward_metric(
+    name: str,
+    value: float,
+    previous: float | None,
+    *,
+    target: float,
+    fmt: str,
+) -> str:
+    body = f"{name} {value:{fmt}}"
+    return paint(body, better=toward_target_better(value, previous, target=target))
