@@ -66,7 +66,7 @@ Colab のファイルパネルから、この zip をアップロードして展
 保存先の例:
 
 - 歩行 PPO → `logs/ppo_curriculum_walk`
-- 簡単歩行（模倣暖機）→ `logs/ppo_curriculum_walk_easy`（`bc_trot.pt` / `gail_trot.pt`）
+- 簡単歩行（模倣暖機）→ `logs/ppo_curriculum_walk_easy`（`bc_trot.pt` / `valuedice_trot.pt`）
 - 箱運び GRPO → `logs/grpo_z1`
 - キャッチ Symmetric PPO（静止）→ `logs/sym_ppo_curriculum_catch_static`
 
@@ -80,13 +80,13 @@ Colab のファイルパネルから、この zip をアップロードして展
 python -m pick_and_carry.train_ppo --resume latest --algo ... --curriculum ... --log-dir ...
 ```
 
-同じフォルダに重みがあれば続きから、無ければ前段階の重みから、それも無ければ初期値から始めます。`--easy-walk` で PPO が無く `--init-from` も無いときは、同フォルダの `gail_trot.pt` → `bc_trot.pt` の順で自動初期化します。
+同じフォルダに重みがあれば続きから、無ければ前段階の重みから、それも無ければ初期値から始めます。`--easy-walk` で PPO が無く `--init-from` も無いときは、同フォルダの `valuedice_trot.pt` → `gail_trot.pt` → `bc_trot.pt` の順で自動初期化します。
 
 模倣だけ先に回す場合:
 
 ```text
 python -m pick_and_carry.train_bc --easy-walk --num-envs 8 --seconds 60 --epochs 40
-python -m pick_and_carry.train_gail --easy-walk --num-envs 8 --seconds 60 --bc-epochs 20 --iterations 100
+python -m pick_and_carry.train_valuedice --easy-walk --num-envs 8 --seconds 60 --bc-epochs 20 --iterations 100
 ```
 
 ## 7. 推論

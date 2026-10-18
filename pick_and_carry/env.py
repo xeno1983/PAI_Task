@@ -1442,7 +1442,13 @@ class PickAndCarryEnv:
 
     def _reset_curriculum(self, idx, base_pos: torch.Tensor) -> None:
         count = base_pos.shape[0]
-        if self.cfg.curriculum in ("walk", "haul"):
+        # Demonstrations / BC lock velocity commands with ``set_commands(..., hold=True)``.
+        # Auto-reset on fall/timeout must not replace a held still skill (stand/sit/jump/stop)
+        # with a random walk command — that re-opens the CPG amp gate and the robot "starts
+        # walking after" the intended pose.
+        if self.hold_commands:
+            pass
+        elif self.cfg.curriculum in ("walk", "haul"):
             share = STAND_STILL_SHARE if self.cfg.curriculum == "walk" else 0.0
             command = sample_command(count, self.device, share)
             self._write_rows(self.command, command, idx)

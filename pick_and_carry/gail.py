@@ -1,7 +1,7 @@
-"""Generative Adversarial Imitation Learning helpers.
+"""Legacy GAIL helpers (kept for tests / old checkpoints).
 
-Discriminator ``D(s, a)`` scores expert vs policy transitions. The policy is
-rewarded with ``-log(1 - D)`` (Ho & Ermon, 2016) and updated with PPO.
+New imitation warm-start uses ``pick_and_carry.valuedice`` instead of the
+adversarial discriminator. ``apply_action_mask`` is re-exported from ValueDICE.
 """
 
 from __future__ import annotations
@@ -11,10 +11,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from pick_and_carry.agents import mlp
+from pick_and_carry.valuedice import apply_action_mask  # noqa: F401
 
 
 class Discriminator(nn.Module):
-    """Binary classifier on concatenated ``(obs, action)``."""
+    """Binary classifier on concatenated ``(obs, action)`` (legacy GAIL)."""
 
     def __init__(
         self,
@@ -32,17 +33,8 @@ class Discriminator(nn.Module):
         return torch.sigmoid(self.logits(obs, actions))
 
     def gail_reward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        """``-log(1 - D(s,a))`` = softplus(logit). Higher when D thinks it is expert-like."""
+        """``-log(1 - D(s,a))`` = softplus(logit)."""
         return F.softplus(self.logits(obs, actions))
-
-
-def apply_action_mask(actions: torch.Tensor, action_mask: torch.Tensor | None) -> torch.Tensor:
-    if action_mask is None:
-        return actions
-    mask = action_mask.to(dtype=actions.dtype, device=actions.device)
-    if mask.ndim == 1:
-        mask = mask.unsqueeze(0)
-    return actions * mask.expand_as(actions)
 
 
 def _take_batch(order: torch.Tensor, start: int, size: int) -> torch.Tensor:
@@ -69,7 +61,7 @@ def train_discriminator(
     batch_size: int = 4096,
     action_mask: torch.Tensor | None = None,
 ) -> dict[str, float]:
-    """Binary cross-entropy: expert → 1, policy → 0."""
+    """Binary cross-entropy: expert → 1, policy → 0 (legacy)."""
     expert_act = apply_action_mask(expert_act, action_mask)
     policy_act = apply_action_mask(policy_act, action_mask)
     n_e = expert_obs.shape[0]

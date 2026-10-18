@@ -19,8 +19,8 @@ Write-Host " プロジェクト: $(Get-Location)"
 Write-Host ""
 Write-Host " この画面はログです。閉じずに待ってください。"
 Write-Host ""
-Write-Host "   1  模倣学習（トロット教師 → BC / GAIL）。デモ保存の有無を選べます"
-Write-Host "      保存先: logs\<手法>_curriculum_walk_easy\ （bc_trot.pt / gail_trot.pt / デモ mp4）"
+Write-Host "   1  模倣学習（トロット教師 → BC / ValueDICE）。デモ保存の有無を選べます"
+Write-Host "      保存先: logs\<手法>_curriculum_walk_easy\ （bc_trot.pt / valuedice_trot.pt / デモ mp4）"
 Write-Host "   2  学習。段階を選んでから回数を入れる"
 Write-Host "      歩行、到達、歩きながら持つ、箱運び、キャッチ。到達と持ち歩きは歩行から、キャッチは到達から続ける。"
 Write-Host "      歩行は平地から始めて地形へ広げ、腕を動かしながら歩く。腕は Z1。観測 81、行動 17（CPG+腕）。"
@@ -234,24 +234,28 @@ function Ask-BcWarmStart {
     $script:runGailFirst = $false
     $script:initFromArgs = @()
     Write-Host "   1  トロット教師を BC してから PPO（推奨・初回。PPO は iteration 0 から）"
-    Write-Host "   2  トロット教師を GAIL してから PPO（PPO は iteration 0 から）"
-    Write-Host "   3  既存の bc_trot.pt / gail_trot.pt / PPO 重みから PPO のみ"
+    Write-Host "   2  トロット教師を ValueDICE してから PPO（PPO は iteration 0 から）"
+    Write-Host "   3  既存の bc_trot.pt / valuedice_trot.pt / PPO 重みから PPO のみ"
     Write-Host "   4  ゼロから PPO のみ"
     Write-Host "   （模倣学習だけ・デモ再生だけはメニュー 1）"
-    Write-Host "   （続き学習は 3。1/2 を選ぶと BC/GAIL のあと PPO を iteration 0 からやり直します）"
+    Write-Host "   （続き学習は 3。1/2 を選ぶと BC/ValueDICE のあと PPO を iteration 0 からやり直します）"
     $answer = Read-Host "初期化 [1]"
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = "1" }
     if ($answer -eq "2") {
         $script:runGailFirst = $true
-        Write-Host "先にトロット教師のデモを集めて GAIL し、デモ動画のあと PPO を始めます（既存 ppo_*.pt は使いません）。"
+        Write-Host "先にトロット教師のデモを集めて ValueDICE し、デモ動画のあと PPO を始めます（既存 ppo_*.pt は使いません）。"
     } elseif ($answer -eq "3") {
         $folder = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
+        $valuedice = Join-Path $folder "valuedice_trot.pt"
         $gail = Join-Path $folder "gail_trot.pt"
         $bc = Join-Path $folder "bc_trot.pt"
         $hasPpo = @(Get-ChildItem -Path $folder -Filter "ppo_*.pt" -File -ErrorAction SilentlyContinue).Count -gt 0
         $imit = $null
         $kind = ""
-        if (Test-Path $gail) {
+        if (Test-Path $valuedice) {
+            $imit = $valuedice
+            $kind = "ValueDICE"
+        } elseif (Test-Path $gail) {
             $imit = $gail
             $kind = "GAIL"
         } elseif (Test-Path $bc) {
@@ -275,7 +279,7 @@ function Ask-BcWarmStart {
         } elseif ($hasPpo) {
             Write-Host "既存の PPO を続行します。"
         } else {
-            Write-Host "gail_trot.pt / bc_trot.pt / ppo_*.pt が無いので、ゼロからになります。"
+            Write-Host "valuedice_trot.pt / gail_trot.pt / bc_trot.pt / ppo_*.pt が無いので、ゼロからになります。"
         }
     } elseif ($answer -eq "4") {
         Write-Host "模倣学習なしで PPO します（既存 ppo があれば --resume latest で続きます）。"
@@ -315,14 +319,14 @@ function Ask-EnvCoef {
 function Ask-DiscEpochs {
     param([int]$Default = 4)
     while ($true) {
-        $raw = Read-Host "disc-epochs (discriminator updates/iter) [$Default]"
+        $raw = Read-Host "nu-epochs (ValueDICE nu updates/iter) [$Default]"
         if ([string]::IsNullOrWhiteSpace($raw)) { $raw = "$Default" }
         $parsed = 0
         if (-not [int]::TryParse($raw, [ref]$parsed) -or $parsed -lt 1) {
             Write-Host "Enter an integer >= 1."
             continue
         }
-        Write-Host "disc-epochs: $parsed"
+        Write-Host "nu-epochs: $parsed"
         return $parsed
     }
 }
@@ -330,14 +334,14 @@ function Ask-DiscEpochs {
 function Ask-GailIterations {
     param([int]$Default = 1000)
     while ($true) {
-        $raw = Read-Host "GAIL iterations [$Default]"
+        $raw = Read-Host "ValueDICE iterations [$Default]"
         if ([string]::IsNullOrWhiteSpace($raw)) { $raw = "$Default" }
         $parsed = 0
         if (-not [int]::TryParse($raw, [ref]$parsed) -or $parsed -lt 1) {
             Write-Host "Enter an integer >= 1."
             continue
         }
-        Write-Host "GAIL iterations: $parsed"
+        Write-Host "ValueDICE iterations: $parsed"
         return $parsed
     }
 }
@@ -380,7 +384,7 @@ function Open-BcDemos {
     param([string]$LogDirRel)
     $folder = Join-Path (Get-Location) ($LogDirRel -replace "/", "\")
     $videosRoot = Join-Path $folder "videos"
-    $reels = @("trot_teacher_demo.mp4", "bc_trot_demo.mp4", "gail_trot_demo.mp4")
+    $reels = @("trot_teacher_demo.mp4", "bc_trot_demo.mp4", "valuedice_trot_demo.mp4", "gail_trot_demo.mp4")
     $opened = 0
     # Prefer new layout: videos/<task>/<kind>_ep####_iter######_stamp/*.mp4
     if (Test-Path $videosRoot) {
@@ -600,7 +604,7 @@ $code = 0
 switch ($choice) {
     "1" {
         Write-Host ""
-        Write-Host "模倣学習（トロット教師 → BC / GAIL）。保存先は logs\<手法>_curriculum_walk_easy です。"
+        Write-Host "模倣学習（トロット教師 → BC / ValueDICE）。保存先は logs\<手法>_curriculum_walk_easy です。"
         Select-Algo
         $script:stage = "walk"
         $script:easyWalk = $true
@@ -609,8 +613,8 @@ switch ($choice) {
         Set-LogDirFromStage
         Write-Host "保存先: $($script:logDir -replace '/', '\')"
         Write-Host "   1  BC を実行（推奨・初回。デモの有無を選べます）"
-        Write-Host "   2  GAIL を実行（識別器＋PPO。必要なら BC で温める）"
-        Write-Host "   3  既存の重みでデモを再生（bc_trot.pt / gail_trot.pt）"
+        Write-Host "   2  ValueDICE を実行（ν＋PPO。必要なら BC で温める）"
+        Write-Host "   3  既存の重みでデモを再生（bc_trot.pt / valuedice_trot.pt）"
         Write-Host "   4  教師デモだけ録画（立つ/座る/ジャンプ/前後/旋回/停止）"
         Write-Host "   5  既存のデモ動画だけ開く（学習なし）"
         $bcPick = Read-Host "模倣学習 [1]"
@@ -618,34 +622,40 @@ switch ($choice) {
         $logDir = $script:logDir
         if ($bcPick -eq "2") {
             $demoArgs = Ask-TeacherDemoSave
-            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
+            if (-not (Test-Path $gailPath)) {
+                $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            }
             $resumeArgs = @()
             $bcEpochs = 3000
             if (Test-Path $gailPath) {
-                Write-Host "既存の gail_trot.pt があります。"
+                Write-Host "既存の valuedice_trot.pt / gail_trot.pt があります。"
                 Write-Host "   1  最初から（BC 温め直し）"
                 Write-Host "   2  追加学習（続きから・iter 数は次で指定）"
-                $gailMode = Read-Host "GAIL [1]"
+                $gailMode = Read-Host "ValueDICE [1]"
                 if ($gailMode -eq "2") {
                     $resumeArgs = @("--resume", "latest")
                     $bcEpochs = 0
-                    Write-Host "gail_trot.pt から追加学習します。"
+                    Write-Host "既存の模倣重みから追加学習します。"
                 }
             }
-            Write-Host "デモを集め（約90秒相当）てから GAIL を実行します。"
+            Write-Host "デモを集め（約90秒相当）てから ValueDICE を実行します。"
             if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
             $gailIters = Ask-GailIterations -Default 1000
             $envCoef = Ask-EnvCoef -Default 10
             $discEpochs = Ask-DiscEpochs -Default 4
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --disc-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --nu-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) {
                 Open-Mlflow
                 if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
-                Write-Host "続けてメニュー 2 → 歩行 → 簡単 →「既存の重みから PPO」を選ぶと gail_trot.pt を使えます。"
+                Write-Host "続けてメニュー 2 → 歩行 → 簡単 →「既存の重みから PPO」を選ぶと valuedice_trot.pt を使えます。"
             }
         } elseif ($bcPick -eq "3") {
-            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
+            if (-not (Test-Path $gailPath)) {
+                $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            }
             if (Test-Path $gailPath) {
                 & $python -u -m pick_and_carry.train_gail --easy-walk --demo-only bc --log-dir $logDir @algoArgs @armArgs
             } else {
@@ -658,7 +668,10 @@ switch ($choice) {
             $code = $LASTEXITCODE
             if ($code -eq 0) { Open-BcDemos $logDir }
         } elseif ($bcPick -eq "5") {
-            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
+            if (-not (Test-Path $gailPath)) {
+                $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            }
             if (Test-Path $gailPath) {
                 & $python -u -m pick_and_carry.train_gail --easy-walk --demo-only all --save-demos all --log-dir $logDir @algoArgs @armArgs
             } else {
@@ -726,17 +739,20 @@ switch ($choice) {
             Write-Host "BC 完了。PPO は $bcPath から iteration 0 で開始します（既存の ppo_*.pt は使いません）。"
             & $python -u -m pick_and_carry.train_ppo --init-from $bcPath --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
         } elseif ($script:runGailFirst) {
-            Write-Host "トロット教師のデモを集めて模倣学習（GAIL）を実行します…"
+            Write-Host "トロット教師のデモを集めて模倣学習（ValueDICE）を実行します…"
             $demoArgs = Ask-TeacherDemoSave
             $gailEnvs = [Math]::Min(32, $numEnvs)
-            $gailPathResume = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            $gailPathResume = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
+            if (-not (Test-Path $gailPathResume)) {
+                $gailPathResume = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            }
             $resumeArgs = @()
             $bcEpochs = 3000
             if (Test-Path $gailPathResume) {
-                Write-Host "既存の gail_trot.pt があります。追加学習しますか？"
+                Write-Host "既存の valuedice_trot.pt / gail_trot.pt があります。追加学習しますか？"
                 Write-Host "   1  最初から（BC 温め直し）"
                 Write-Host "   2  追加学習（続きから・iter 数は次で指定）"
-                $gailMode = Read-Host "GAIL [1]"
+                $gailMode = Read-Host "ValueDICE [1]"
                 if ($gailMode -eq "2") {
                     $resumeArgs = @("--resume", "latest")
                     $bcEpochs = 0
@@ -746,12 +762,12 @@ switch ($choice) {
             $gailIters = Ask-GailIterations -Default 1000
             $envCoef = Ask-EnvCoef -Default 10
             $discEpochs = Ask-DiscEpochs -Default 4
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --disc-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --nu-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
             if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
-            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
-            Write-Host "GAIL 完了。PPO は $gailPath から iteration 0 で開始します（既存の ppo_*.pt は使いません）。"
+            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
+            Write-Host "ValueDICE 完了。PPO は $gailPath から iteration 0 で開始します（既存の ppo_*.pt は使いません）。"
             & $python -u -m pick_and_carry.train_ppo --init-from $gailPath --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
         } else {
             if ($script:initFromArgs.Count -gt 0) {
@@ -788,9 +804,10 @@ switch ($choice) {
         } elseif ($script:easyWalk) {
             $folder = Join-Path (Get-Location) ($logDir -replace "/", "\")
             $bcPath = Join-Path $folder "bc_trot.pt"
-            $gailPath = Join-Path $folder "gail_trot.pt"
+            $gailPath = Join-Path $folder "valuedice_trot.pt"
+            if (-not (Test-Path $gailPath)) { $gailPath = Join-Path $folder "gail_trot.pt" }
             Write-Host "   1  PPO の最新重みを再生（iteration $script:activeIter）"
-            Write-Host "   2  模倣の gail_trot.pt / bc_trot.pt を再生"
+            Write-Host "   2  模倣の valuedice_trot.pt / bc_trot.pt を再生"
             Write-Host "   3  箱運びの途中経過を並べた比較動画（追加学習なし）"
             $playPick = Read-Host "手法 [1]"
             if ([string]::IsNullOrWhiteSpace($playPick)) { $playPick = "1" }
@@ -799,7 +816,7 @@ switch ($choice) {
                 if (Test-Path $gailPath) { $imitPath = $gailPath }
                 elseif (Test-Path $bcPath) { $imitPath = $bcPath }
                 if ($null -eq $imitPath) {
-                    Write-Host "gail_trot.pt / bc_trot.pt がありません。先にメニュー 1 で模倣学習してください。"
+                    Write-Host "valuedice_trot.pt / gail_trot.pt / bc_trot.pt がありません。先にメニュー 1 で模倣学習してください。"
                     $code = 1
                 } else {
                     Write-Host "再生する重み: $imitPath"

@@ -48,7 +48,7 @@ Genesis がなくても、報酬と方策のテストは通ります。
 
 | 番号 | 内容 | 主な出力 |
 | --- | --- | --- |
-| 1 | 模倣学習（トロット教師 → BC / GAIL）。デモ保存の有無を選べる。終了後に MLflow も開く | `bc_trot.pt` / `gail_trot.pt`、`videos/...`、`logs/mlflow` |
+| 1 | 模倣学習（トロット教師 → BC / ValueDICE）。デモ保存の有無を選べる。終了後に MLflow も開く | `bc_trot.pt` / `valuedice_trot.pt`、`videos/...`、`logs/mlflow` |
 | 2 | 段階を選んで学習（歩行 / 到達 / 持ち運び / 箱運び / キャッチ） | 各 `logs/{algo}_*` |
 | 3 | 推論。段階を選んで保存した重みを再生 | mp4（`videos/<タスク>/...`） |
 | 4 | 箱運びの途中経過を並べた比較動画 | `PickAndCarry_z1_compare.mp4` |
@@ -61,7 +61,7 @@ Genesis がなくても、報酬と方策のテストは通ります。
 
 2 番を選ぶと、次を順に聞きます。Enter は括弧内の既定です。
 
-1. カリキュラム段階（歩行 / 到達 / 持ち運び / 箱運び / キャッチ）。歩行→簡単では BC / GAIL 暖機も選べます。
+1. カリキュラム段階（歩行 / 到達 / 持ち運び / 箱運び / キャッチ）。歩行→簡単では BC / ValueDICE 暖機も選べます。
 2. 学習回数。今の iteration にこの回数を足します。
 3. 同時に動かすロボット数（既定 64）。
 4. 歩行では地形の高さ。到達以降は平地です。
@@ -78,25 +78,26 @@ Genesis がなくても、報酬と方策のテストは通ります。
 $env:PYTHONUTF8 = "1"
 # 1a) トロット教師 → BC。出力: logs/ppo_curriculum_walk_easy/bc_trot.pt
 .\.venv\Scripts\python.exe -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs 3000
-# 1b) トロット教師 → GAIL（BC 暖機あり）。出力: logs/ppo_curriculum_walk_easy/gail_trot.pt
-# 既定: --env-coef 10（歩行報酬を混ぜる） / --disc-epochs 4（識別器を方策より多めに更新）
-.\.venv\Scripts\python.exe -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs 3000 --iterations 1000
-# 追加学習（既存 gail_trot.pt から）
-.\.venv\Scripts\python.exe -m pick_and_carry.train_gail --easy-walk --resume latest --iterations 1000
-# 2) 模倣重みから easy-walk PPO（--init-from を省略すると gail_trot.pt → bc_trot.pt の順で自動採用）
+# 1b) トロット教師 → ValueDICE（BC 暖機あり）。出力: logs/ppo_curriculum_walk_easy/valuedice_trot.pt
+# 既定: --env-coef 10（歩行報酬を混ぜる） / --nu-epochs 4（ν を方策と同程度に更新）
+# （互換: python -m pick_and_carry.train_gail も同じ ValueDICE 入口）
+.\.venv\Scripts\python.exe -m pick_and_carry.train_valuedice --easy-walk --num-envs 32 --seconds 90 --bc-epochs 3000 --iterations 1000
+# 追加学習（既存 valuedice_trot.pt から）
+.\.venv\Scripts\python.exe -m pick_and_carry.train_valuedice --easy-walk --resume latest --iterations 1000
+# 2) 模倣重みから easy-walk PPO（--init-from を省略すると valuedice → gail → bc の順で自動採用）
 .\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --easy-walk --resume latest --num-envs 64 --iterations 1000 --num-steps 128 --save-interval 20 --curriculum walk --arm z1
 # 明示する場合:
-# --init-from logs/ppo_curriculum_walk_easy/gail_trot.pt
+# --init-from logs/ppo_curriculum_walk_easy/valuedice_trot.pt
 # --init-from logs/ppo_curriculum_walk_easy/bc_trot.pt
 ```
 
 起動メニュー:
 
-- **1** … 模倣学習（BC / GAIL）。教師デモ mp4 の保存有無を選べます。GAIL では BC エポック数・GAIL iterations・`env-coef` / `disc-epochs` も聞けます。学習曲線は PPO と同じ `logs/mlflow`（run 名 `bc-walk-easy` / `gail-walk-easy`）に残し、終了後に MLflow を開きます。動画は `logs/.../videos/<タスク>/<種別>_ep####_iter######_<時刻>/` に分けて保存（リール `*_demo.mp4` とスキル別クリップ）
-- **2 → 歩行 → 簡単 → BC / GAIL してから PPO** … 学習の一連（ここでも教師デモ保存の有無を選べます）
+- **1** … 模倣学習（BC / ValueDICE）。教師デモ mp4 の保存有無を選べます。ValueDICE では BC エポック数・iterations・`env-coef` / `nu-epochs` も聞けます。学習曲線は PPO と同じ `logs/mlflow` に残し、終了後に MLflow を開きます。動画は `logs/.../videos/<タスク>/<種別>_ep####_iter######_<時刻>/` に分けて保存（リール `*_demo.mp4` とスキル別クリップ）
+- **2 → 歩行 → 簡単 → BC / ValueDICE してから PPO** … 学習の一連（ここでも教師デモ保存の有無を選べます）
 - **3 → 歩行 → 簡単** … 模倣重みや教師デモの再生
 
-教師は立つ・座る・ジャンプ・前後進・左右旋回・停止と、対角トロット歩行を CPG パラメータ（10 次元）として出します。環境側の CPG が 12 関節指令へ展開します。GAIL は識別器報酬 `-log(1-D(s,a))` と歩行の環境報酬を混ぜて PPO を回します（既定 `--gail-coef 1 --env-coef 10`、識別器は `--disc-epochs 4`、BC 暖機あり）。純模倣にするなら `--env-coef 0`。`--easy-walk` で PPO チェックポイントが無いとき、`--init-from` 未指定なら `gail_trot.pt` があればそれを、無ければ `bc_trot.pt` を自動で載せます（起動スクリプトと同じ順）。
+教師は立つ・座る・ジャンプ・前後進・左右旋回・停止と、対角トロット歩行を CPG パラメータとして出します。環境側の CPG が 12 関節指令へ展開します。ValueDICE は ν(s,a) 双対損失で密度比を推定し、ν 報酬と歩行の環境報酬を混ぜて PPO を回します（既定 `--imit-coef 1 --env-coef 10`、`--nu-epochs 4`、BC 暖機あり）。純模倣にするなら `--env-coef 0`。`--easy-walk` で PPO チェックポイントが無いとき、`--init-from` 未指定なら `valuedice_trot.pt` → `gail_trot.pt` → `bc_trot.pt` の順で自動で載せます（起動スクリプトと同じ順）。
 
 再生は学習せず、保存した重みで mp4 を書きます。保存先は同様に `videos/<タスク>/<algo>_iter######_<時刻>/` です（起動フォルダ側にも同じ木をコピーします）。
 
@@ -116,7 +117,7 @@ $env:PYTHONUTF8 = "1"
 | `--terrain-amplitude 0.045` | 波または段の高さ（メートル） |
 | `--resume latest` | そのログフォルダの最新の適合する重みから続ける（iteration 数値順） |
 | `--init-from PATH` | 模倣重みなどから重みだけ載せて iteration 0 から PPO |
-| `--easy-walk` | 平坦・腕固定・押しなし。保存先 `*_walk_easy`。PPO 無し時は `gail_trot.pt` → `bc_trot.pt` を自動初期化 |
+| `--easy-walk` | 平坦・腕固定・押しなし。保存先 `*_walk_easy`。PPO 無し時は `valuedice_trot.pt` → `gail_trot.pt` → `bc_trot.pt` を自動初期化 |
 | `--play` | 学習せず再生する |
 | `--ros` | 推論だけ。状態を送り、実行中の運び先を受け取る。学習中に付けると止まる |
 
@@ -244,7 +245,9 @@ Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(
 | `pick_and_carry/agents.py` | PPO の方策と clip 付きの更新 |
 | `pick_and_carry/train_ppo.py` | 学習と再生（easy-walk の模倣自動初期化含む） |
 | `pick_and_carry/train_bc.py` | トロット教師デモの Behavioral Cloning |
-| `pick_and_carry/train_gail.py` | トロット教師デモの GAIL |
+| `pick_and_carry/train_valuedice.py` | トロット教師デモの ValueDICE（PPO 暖気用） |
+| `pick_and_carry/train_gail.py` | ValueDICE への互換エイリアス |
+| `pick_and_carry/valuedice.py` | ν ネットワークと双対損失 |
 | `pick_and_carry/checkpoints.py` | 重みの保存、互換する最新の探索、古い保存の退避 |
 | `pick_and_carry/difficulty.py` | 学習中の難しさ（地形、ボール）を、成績で上げ下げする |
 | `pick_and_carry/ros_bridge.py` | 推論中の状態送信と運び先の受信。ROS 自体は入れない |

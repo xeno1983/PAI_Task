@@ -173,6 +173,17 @@ class CpgTests(unittest.TestCase):
         # Pose biases (sit/jump) must survive the amp gate.
         self.assertTrue(torch.allclose(gated_still[:, 8], params[:, 8]))
 
+    def test_still_command_keeps_amp_gate_closed(self):
+        """Regression: after stand/jump, a walk command would re-open the amp gate."""
+        params = encode_cpg_params(amp=0.9, n=1)
+        still = torch.zeros(1, 3)
+        self.assertTrue(torch.allclose(gate_cpg_amp_by_command(params, still)[:, 1], torch.zeros(1)))
+        leaked = torch.tensor([[0.28, -0.20, 0.0]])
+        self.assertTrue(bool(command_is_moving(leaked).all()))
+        self.assertFalse(
+            torch.allclose(gate_cpg_amp_by_command(params, leaked)[:, 1], torch.zeros(1))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

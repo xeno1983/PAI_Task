@@ -227,7 +227,7 @@ def _latest_checkpoint_iteration(log_dir: Path, resume: str | None) -> int:
         match = re.search(r"(\d+)", path.stem)
         if match:
             best = max(best, int(match.group(1)))
-    for name in ("bc_trot.pt", "gail_trot.pt"):
+    for name in ("bc_trot.pt", "gail_trot.pt", "valuedice_trot.pt"):
         if (log_dir / name).is_file() and best == 0 and resume in (None, "latest", name, str(log_dir / name)):
             return 0
     return best
@@ -261,6 +261,8 @@ def prepare_record_path(args) -> None:
     resume = str(getattr(args, "resume", "") or "")
     if "bc_trot" in resume:
         kind = "bc"
+    elif "valuedice_trot" in resume:
+        kind = "valuedice"
     elif "gail_trot" in resume:
         kind = "gail"
     run_dir = make_video_run_dir(
@@ -396,7 +398,14 @@ def load_init_weights(path: Path, env, cfg, agent) -> str | None:
             f"need arm {cfg.arm} obs {env.num_obs} act {env.num_actions}."
         )
     agent.load_state_dict(blob["model"])
-    kind = "BC trot" if blob.get("bc_trot") else "init"
+    if blob.get("valuedice_trot"):
+        kind = "ValueDICE"
+    elif blob.get("gail_trot"):
+        kind = "GAIL"
+    elif blob.get("bc_trot"):
+        kind = "BC trot"
+    else:
+        kind = "init"
     print(f"{kind} weights from {ckpt} (PPO starts at iteration 0)", flush=True)
     return str(ckpt)
 
@@ -808,10 +817,10 @@ def main() -> None:
     init_from = getattr(args, "init_from", None)
     if resumed_from is None:
         # Auto-pick imitation warm-start in the easy-walk folder when no PPO checkpoint exists.
-        # Prefer GAIL over BC (same order as the launcher).
+        # Prefer ValueDICE, then legacy GAIL, then BC (same order as the launcher).
         if init_from is None and getattr(args, "easy_walk", False):
             log_dir = Path(args.log_dir)
-            for name in ("gail_trot.pt", "bc_trot.pt"):
+            for name in ("valuedice_trot.pt", "gail_trot.pt", "bc_trot.pt"):
                 candidate = log_dir / name
                 if candidate.is_file():
                     init_from = candidate

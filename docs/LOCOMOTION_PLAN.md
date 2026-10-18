@@ -242,8 +242,8 @@ legged_gym の標準の項目に置き換えた。重みは `config.py` の `Loc
 
 ### 9.2 模倣と PPO 暖機
 
-- `train_bc` / `train_gail` → `logs/{algo}_curriculum_walk_easy/` に `bc_trot.pt` / `gail_trot.pt`。
-- easy-walk の `train_ppo` で PPO が無く `--init-from` も無いとき、`gail_trot.pt` → `bc_trot.pt` の順で自動初期化（起動スクリプトと同じ）。
+- `train_bc` / `train_valuedice`（互換 `train_gail`）→ `logs/{algo}_curriculum_walk_easy/` に `bc_trot.pt` / `valuedice_trot.pt`。
+- easy-walk の `train_ppo` で PPO が無く `--init-from` も無いとき、`valuedice_trot.pt` → `gail_trot.pt` → `bc_trot.pt` の順で自動初期化（起動スクリプトと同じ）。
 
 ### 9.3 動画
 

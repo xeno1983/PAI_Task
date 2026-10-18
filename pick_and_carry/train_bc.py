@@ -169,6 +169,9 @@ def _demo_cfg(base_cfg, log_dir: Path, record_path: Path):
     cfg.push_robots = False
     cfg.randomize_friction = False
     cfg.num_envs = 1
+    # Full skill reel is ~43 s; default episode 20 s would timeout mid-clip and
+    # (before hold-aware reset) inject a walk command after stand/sit/jump.
+    cfg.episode_length_s = max(float(cfg.episode_length_s), 120.0)
     record_path = Path(record_path)
     record_path.parent.mkdir(parents=True, exist_ok=True)
     cfg.record_path = str(record_path.resolve())
@@ -343,7 +346,10 @@ def _record_bc_skill_clip(
     with torch.no_grad():
         for _ in range(steps):
             action = agent.act_mean(obs)
-            obs, _, _, _ = env.step(action)
+            obs, _, done, _ = env.step(action)
+            if bool(done.any()):
+                # Re-lock still/walk command after auto-reset (fall/timeout).
+                obs = env.set_commands(cmd, hold=True)
     env.close()
     return path
 
@@ -413,7 +419,9 @@ def _record_bc_reel(
             print(f"    … {skill} ({lengths[skill]:.1f}s)", flush=True)
             for _ in range(steps):
                 action = agent.act_mean(obs)
-                obs, _, _, _ = env.step(action)
+                obs, _, done, _ = env.step(action)
+                if bool(done.any()):
+                    obs = env.set_commands(cmd, hold=True)
     env.close()
     return path
 
