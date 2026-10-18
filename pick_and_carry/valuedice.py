@@ -1,12 +1,13 @@
 """ValueDICE-style imitation helpers (no GAN discriminator).
 
 ``NuNet`` ν(s, a) estimates a soft density-ratio dual. With next-state samples
-the residual form follows ValueDICE / DualDICE:
+the residual form follows DualDICE / ValueDICE with a **χ²** conjugate
+(more stable than the KL ``exp(δ−1)`` dual, which pinned ν to ±scale):
 
     δ = ν(s, a) − γ ν(s′, a′)
-    L = E_π[exp(δ − 1)] − E_E[ν(s, a)]
+    L = ½ E_π[δ²] − E_E[ν(s, a)] + λ (‖ν_E‖² + ‖ν_π‖²)
 
-and ν is used as a dense imitation reward for PPO (Kostrikov et al., ValueDICE).
+ν is used as a dense imitation reward for PPO (Kostrikov et al., ValueDICE).
 Hard clamps are avoided in the loss path; ``tanh`` soft bounds keep gradients alive.
 """
 
@@ -18,8 +19,10 @@ import torch.nn as nn
 from pick_and_carry.agents import mlp
 
 # Soft bound for ν in the dual loss / reward (gradients flow through tanh).
-_NU_SCALE = 10.0
-_REWARD_SCALE = 5.0
+_NU_SCALE = 5.0
+_REWARD_SCALE = 2.0
+# L2 on bounded ν — must be strong enough to fight −E_E[ν] racing to +scale.
+_NU_L2 = 5e-2
 
 
 def soft_bound(x: torch.Tensor, scale: float) -> torch.Tensor:
@@ -87,13 +90,13 @@ def train_nu(
     batch_size: int = 4096,
     action_mask: torch.Tensor | None = None,
 ) -> dict[str, float]:
-    """Minimize the ValueDICE dual residual (with optional next-state bootstrap).
+    """Minimize the χ² ValueDICE dual residual (optional next-state bootstrap).
 
     When ``next_obs`` / ``next_act`` are provided:
 
-        L = E_π[exp(ν(s,a) − γ ν(s′,a′) − 1)] − E_E[ν(s,a)]
+        L = ½ E_π[(ν(s,a) − γ ν(s′,a′))²] − E_E[ν(s, a)] + λ‖ν‖²
 
-    Otherwise falls back to the memoryless form ``E_π[exp(ν−1)] − E_E[ν]``.
+    Otherwise falls back to the memoryless form ``½ E_π[ν²] − E_E[ν] + λ‖ν‖²``.
     """
     expert_act = apply_action_mask(expert_act, action_mask)
     policy_act = apply_action_mask(policy_act, action_mask)
@@ -127,7 +130,12 @@ def train_nu(
                 delta = nu_p - float(gamma) * nu_n
             else:
                 delta = nu_p
-            loss = torch.exp(delta - 1.0).mean() - nu_e.mean()
+            # χ² conjugate: quadratic in δ (no exp blow-up toward ±scale).
+            loss = (
+                0.5 * delta.pow(2).mean()
+                - nu_e.mean()
+                + _NU_L2 * (nu_e.pow(2).mean() + nu_p.pow(2).mean())
+            )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(nu_net.parameters(), 1.0)

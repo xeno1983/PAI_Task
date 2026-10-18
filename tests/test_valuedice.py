@@ -25,7 +25,7 @@ class ValueDiceTests(unittest.TestCase):
         reward = nu.valuedice_reward(obs, act)
         self.assertEqual(tuple(reward.shape), (5,))
         self.assertTrue(torch.isfinite(reward).all())
-        self.assertTrue(float(reward.detach().abs().max()) <= 5.0 + 1e-5)
+        self.assertTrue(float(reward.detach().abs().max()) <= 2.0 + 1e-5)
 
     def test_soft_bound_keeps_gradients_at_extremes(self):
         x = torch.tensor([50.0, -50.0], requires_grad=True)
@@ -76,6 +76,56 @@ class ValueDiceTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(torch.tensor(metrics["nu_loss"])))
         self.assertTrue(torch.isfinite(torch.tensor(metrics["nu_delta"])))
 
+    def test_train_nu_stays_finite_with_large_outputs(self):
+        """χ² dual must stay finite even when ν starts near soft walls."""
+        nu = NuNet(8, 4, hidden=(32, 32))
+        with torch.no_grad():
+            for p in nu.parameters():
+                p.mul_(8.0)
+        opt = torch.optim.Adam(nu.parameters(), lr=1e-3)
+        n = 64
+        metrics = train_nu(
+            nu,
+            opt,
+            torch.randn(n, 8) * 3,
+            torch.randn(n, 4) * 3,
+            torch.randn(n, 8) * 3,
+            torch.randn(n, 4) * 3,
+            next_obs=torch.randn(n, 8) * 3,
+            next_act=torch.randn(n, 4) * 3,
+            gamma=0.99,
+            epochs=3,
+            batch_size=32,
+        )
+        self.assertTrue(torch.isfinite(torch.tensor(metrics["nu_loss"])))
+        self.assertLess(abs(float(metrics["nu_expert"])), 5.0 + 1e-4)
+        self.assertLess(abs(float(metrics["nu_policy"])), 5.0 + 1e-4)
+
+    def test_train_nu_matched_data_does_not_pin_to_walls(self):
+        """Identical expert/policy batches should keep |ν| well below soft walls."""
+        torch.manual_seed(0)
+        nu = NuNet(8, 4, hidden=(64, 64))
+        opt = torch.optim.Adam(nu.parameters(), lr=3e-4)
+        n = 128
+        obs = torch.randn(n, 8)
+        act = torch.randn(n, 4)
+        for _ in range(40):
+            metrics = train_nu(
+                nu,
+                opt,
+                obs,
+                act,
+                obs,
+                act,
+                next_obs=obs,
+                next_act=act,
+                gamma=0.99,
+                epochs=1,
+                batch_size=64,
+            )
+        self.assertLess(abs(float(metrics["nu_expert"])), 3.0)
+        self.assertLess(abs(float(metrics["nu_policy"])), 3.0)
+
     def test_resume_helpers_accept_valuedice_latest(self):
         import tempfile
         from pathlib import Path
@@ -94,6 +144,21 @@ class ValueDiceTests(unittest.TestCase):
             self.assertEqual(_resolve_resume_path("latest", log_dir, missing), legacy)
         self.assertEqual(_valuedice_iteration({"valuedice_iteration": 12, "iteration": 0}), 12)
         self.assertEqual(_valuedice_iteration({"gail_iteration": 7}), 7)
+
+    def test_resolve_init_from_bc_latest(self):
+        import tempfile
+        from pathlib import Path
+
+        from pick_and_carry.train_valuedice import _resolve_init_from
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            bc = log_dir / "bc_trot.pt"
+            bc.write_bytes(b"bc")
+            self.assertEqual(_resolve_init_from("latest", log_dir), bc)
+            self.assertEqual(_resolve_init_from("bc", log_dir), bc)
+            self.assertEqual(_resolve_init_from(str(bc), log_dir), bc)
+            self.assertIsNone(_resolve_init_from(None, log_dir))
 
 
 if __name__ == "__main__":

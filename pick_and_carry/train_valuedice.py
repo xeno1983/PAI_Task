@@ -8,8 +8,12 @@ Optional BC warm-start (recommended on a fresh run):
 
     python -m pick_and_carry.train_valuedice --easy-walk --bc-epochs 3000 --iterations 1000
 
+Reuse a saved BC checkpoint (skips BC training by default):
+
+    python -m pick_and_carry.train_valuedice --easy-walk --init-from latest --iterations 1000
+
 Defaults mix walk env reward (``--env-coef 10``) with the ν imitation signal
-and run ``--nu-epochs 4`` ν passes per PPO iteration.
+and run ``--nu-epochs 1`` χ²-dual ν pass per PPO iteration.
 
 Continue from an existing ``valuedice_trot.pt`` (skips BC by default):
 
@@ -61,14 +65,15 @@ def parse_args(argv: list[str] | None = None):
         "--bc-epochs",
         type=int,
         default=None,
-        help="BC warm-start epochs before ValueDICE. Default 3000 on a fresh run, 0 when --resume. 0 skips.",
+        help="BC warm-start epochs before ValueDICE. Default 3000 on a fresh run, "
+        "0 when --resume or --init-from. 0 skips.",
     )
     parser.add_argument("--bc-batch-size", type=int, default=4096)
     parser.add_argument(
         "--nu-epochs",
         type=int,
         default=None,
-        help="ν network passes per iteration. Default 4 (or --disc-epochs if set).",
+        help="ν network passes per iteration. Default 1 (or --disc-epochs if set).",
     )
     parser.add_argument(
         "--disc-epochs",
@@ -128,6 +133,14 @@ def parse_args(argv: list[str] | None = None):
         default=None,
         help="Continue from checkpoint: 'latest' (= valuedice_trot.pt / gail_trot.pt) or a .pt path.",
     )
+    parser.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="Load policy weights only (e.g. bc_trot.pt) then start ValueDICE at iteration 0. "
+        "'latest' / 'bc' = <log-dir>/bc_trot.pt. Ignored when --resume is set. "
+        "Default --bc-epochs becomes 0 when this is set.",
+    )
     parser.add_argument("--frequency", type=float, default=2.5)
     parser.add_argument("--demo-seconds", type=float, default=0.0)
     parser.add_argument("--play-seconds", type=float, default=None)
@@ -148,7 +161,7 @@ def parse_args(argv: list[str] | None = None):
     args = parser.parse_args(argv)
     # Resolve aliases.
     args.nu_epochs = int(
-        args.nu_epochs if args.nu_epochs is not None else (args.disc_epochs if args.disc_epochs is not None else 4)
+        args.nu_epochs if args.nu_epochs is not None else (args.disc_epochs if args.disc_epochs is not None else 1)
     )
     args.nu_batch_size = int(
         args.nu_batch_size
@@ -184,6 +197,21 @@ def _resolve_resume_path(resume: str | None, log_dir: Path, output: Path) -> Pat
     return path
 
 
+def _resolve_init_from(init_from: str | None, log_dir: Path) -> Path | None:
+    """Resolve ``--init-from`` to a policy checkpoint (typically ``bc_trot.pt``)."""
+    if not init_from:
+        return None
+    if init_from in ("latest", "bc", "bc_trot"):
+        path = log_dir / "bc_trot.pt"
+        if not path.is_file():
+            raise SystemExit(f"--init-from latest ですが BC 重みがありません: {path}")
+        return path
+    path = Path(init_from)
+    if not path.is_file():
+        raise SystemExit(f"--init-from のファイルがありません: {path}")
+    return path
+
+
 def _valuedice_iteration(blob: dict) -> int:
     if "valuedice_iteration" in blob:
         return int(blob["valuedice_iteration"])
@@ -209,11 +237,13 @@ def _save_valuedice_blob(
     algo: str,
     easy: bool,
 ) -> None:
+    # Print the ValueDICE progress counter; rewrite ``iteration`` to 0 below so
+    # ``train_ppo --init-from`` still starts task PPO from zero.
     save_checkpoint(
         path,
         agent,
         optimizer,
-        iteration=0,  # PPO --init-from always starts task PPO at 0
+        iteration=int(iteration),
         obs_dim=obs_dim,
         act_dim=act_dim,
         arm=arm,
@@ -221,6 +251,7 @@ def _save_valuedice_blob(
         algo=algo,
     )
     blob = torch.load(path, map_location="cpu", weights_only=False)
+    blob["iteration"] = 0
     blob["valuedice_trot"] = True
     blob["gail_trot"] = True  # warm-start / play paths that still look for this flag
     blob["bc_trot"] = True
@@ -363,6 +394,8 @@ def run_valuedice(
         span = max(1, args.iterations)
         if iteration == start_iteration + 1 or iteration % max(1, span // 20) == 0 or iteration == last_iteration:
             nu_loss = float(nu_metrics["nu_loss"])
+            nu_e = float(nu_metrics["nu_expert"])
+            nu_p = float(nu_metrics["nu_policy"])
             pi_loss = float(metrics["policy_loss"])
             prev = prev_log or {}
             print(
@@ -371,6 +404,7 @@ def run_valuedice(
                 f"{format_metric('r_env', r_env, prev.get('r_env'), higher_is_better=True, fmt='.3f')}  "
                 f"{format_metric('r_mix', r_mix, prev.get('r_mix'), higher_is_better=True, fmt='.3f')}  "
                 f"{format_metric('nu_loss', nu_loss, prev.get('nu_loss'), higher_is_better=False, fmt='.3f')}  "
+                f"nu_e {nu_e:.2f} nu_p {nu_p:.2f}  "
                 f"pi_loss {pi_loss:.3f}  "
                 f"{elapsed:.1f}s",
                 flush=True,
@@ -474,6 +508,7 @@ def main(argv: list[str] | None = None) -> None:
     nu_net = NuNet(int(expert_obs.shape[-1]), int(expert_act.shape[-1])).to(device)
 
     start_iteration = 0
+    init_path: Path | None = None
     if resume_path is not None:
         blob = torch_load(resume_path, device)
         if int(blob.get("obs_dim", -1)) != int(expert_obs.shape[-1]) or int(blob.get("act_dim", -1)) != int(
@@ -493,9 +528,35 @@ def main(argv: list[str] | None = None) -> None:
             print("checkpoint に ν が無いので、ν だけ新規です。", flush=True)
         start_iteration = _valuedice_iteration(blob)
         print(f"resumed ValueDICE from {resume_path} at iteration={start_iteration}", flush=True)
+        if args.init_from:
+            print(f"--init-from {args.init_from} は --resume があるため無視します。", flush=True)
+    else:
+        init_path = _resolve_init_from(args.init_from, ns.log_dir)
+        if init_path is not None:
+            blob = torch_load(init_path, device)
+            if int(blob.get("obs_dim", -1)) != int(expert_obs.shape[-1]) or int(blob.get("act_dim", -1)) != int(
+                expert_act.shape[-1]
+            ):
+                raise SystemExit(
+                    f"--init-from {init_path} は obs/act "
+                    f"{blob.get('obs_dim')}/{blob.get('act_dim')} で、"
+                    f"今の環境は {expert_obs.shape[-1]}/{expert_act.shape[-1]} です。"
+                )
+            agent.load_state_dict(blob["model"])
+            if blob.get("bc_trot"):
+                kind = "BC"
+            elif blob.get("valuedice_trot") or blob.get("gail_trot"):
+                kind = "ValueDICE/GAIL policy"
+            else:
+                kind = "init"
+            print(
+                f"{kind} weights from {init_path.resolve()} "
+                f"(ValueDICE starts at iteration 0, BC retrain skipped by default)",
+                flush=True,
+            )
 
     if args.bc_epochs is None:
-        bc_epochs = 0 if resume_path is not None else 3000
+        bc_epochs = 0 if (resume_path is not None or init_path is not None) else 3000
     else:
         bc_epochs = int(args.bc_epochs)
 
@@ -522,10 +583,12 @@ def main(argv: list[str] | None = None) -> None:
             "nu_epochs": args.nu_epochs,
             "demo_seconds": args.seconds,
             "resumed_from": str(resume_path) if resume_path is not None else None,
+            "init_from": str(init_path) if init_path is not None else None,
         },
     )
     teacher_demos_done = False
     try:
+        bc_path = ns.log_dir / "bc_trot.pt"
         if bc_epochs > 0:
             print(f"BC warm-start epochs={bc_epochs}…", flush=True)
             train_bc(
@@ -538,7 +601,6 @@ def main(argv: list[str] | None = None) -> None:
                 action_mask=mask,
                 tracker=tracker,
             )
-            bc_path = ns.log_dir / "bc_trot.pt"
             _save_bc_warmstart_checkpoint(
                 bc_path,
                 agent=agent,
@@ -550,32 +612,33 @@ def main(argv: list[str] | None = None) -> None:
             )
             tracker.log_checkpoint(bc_path)
             print(f"saved BC warm-start checkpoint {bc_path.resolve()}", flush=True)
-            # Mid-run videos of the BC result (before ValueDICE overwrites the policy).
-            # Close the training env first — Genesis is effectively one scene.
-            mid_which = _resolve_demo_which("none", args.save_demos)
-            if mid_which is not None:
-                env.close()
-                teacher_demos_done = _record_save_demos(
-                    cfg,
-                    args=args,
-                    log_dir=ns.log_dir,
-                    demo_seconds=demo_seconds,
-                    easy=easy,
-                    agent=agent,
-                    kind="bc",
-                    epochs=bc_epochs,
-                    iteration=0,
-                    checkpoint_name=bc_path.name,
-                    rename_to_valuedice=False,
-                    include_teacher=True,
-                    include_policy=True,
-                )
-                env = PickAndCarryEnv(cfg=cfg)
-                device = env.device
-                expert_obs = expert_obs.to(device)
-                expert_act = expert_act.to(device)
-                agent = agent.to(device)
-                nu_net = nu_net.to(device)
+
+        # Mid-run videos of the BC policy (trained now, or loaded via --init-from).
+        record_bc_demos = bc_epochs > 0 or init_path is not None
+        mid_which = _resolve_demo_which("none", args.save_demos) if record_bc_demos else None
+        if mid_which is not None:
+            env.close()
+            teacher_demos_done = _record_save_demos(
+                cfg,
+                args=args,
+                log_dir=ns.log_dir,
+                demo_seconds=demo_seconds,
+                easy=easy,
+                agent=agent,
+                kind="bc",
+                epochs=bc_epochs if bc_epochs > 0 else None,
+                iteration=0,
+                checkpoint_name=(init_path.name if init_path is not None and bc_epochs <= 0 else bc_path.name),
+                rename_to_valuedice=False,
+                include_teacher=True,
+                include_policy=True,
+            )
+            env = PickAndCarryEnv(cfg=cfg)
+            device = env.device
+            expert_obs = expert_obs.to(device)
+            expert_act = expert_act.to(device)
+            agent = agent.to(device)
+            nu_net = nu_net.to(device)
 
         finished = run_valuedice(
             env=env,

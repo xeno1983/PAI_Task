@@ -317,7 +317,7 @@ function Ask-EnvCoef {
 }
 
 function Ask-DiscEpochs {
-    param([int]$Default = 4)
+    param([int]$Default = 1)
     while ($true) {
         $raw = Read-Host "nu-epochs (ValueDICE nu updates/iter) [$Default]"
         if ([string]::IsNullOrWhiteSpace($raw)) { $raw = "$Default" }
@@ -361,6 +361,63 @@ function Ask-BcEpochs {
     }
     Write-Host "BC エポック数: $epochs"
     return $epochs
+}
+
+function Ask-ValueDiceWarmStart {
+    param([string]$LogDirRel)
+    # Sets script:vdResumeArgs / vdInitFromArgs / vdBcEpochs for train_gail / train_valuedice.
+    $script:vdResumeArgs = @()
+    $script:vdInitFromArgs = @()
+    $script:vdBcEpochs = 3000
+    $folder = Join-Path (Get-Location) ($LogDirRel -replace "/", "\")
+    $valuedice = Join-Path $folder "valuedice_trot.pt"
+    if (-not (Test-Path $valuedice)) { $valuedice = Join-Path $folder "gail_trot.pt" }
+    $bc = Join-Path $folder "bc_trot.pt"
+    $hasVd = Test-Path $valuedice
+    $hasBc = Test-Path $bc
+    if ($hasVd -and $hasBc) {
+        Write-Host "既存の valuedice_trot.pt / bc_trot.pt があります。"
+        Write-Host "   1  保存済み BC から ValueDICE（BC 再学習なし）"
+        Write-Host "   2  ValueDICE 追加学習（続きから）"
+        Write-Host "   3  BC からやり直して ValueDICE"
+        $mode = Read-Host "ValueDICE [1]"
+        if ([string]::IsNullOrWhiteSpace($mode)) { $mode = "1" }
+        if ($mode -eq "2") {
+            $script:vdResumeArgs = @("--resume", "latest")
+            $script:vdBcEpochs = 0
+            Write-Host "既存の ValueDICE 重みから追加学習します。"
+        } elseif ($mode -eq "3") {
+            $script:vdBcEpochs = 3000
+            Write-Host "BC を温め直してから ValueDICE します。"
+        } else {
+            $script:vdInitFromArgs = @("--init-from", "latest")
+            $script:vdBcEpochs = 0
+            Write-Host "bc_trot.pt を読み込み、ValueDICE のみ実行します。"
+        }
+    } elseif ($hasVd) {
+        Write-Host "既存の valuedice_trot.pt / gail_trot.pt があります。"
+        Write-Host "   1  最初から（BC 温め直し）"
+        Write-Host "   2  追加学習（続きから・iter 数は次で指定）"
+        $mode = Read-Host "ValueDICE [1]"
+        if ($mode -eq "2") {
+            $script:vdResumeArgs = @("--resume", "latest")
+            $script:vdBcEpochs = 0
+            Write-Host "既存の模倣重みから追加学習します。"
+        }
+    } elseif ($hasBc) {
+        Write-Host "既存の bc_trot.pt があります。"
+        Write-Host "   1  保存済み BC から ValueDICE（BC 再学習なし）"
+        Write-Host "   2  BC からやり直して ValueDICE"
+        $mode = Read-Host "ValueDICE [1]"
+        if ($mode -eq "2") {
+            $script:vdBcEpochs = 3000
+            Write-Host "BC を温め直してから ValueDICE します。"
+        } else {
+            $script:vdInitFromArgs = @("--init-from", "latest")
+            $script:vdBcEpochs = 0
+            Write-Host "bc_trot.pt を読み込み、ValueDICE のみ実行します。"
+        }
+    }
 }
 
 function Get-VideoTaskName {
@@ -622,29 +679,14 @@ switch ($choice) {
         $logDir = $script:logDir
         if ($bcPick -eq "2") {
             $demoArgs = Ask-TeacherDemoSave
-            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
-            if (-not (Test-Path $gailPath)) {
-                $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
-            }
-            $resumeArgs = @()
-            $bcEpochs = 3000
-            if (Test-Path $gailPath) {
-                Write-Host "既存の valuedice_trot.pt / gail_trot.pt があります。"
-                Write-Host "   1  最初から（BC 温め直し）"
-                Write-Host "   2  追加学習（続きから・iter 数は次で指定）"
-                $gailMode = Read-Host "ValueDICE [1]"
-                if ($gailMode -eq "2") {
-                    $resumeArgs = @("--resume", "latest")
-                    $bcEpochs = 0
-                    Write-Host "既存の模倣重みから追加学習します。"
-                }
-            }
+            Ask-ValueDiceWarmStart $logDir
+            $bcEpochs = $script:vdBcEpochs
             Write-Host "デモを集め（約90秒相当）てから ValueDICE を実行します。"
             if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
             $gailIters = Ask-GailIterations -Default 1000
             $envCoef = Ask-EnvCoef -Default 10
-            $discEpochs = Ask-DiscEpochs -Default 4
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --nu-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
+            $discEpochs = Ask-DiscEpochs -Default 1
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --nu-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @($script:vdResumeArgs) @($script:vdInitFromArgs)
             $code = $LASTEXITCODE
             if ($code -eq 0) {
                 Open-Mlflow
@@ -742,27 +784,13 @@ switch ($choice) {
             Write-Host "トロット教師のデモを集めて模倣学習（ValueDICE）を実行します…"
             $demoArgs = Ask-TeacherDemoSave
             $gailEnvs = [Math]::Min(32, $numEnvs)
-            $gailPathResume = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
-            if (-not (Test-Path $gailPathResume)) {
-                $gailPathResume = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
-            }
-            $resumeArgs = @()
-            $bcEpochs = 3000
-            if (Test-Path $gailPathResume) {
-                Write-Host "既存の valuedice_trot.pt / gail_trot.pt があります。追加学習しますか？"
-                Write-Host "   1  最初から（BC 温め直し）"
-                Write-Host "   2  追加学習（続きから・iter 数は次で指定）"
-                $gailMode = Read-Host "ValueDICE [1]"
-                if ($gailMode -eq "2") {
-                    $resumeArgs = @("--resume", "latest")
-                    $bcEpochs = 0
-                }
-            }
+            Ask-ValueDiceWarmStart $logDir
+            $bcEpochs = $script:vdBcEpochs
             if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
             $gailIters = Ask-GailIterations -Default 1000
             $envCoef = Ask-EnvCoef -Default 10
-            $discEpochs = Ask-DiscEpochs -Default 4
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --nu-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
+            $discEpochs = Ask-DiscEpochs -Default 1
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --nu-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @($script:vdResumeArgs) @($script:vdInitFromArgs)
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
             if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
