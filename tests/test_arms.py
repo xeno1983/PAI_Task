@@ -1,4 +1,4 @@
-"""The arm is the Unitree Z1: observation 81, action 19."""
+"""The arm is the Unitree Z1: observation 81, action CPG+arm (17)."""
 
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ class ArmLayoutTests(unittest.TestCase):
     def test_only_the_z1_is_available(self):
         z1 = get_arm("z1")
         self.assertEqual(z1.num_obs, 81)
-        self.assertEqual(z1.num_actions, 19)
+        self.assertEqual(z1.num_actions, 17)
         self.assertEqual(NUM_OBS, 81)
-        self.assertEqual(NUM_ACTIONS, 19)
+        self.assertEqual(NUM_ACTIONS, 17)
         with self.assertRaises(ValueError):
             get_arm("panda")
 
@@ -27,7 +27,7 @@ class ArmLayoutTests(unittest.TestCase):
         z1 = get_arm("z1")
         self.assertEqual(z1.dof, 6)
         self.assertEqual(z1.num_obs, 81)
-        self.assertEqual(z1.num_actions, 19)
+        self.assertEqual(z1.num_actions, 17)
         root = ET.parse(z1.urdf_path).getroot()
         mass = 0.0
         for link in root.findall("link"):

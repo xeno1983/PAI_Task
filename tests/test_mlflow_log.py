@@ -33,7 +33,7 @@ class LocalTrackerTests(unittest.TestCase):
                         "catch_level": "static",
                         "arm": "z1",
                         "obs_dim": 69,
-                        "act_dim": 19,
+                        "act_dim": 17,
                         "num_envs": 16,
                         "start_iteration": 0,
                         "resumed_from": str(log_dir.parent / "ppo_curriculum_sit" / "ppo_0100.pt"),
@@ -51,7 +51,7 @@ class LocalTrackerTests(unittest.TestCase):
                 self.assertEqual(len(runs), 1)
                 self.assertEqual(runs.iloc[0]["params.curriculum"], "walk")
                 self.assertEqual(runs.iloc[0]["params.obs_dim"], "69")
-                self.assertEqual(runs.iloc[0]["params.act_dim"], "19")
+                self.assertEqual(runs.iloc[0]["params.act_dim"], "17")
                 self.assertIn("ppo_0100.pt", runs.iloc[0]["tags.resumed_from"])
                 self.assertAlmostEqual(float(runs.iloc[0]["metrics.reward"]), 1.5)
                 artifacts = mlflow.artifacts.list_artifacts(

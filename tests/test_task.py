@@ -33,7 +33,7 @@ class LayoutTests(unittest.TestCase):
     def test_dimensions(self):
         self.assertEqual(layout_dim(OBS_LAYOUT), 81)
         self.assertEqual(NUM_OBS, 81)
-        self.assertEqual(NUM_ACTIONS, 19)
+        self.assertEqual(NUM_ACTIONS, 17)
 
 
 class GeometryTests(unittest.TestCase):
@@ -150,7 +150,7 @@ class RewardTests(unittest.TestCase):
 
     def test_walk_mode_drops_manipulation_reward(self):
         n = 1
-        cfg = EnvConfig(control_split="walk", scripted_gait=False)
+        cfg = EnvConfig(control_split="walk")
         zeros = torch.zeros(n, 3)
         reward, terms, *_ = task_reward(
             ee_pos=zeros,

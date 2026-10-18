@@ -59,8 +59,6 @@ def parse_args():
     parser.add_argument("--control-split", choices=("split", "walk", "both"), default="split")
     parser.add_argument("--wrist-camera", action="store_true")
     parser.add_argument("--ros", action="store_true", help="While playing, accept rviz2 clicks as the drop point.")
-    parser.add_argument("--ros-host", default="127.0.0.1")
-    parser.add_argument("--ros-port", type=int, default=11411)
     return parser.parse_args()
 
 
@@ -175,7 +173,7 @@ def main() -> None:
         if args.wrist_camera:
             command.append("--wrist-camera")
         if args.ros:
-            command.extend(["--ros", "--ros-host", args.ros_host, "--ros-port", str(args.ros_port)])
+            command.extend(["--ros"])
         if args.ros:
             status.set("推論を実行しています。シミュレーション画面が開き、rviz2 の Publish Point で運び先を動かせます。")
         else:

@@ -14,8 +14,11 @@ CHARTS = (
     ("reward", "報酬", "1 iteration の平均報酬"),
     ("grasp", "把持率", "箱をつかんでいた割合"),
     ("ee_dist", "手先と箱の距離", "メートル。小さいほど手が届いている"),
+    ("walk_score", "歩行スコア", "指令速度に対する達成度。1 に近いほど良い"),
     ("success", "設置率", "その時点で終了した試行のうち、置けた割合"),
 )
+
+COMPARE_COLORS = ("#0b6e4f", "#b35c00", "#1f4b99", "#8b1e3f", "#5c4d7a")
 
 
 def write_run(path: Path, info: dict) -> None:
@@ -112,6 +115,79 @@ def _chart(title: str, caption: str, points: list[tuple[float, float]]) -> str:
         <text x="{width - 70}" y="{height - 8}">{int(xs[-1])}</text>
       </svg>
     </section>"""
+
+
+def _compare_chart(title: str, caption: str, series: list[tuple[str, list[tuple[float, float]]]]) -> str:
+    width, height = 760, 260
+    drawn = [(label, points) for label, points in series if points]
+    if not drawn:
+        return (
+            f"<section><h2>{title}</h2><p class='empty'>{caption}</p>"
+            "<p class='empty'>比較できる記録がありません。</p></section>"
+        )
+    xs = [x for _, points in drawn for x, _ in points]
+    ys = [y for _, points in drawn for _, y in points]
+    ymin, ymax = min(ys), max(ys)
+    pad = (ymax - ymin) * 0.08 or 0.05
+    bounds = (min(xs), max(xs), ymin - pad, ymax + pad)
+    lines = []
+    legend = []
+    for index, (label, points) in enumerate(drawn):
+        color = COMPARE_COLORS[index % len(COMPARE_COLORS)]
+        path = _polyline(points, bounds, (width, height))
+        lines.append(f'<polyline points="{path}" fill="none" stroke="{color}" stroke-width="2.4"/>')
+        last = points[-1][1]
+        legend.append(f"<span style='color:{color}'>■ {label}（最新 {last:.4g}）</span>")
+    return f"""<section>
+      <h2>{title}</h2>
+      <p>{caption}</p>
+      <p class="legend">{"　".join(legend)}</p>
+      <svg viewBox="0 0 {width} {height}" role="img">
+        {"".join(lines)}
+        <text x="8" y="20">{ymax:.3g}</text>
+        <text x="8" y="{height - 8}">{ymin:.3g}</text>
+        <text x="{width - 70}" y="{height - 8}">{int(max(xs))}</text>
+      </svg>
+    </section>"""
+
+
+def render_compare_curves(runs: list[tuple[str, list[dict], dict | None]]) -> str:
+    """Overlay several training runs on one page for algorithm comparison."""
+    bits = [
+        "<p>同じ段階の学習手法を重ねています。線の色が手法です。</p>",
+        "<ul class='meta'>"
+        + "".join(f"<li><b>{label}</b> {len(rows)} iteration</li>" for label, rows, _ in runs if rows)
+        + "</ul>",
+    ]
+    for key, title, caption in CHARTS:
+        series = [(label, _series(rows, key)) for label, rows, _ in runs]
+        bits.append(_compare_chart(title, caption, series))
+    body = "\n".join(bits)
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<title>Pick-and-Carry 手法比較</title>
+<style>
+  body {{ font-family: "Segoe UI", sans-serif; margin: 24px; color: #1c1c1c; background: #f6f4ef; }}
+  h1 {{ font-size: 22px; margin-bottom: 8px; }}
+  section {{ background: white; border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin: 12px 0; }}
+  h2 {{ font-size: 16px; margin: 0 0 4px; }}
+  p {{ margin: 0 0 8px; color: #444; }}
+  .legend {{ font-size: 13px; }}
+  .empty {{ color: #666; }}
+  .meta {{ display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 0; list-style: none; }}
+  .meta li {{ background: white; border: 1px solid #ddd; border-radius: 6px; padding: 4px 8px; }}
+  svg {{ width: 100%; height: auto; }}
+  text {{ font-size: 12px; fill: #666; }}
+</style>
+</head>
+<body>
+<h1>Pick-and-Carry 手法比較</h1>
+{body}
+</body>
+</html>
+"""
 
 
 def render_curves(rows: list[dict], run: dict | None = None) -> str:
