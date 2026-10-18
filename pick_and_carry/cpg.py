@@ -350,6 +350,36 @@ class LegCPG:
         return leg_act.clamp(-4.0, 4.0)
 
 
+# Match teacher / env still gates so BC stand-sit-jump-stop stay amp-free.
+_COMMAND_SPEED_EPS = 0.05
+_COMMAND_YAW_EPS = 0.08
+_COMMAND_STRAFE_EPS = 0.05
+
+
+def command_is_moving(command: torch.Tensor) -> torch.Tensor:
+    """Body-frame command ``(N,3)`` → bool mask: nonzero walk / turn / strafe."""
+    speed = command[:, 0].abs()
+    strafe = command[:, 1].abs()
+    yaw = command[:, 2].abs()
+    return (speed > _COMMAND_SPEED_EPS) | (yaw > _COMMAND_YAW_EPS) | (strafe > _COMMAND_STRAFE_EPS)
+
+
+def gate_cpg_amp_by_command(cpg_params: torch.Tensor, command: torch.Tensor) -> torch.Tensor:
+    """Zero the signed amp channel when the velocity command is still.
+
+    Stand / sit / jump / stop all use ``command≈0``. Without this gate, a BC
+    policy that leaks a small amp (regression toward walk demos) starts
+    stepping and then self-amplifies through ``last_leg_action`` / base velocity.
+    Sit/jump pose biases are left intact.
+    """
+    if cpg_params.shape[-1] < 2:
+        return cpg_params
+    moving = command_is_moving(command).to(dtype=cpg_params.dtype)
+    out = cpg_params.clone()
+    out[:, 1] = out[:, 1] * moving
+    return out
+
+
 def command_to_cpg_params(
     command: torch.Tensor,
     *,
@@ -369,7 +399,7 @@ def command_to_cpg_params(
     yaw = command[:, 2]
     speed = vx.abs().clamp(0.0, 0.6)
     yaw_mag = yaw.abs().clamp(0.0, 1.2)
-    moving = ((speed > 0.05) | (yaw_mag > 0.08) | (vy.abs() > 0.05)).to(dtype=command.dtype)
+    moving = command_is_moving(command).to(dtype=command.dtype)
     going_back = vx < -0.06
     speed_n = (speed / 0.35).clamp(0.0, 1.0)
     yaw_n = (yaw_mag / 0.70).clamp(0.0, 1.0)

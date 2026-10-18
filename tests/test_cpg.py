@@ -10,9 +10,11 @@ import torch
 from pick_and_carry.config import CPG_PARAM_DIM, NUM_ACTIONS
 from pick_and_carry.cpg import (
     LegCPG,
+    command_is_moving,
     command_to_cpg_params,
     decode_cpg_params,
     encode_cpg_params,
+    gate_cpg_amp_by_command,
     nominal_leg_phases,
 )
 
@@ -157,6 +159,19 @@ class CpgTests(unittest.TestCase):
         self.assertAlmostEqual(float(ph[0, 1]), math.pi, places=5)
         self.assertAlmostEqual(float(ph[0, 2]), math.pi, places=5)
         self.assertAlmostEqual(float(ph[0, 3]), 0.0, places=5)
+
+    def test_gate_cpg_amp_zeros_when_command_still(self):
+        params = encode_cpg_params(amp=0.9, bias_th=0.4, n=2)
+        still = torch.zeros(2, 3)
+        walk = torch.tensor([[0.35, 0.0, 0.0], [0.0, 0.0, 0.7]])
+        gated_still = gate_cpg_amp_by_command(params, still)
+        gated_walk = gate_cpg_amp_by_command(params, walk)
+        self.assertFalse(bool(command_is_moving(still).any()))
+        self.assertTrue(bool(command_is_moving(walk).all()))
+        self.assertTrue(torch.allclose(gated_still[:, 1], torch.zeros(2)))
+        self.assertTrue(torch.allclose(gated_walk[:, 1], params[:, 1]))
+        # Pose biases (sit/jump) must survive the amp gate.
+        self.assertTrue(torch.allclose(gated_still[:, 8], params[:, 8]))
 
 
 if __name__ == "__main__":

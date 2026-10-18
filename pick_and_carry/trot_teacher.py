@@ -31,15 +31,17 @@ DEMO_SKILLS: tuple[str, ...] = (
     "stop",
 )
 
+# Still skills share command≈0; keep them well represented so BC does not
+# regress amp toward the walk majority when standing / after a jump.
 BC_SKILL_WEIGHTS: dict[str, float] = {
-    "stand": 0.08,
-    "sit": 0.06,
-    "jump": 0.06,
-    "forward": 0.28,
-    "backward": 0.16,
-    "turn_left": 0.14,
-    "turn_right": 0.14,
-    "stop": 0.08,
+    "stand": 0.14,
+    "sit": 0.10,
+    "jump": 0.10,
+    "forward": 0.20,
+    "backward": 0.12,
+    "turn_left": 0.12,
+    "turn_right": 0.12,
+    "stop": 0.10,
 }
 
 DEMO_SKILL_SECONDS: dict[str, float] = {

@@ -27,7 +27,7 @@ from pick_and_carry.config import (
     leg_limit,
 )
 from pick_and_carry.control import arm_gripper_command, gripper_open_amount, learned_leg_target
-from pick_and_carry.cpg import LegCPG
+from pick_and_carry.cpg import LegCPG, gate_cpg_amp_by_command
 from pick_and_carry.curriculum import (
     BALL_RADIUS,
     BALL_STAGES,
@@ -751,6 +751,10 @@ class PickAndCarryEnv:
         cpg_act = action[:, self.action_slices["cpg"]]
         arm_act = action[:, self.action_slices["arm"]]
         grip_act = action[:, self.action_slices["gripper"]]
+        # Walk curriculum: no velocity command ⇒ force CPG amp=0 (teacher semantics).
+        # Stops BC stand/jump/stop demos from drifting into a trot via amp leakage.
+        if self.cfg.curriculum in LOCOMOTION_STAGES:
+            cpg_act = gate_cpg_amp_by_command(cpg_act, self.command)
         # Previous-step contacts drive entrainment (contacts refresh after scene.step).
         leg_act = self.cpg.step(cpg_act, foot_contact=self.foot_contact)
         self.leg_joint_actions = leg_act

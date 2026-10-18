@@ -31,6 +31,8 @@ import torch
 from pick_and_carry.agents import ActorCritic
 from pick_and_carry.algorithms import normalize_algo
 from pick_and_carry.checkpoints import save_checkpoint, torch_load
+from pick_and_carry.config import ACTION_LAYOUT, OBS_LAYOUT, layout_slices
+from pick_and_carry.cpg import command_is_moving
 from pick_and_carry.curriculum import locomotion_action_mask, stage_log_dir
 from pick_and_carry.train_ppo import initial_action_std, make_config
 from pick_and_carry.trot_teacher import (
@@ -222,19 +224,36 @@ def train_bc(
     batch_size: int,
     lr: float,
     action_mask: torch.Tensor,
+    still_amp_weight: float = 8.0,
 ) -> None:
     optimizer = torch.optim.Adam(agent.parameters(), lr=lr)
     n = obs.shape[0]
     mask = action_mask.to(dtype=obs.dtype, device=obs.device)
-    print(f"BC epochs={epochs} batch={batch_size} samples={n}", flush=True)
+    cmd_slice = layout_slices(OBS_LAYOUT)["command"]
+    amp_index = layout_slices(ACTION_LAYOUT)["cpg"].start + 1
+    print(
+        f"BC epochs={epochs} batch={batch_size} samples={n} "
+        f"still_amp_weight={still_amp_weight}",
+        flush=True,
+    )
     for epoch in range(1, epochs + 1):
         order = torch.randperm(n, device=obs.device)
         total = 0.0
         count = 0
         for start in range(0, n, batch_size):
             idx = order[start : start + batch_size]
-            pred = agent.actor.mean_action(obs[idx])
+            batch_obs = obs[idx]
+            pred = agent.actor.mean_action(batch_obs)
             err = (pred - actions[idx]).pow(2)
+            # stand/sit/jump/stop share command≈0; heavily penalize amp leakage there.
+            still = ~command_is_moving(batch_obs[:, cmd_slice])
+            amp_w = torch.where(
+                still,
+                torch.full_like(err[:, amp_index], float(still_amp_weight)),
+                torch.ones_like(err[:, amp_index]),
+            )
+            err = err.clone()
+            err[:, amp_index] = err[:, amp_index] * amp_w
             loss = (err * mask.expand_as(err)).sum(dim=-1).mean() / mask.sum().clamp(min=1.0)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
