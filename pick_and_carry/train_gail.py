@@ -33,7 +33,7 @@ from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
 from pick_and_carry.algorithms import normalize_algo
 from pick_and_carry.checkpoints import save_checkpoint, torch_load
 from pick_and_carry.curriculum import locomotion_action_mask
-from pick_and_carry.console import format_abs_metric, format_metric, format_toward_metric
+from pick_and_carry.console import format_metric, format_toward_metric
 from pick_and_carry.gail import Discriminator, apply_action_mask, train_discriminator
 from pick_and_carry.mlflow_log import LocalTracker
 from pick_and_carry.train_bc import (
@@ -314,7 +314,7 @@ def run_gail(
                 f"{format_metric('r_mix', r_mix, prev.get('r_mix'), higher_is_better=True, fmt='.3f')}  "
                 f"{format_metric('disc_loss', disc_loss, prev.get('disc_loss'), higher_is_better=False, fmt='.3f')}  "
                 f"{format_toward_metric('disc_acc', disc_acc, prev.get('disc_acc'), target=0.65, fmt='.2f')}  "
-                f"{format_abs_metric('pi_loss', pi_loss, prev.get('pi_loss'), fmt='.3f')}  "
+                f"pi_loss {pi_loss:.3f}  "
                 f"{elapsed:.1f}s",
                 flush=True,
             )
@@ -324,7 +324,6 @@ def run_gail(
                 "r_mix": r_mix,
                 "disc_loss": disc_loss,
                 "disc_acc": disc_acc,
-                "pi_loss": pi_loss,
             }
         if save_path is not None and (
             iteration % max(1, args.save_interval) == 0 or iteration == last_iteration
