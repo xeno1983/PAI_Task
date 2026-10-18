@@ -219,12 +219,16 @@ def record_demos(
         )
         obs = env.reset()
         steps = max(1, int(round(seconds / demo_cfg.dt)))
-        print(f"recording teacher {seconds:.0f}s → {teacher_path}", flush=True)
+        # Force a clear +X command so the demo is a forward walk check, not a random mix.
+        forward = torch.tensor([[0.40, 0.0, 0.0]], dtype=torch.float32, device=env.device)
+        print(f"recording teacher {seconds:.0f}s (vx=+0.4) → {teacher_path}", flush=True)
         for _ in range(steps):
+            env.command.copy_(forward)
             action = teacher.act(env.command)
             obs, _, done, _ = env.step(action)
             if bool(done.any()):
                 teacher.reset(torch.nonzero(done, as_tuple=False).squeeze(-1))
+                env.command.copy_(forward)
         env.close()
         print(f"video: {teacher_path.resolve()}", flush=True)
         paths.append(teacher_path)

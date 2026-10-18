@@ -28,6 +28,9 @@ _CALF = 2
 # Diagonal trot pairs (indices into LEG_JOINTS // 3).
 _PAIR_A = (0, 3)  # FL, RR
 _PAIR_B = (1, 2)  # FR, RL
+# Go2 thigh/calf: increasing thigh from the stand pose drives the base aft in Genesis,
+# so the open-loop "forward" swing must be negated for +vx to walk +X.
+_SAGITTAL_SIGN = -1.0
 
 
 class TrotTeacher:
@@ -69,17 +72,31 @@ class TrotTeacher:
         self.phase[env_ids] = torch.rand(env_ids.numel(), device=self.device) * (2.0 * math.pi)
 
     def act(self, command: torch.Tensor) -> torch.Tensor:
-        """``command`` is (N, 3) body-frame [vx, vy, yaw]. Returns (N, 19) actions."""
+        """``command`` is (N, 3) body-frame [vx, vy, yaw]. Returns (N, 19) actions.
+
+        Forward ``vx > 0`` uses the nominal trot. Backward ``vx < 0`` flips the
+        thigh/calf swing so the teacher matches the commanded fore–aft direction
+        (previously ``|vx|`` drove a forward-only gait and mislabeled reverse).
+        Near-zero speed holds the standing pose.
+        """
         n = command.shape[0]
         vx = command[:, 0]
         vy = command[:, 1]
         yaw = command[:, 2]
         speed = vx.abs().clamp(0.0, 0.6)
-        # Stand still on near-zero planar command.
-        moving = (command[:, :2].norm(dim=-1) > 0.08).to(dtype=command.dtype)
-        amp_scale = moving * (0.35 + 0.65 * (speed / 0.50).clamp(0.0, 1.0))
+        # Sagittal locomote only when |vx| is clear; pure lateral/yaw stays nearly still.
+        sagittal = (speed > 0.08).to(dtype=command.dtype)
+        # +1 forward, -1 backward; 0 when standing in x.
+        fore_aft = torch.sign(vx)
+        fore_aft = torch.where(sagittal > 0, fore_aft, torch.zeros_like(fore_aft))
+        amp_scale = sagittal * (0.35 + 0.65 * (speed / 0.50).clamp(0.0, 1.0))
         freq = self.base_freq * (0.85 + 0.30 * (speed / 0.50).clamp(0.0, 1.0))
-        self.phase = (self.phase + 2.0 * math.pi * freq * self.dt) % (2.0 * math.pi)
+        # Keep phase ticking only while walking so standstill does not drift the gait clock.
+        self.phase = torch.where(
+            sagittal > 0,
+            (self.phase + 2.0 * math.pi * freq * self.dt) % (2.0 * math.pi),
+            self.phase,
+        )
 
         targets = self._default.expand(n, -1).clone()
         for leg_i in range(4):
@@ -88,11 +105,12 @@ class TrotTeacher:
             else:
                 phi = self.phase + math.pi
             base = 3 * leg_i
-            swing = torch.sin(phi)
-            # Lift in swing: thigh forward, calf flex more negative when swing > 0.
+            # fore_aft matches command vx; _SAGITTAL_SIGN maps that onto joint angles that
+            # actually move the base the same way in simulation.
+            swing = torch.sin(phi) * fore_aft * _SAGITTAL_SIGN
             targets[:, base + _THIGH] = self._default[base + _THIGH] + self.thigh_amp * amp_scale * swing
             targets[:, base + _CALF] = self._default[base + _CALF] - self.calf_amp * amp_scale * swing
-            # Small hip for lateral / yaw assist.
+            # Small hip for lateral / yaw assist (scaled by how much we are locomoting).
             hip = self.hip_amp * amp_scale * (0.5 * vy.sign() * vy.abs().clamp(0.0, 0.2) / 0.2)
             if leg_i in (0, 2):  # left
                 targets[:, base + _HIP] = self._default[base + _HIP] + hip - 0.03 * amp_scale * yaw

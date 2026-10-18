@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import unittest
 
 import torch
@@ -27,6 +28,17 @@ class TrotTeacherTests(unittest.TestCase):
         a_move = teacher.act(moving)
         self.assertLess(float(a_still[:, :12].abs().mean()), 1e-5)
         self.assertGreater(float(a_move[:, :12].abs().mean()), 0.05)
+
+    def test_backward_flips_leg_swing_sign(self):
+        teacher = TrotTeacher(1, thigh_amp=0.4, calf_amp=0.5, device=torch.device("cpu"))
+        teacher.phase.fill_(math.pi / 2)  # sin(phase)=1 so swing sign is obvious
+        forward = teacher.act(torch.tensor([[0.4, 0.0, 0.0]]))
+        teacher.phase.fill_(math.pi / 2)
+        backward = teacher.act(torch.tensor([[-0.4, 0.0, 0.0]]))
+        # With _SAGITTAL_SIGN=-1, +vx yields negative FL thigh action at this phase.
+        self.assertLess(float(forward[0, 1]), -0.05)
+        self.assertGreater(float(backward[0, 1]), 0.05)
+        self.assertAlmostEqual(float(forward[0, 1]), -float(backward[0, 1]), places=4)
 
     def test_phase_advances(self):
         teacher = TrotTeacher(1, frequency_hz=2.0, dt=0.02, device=torch.device("cpu"))
