@@ -276,6 +276,23 @@ function Ask-TeacherDemoSave {
     return @("--save-demos", "all")
 }
 
+function Ask-BcEpochs {
+    param([int]$Default = 80)
+    $epochs = 0
+    while ($epochs -lt 1) {
+        $raw = Read-Host "BC エポック数 [$Default]"
+        if ([string]::IsNullOrWhiteSpace($raw)) { $raw = "$Default" }
+        $parsed = 0
+        if (-not [int]::TryParse($raw, [ref]$parsed) -or $parsed -lt 1) {
+            Write-Host "1 以上の整数を入力してください。"
+            continue
+        }
+        $epochs = $parsed
+    }
+    Write-Host "BC エポック数: $epochs"
+    return $epochs
+}
+
 function Get-VideoTaskName {
     if ($script:stage -eq "carry") { return "carry" }
     if ($script:stage -eq "catch") { return "catch_$($script:catchLevel)" }
@@ -550,6 +567,7 @@ switch ($choice) {
                 }
             }
             Write-Host "デモを集め（約90秒相当）てから GAIL を実行します（iterations=1000）。"
+            if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
             & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) {
@@ -581,7 +599,8 @@ switch ($choice) {
         } else {
             $demoArgs = Ask-TeacherDemoSave
             Write-Host "デモを集め（約90秒相当）て BC を実行します。"
-            & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs 80 --log-dir $logDir @algoArgs @armArgs @demoArgs
+            $bcEpochs = Ask-BcEpochs -Default 80
+            & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs $bcEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) {
                 if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
@@ -627,7 +646,8 @@ switch ($choice) {
             Write-Host "トロット教師のデモを集めて模倣学習（BC）を実行します…"
             $demoArgs = Ask-TeacherDemoSave
             $bcEnvs = [Math]::Min(32, $numEnvs)
-            & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs $bcEnvs --seconds 90 --epochs 80 --log-dir $logDir @algoArgs @armArgs @demoArgs
+            $bcEpochs = Ask-BcEpochs -Default 80
+            & $python -u -m pick_and_carry.train_bc --easy-walk --num-envs $bcEnvs --seconds 90 --epochs $bcEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
             if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
@@ -651,6 +671,7 @@ switch ($choice) {
                     $bcEpochs = 0
                 }
             }
+            if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
             & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
