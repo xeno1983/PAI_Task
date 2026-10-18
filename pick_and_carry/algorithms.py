@@ -122,12 +122,18 @@ def mirror_observation(obs: torch.Tensor, *, command_has_yaw: bool = True) -> to
 
 
 def mirror_action(action: torch.Tensor) -> torch.Tensor:
-    """Sagittal reflection of an action batch ``(N, 19)``."""
-    if action.shape[-1] < 19:
-        raise ValueError(f"expected at least 19-dim action, got {tuple(action.shape)}")
+    """Sagittal reflection of a CPG+arm action batch ``(N, CPG+7)``."""
+    from pick_and_carry.config import ACTION_LAYOUT, NUM_ACTIONS, layout_slices
+
+    if action.shape[-1] < NUM_ACTIONS:
+        raise ValueError(f"expected at least {NUM_ACTIONS}-dim action, got {tuple(action.shape)}")
     out = action.clone()
-    _swap_leg_blocks(out, 0)
-    _flip_arm_signs(out, 12)
+    # CPG: flip lateral / yaw / turn channels (indices 5, 6, 7).
+    out[:, 5] *= -1.0
+    out[:, 6] *= -1.0
+    out[:, 7] *= -1.0
+    arm = layout_slices(ACTION_LAYOUT)["arm"]
+    _flip_arm_signs(out, arm.start)
     return out
 
 

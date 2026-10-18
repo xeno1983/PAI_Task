@@ -1,4 +1,4 @@
-"""Staged tasks on the Unitree Z1. Every stage is observation 81 and action 19.
+"""Staged tasks on the Unitree Z1. Every stage is observation 81 and CPG+arm actions.
 
 Walk learns to stand, walk and turn on bumpy ground while the environment moves the arm
 at random. Reach follows: the hand goes to a point in front of the body. Haul and carry
@@ -157,12 +157,12 @@ def stage_log_dir(
 
 
 def locomotion_action_mask(act_dim: int, device: torch.device | None = None) -> torch.Tensor:
-    """True for leg dims only. Walk / haul hold the arm outside the policy."""
+    """True for CPG dims only. Walk / haul hold the arm outside the policy."""
     from pick_and_carry.config import ACTION_LAYOUT, layout_slices
 
     mask = torch.zeros(act_dim, dtype=torch.bool, device=device)
-    leg = layout_slices(ACTION_LAYOUT)["leg"]
-    mask[leg] = True
+    cpg = layout_slices(ACTION_LAYOUT)["cpg"]
+    mask[cpg] = True
     return mask
 
 

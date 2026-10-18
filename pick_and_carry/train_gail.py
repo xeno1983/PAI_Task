@@ -1,0 +1,385 @@
+"""GAIL on the diagonal-trot teacher, then a PPO-compatible checkpoint.
+
+Typical use (easy walk folder):
+
+    python -m pick_and_carry.train_gail --easy-walk --seconds 90 --iterations 300
+
+Optional BC warm-start (recommended):
+
+    python -m pick_and_carry.train_gail --easy-walk --bc-epochs 40 --iterations 300
+
+Then continue with task PPO:
+
+    python -m pick_and_carry.train_ppo --curriculum walk --easy-walk --init-from \\
+        logs/ppo_curriculum_walk_easy/gail_trot.pt --iterations 1000
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
+from pathlib import Path
+
+import torch
+
+from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
+from pick_and_carry.algorithms import normalize_algo
+from pick_and_carry.checkpoints import save_checkpoint, torch_load
+from pick_and_carry.curriculum import locomotion_action_mask, stage_log_dir
+from pick_and_carry.gail import Discriminator, apply_action_mask, train_discriminator
+from pick_and_carry.train_bc import (
+    _build_walk_args,
+    _resolve_demo_which,
+    collect_demos,
+    record_demos,
+    train_bc,
+)
+from pick_and_carry.train_ppo import initial_action_std, make_config, minibatch_size_for
+from pick_and_carry.trot_teacher import TrotTeacher
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Collect trot demos and train GAIL (PPO + discriminator).")
+    parser.add_argument("--num-envs", type=int, default=32)
+    parser.add_argument("--seconds", type=float, default=60.0, help="Simulated seconds of teacher demos.")
+    parser.add_argument("--iterations", type=int, default=300, help="GAIL / PPO outer iterations.")
+    parser.add_argument("--num-steps", type=int, default=128)
+    parser.add_argument("--bc-epochs", type=int, default=40, help="BC warm-start epochs before GAIL. 0 skips.")
+    parser.add_argument("--bc-batch-size", type=int, default=4096)
+    parser.add_argument("--disc-epochs", type=int, default=1, help="Discriminator passes per iteration.")
+    parser.add_argument("--disc-batch-size", type=int, default=4096)
+    parser.add_argument("--disc-lr", type=float, default=3e-4)
+    parser.add_argument("--gail-coef", type=float, default=1.0, help="Weight on -log(1-D) reward.")
+    parser.add_argument(
+        "--env-coef",
+        type=float,
+        default=0.0,
+        help="Weight on environment reward mixed into the GAIL signal (0 = pure imitation).",
+    )
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--desired-kl", type=float, default=0.01)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--lam", type=float, default=0.95)
+    parser.add_argument("--clip", type=float, default=0.2)
+    parser.add_argument("--epochs", type=int, default=5, help="PPO epochs per iteration.")
+    parser.add_argument("--num-mini-batches", type=int, default=4)
+    parser.add_argument("--minibatch-size", type=int, default=0)
+    parser.add_argument("--entropy-coef", type=float, default=0.001)
+    parser.add_argument("--value-coef", type=float, default=1.0)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--arm", choices=("z1",), default="z1")
+    parser.add_argument("--algo", choices=("ppo", "grpo", "sym_ppo"), default="ppo")
+    parser.add_argument("--easy-walk", action="store_true", default=True)
+    parser.add_argument("--no-easy-walk", action="store_true")
+    parser.add_argument("--log-dir", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=None, help="Default: <log-dir>/gail_trot.pt")
+    parser.add_argument("--frequency", type=float, default=2.5)
+    parser.add_argument("--demo-seconds", type=float, default=0.0)
+    parser.add_argument("--play-seconds", type=float, default=None)
+    parser.add_argument(
+        "--demo-only",
+        choices=("all", "teacher", "bc", "none"),
+        default="none",
+        help="Reuse train_bc demo recording; 'bc' loads gail_trot.pt or bc_trot.pt.",
+    )
+    parser.add_argument(
+        "--save-demos",
+        choices=("all", "teacher", "bc", "none"),
+        default="all",
+        help="After training, which mp4s to write (bc = policy demos under gail_trot_*.mp4 names).",
+    )
+    parser.add_argument("--record", type=str, default=None)
+    parser.add_argument("--save-interval", type=int, default=50)
+    return parser.parse_args()
+
+
+def run_gail(
+    *,
+    env,
+    agent: ActorCritic,
+    disc: Discriminator,
+    expert_obs: torch.Tensor,
+    expert_act: torch.Tensor,
+    args,
+    action_mask: torch.Tensor,
+) -> None:
+    device = env.device
+    opt_pi = torch.optim.Adam(agent.parameters(), lr=args.lr)
+    opt_d = torch.optim.Adam(disc.parameters(), lr=args.disc_lr)
+    obs = env.reset()
+    print(
+        f"GAIL iterations={args.iterations} steps={args.num_steps} "
+        f"gail_coef={args.gail_coef} env_coef={args.env_coef}",
+        flush=True,
+    )
+    for iteration in range(1, args.iterations + 1):
+        started = time.perf_counter()
+        obs_buf, act_buf, logp_buf, val_buf, rew_buf, boot_buf, done_buf = [], [], [], [], [], [], []
+        gail_sum = 0.0
+        env_sum = 0.0
+        for _ in range(args.num_steps):
+            with torch.no_grad():
+                action, log_prob, value = agent.act(obs)
+                next_obs, env_reward, done, info = env.step(action)
+                masked_act = apply_action_mask(action, action_mask)
+                gail_r = disc.gail_reward(obs, masked_act)
+                reward = args.gail_coef * gail_r + args.env_coef * env_reward
+                reward = reward + args.gamma * value * info["time_outs"]
+                next_value = agent.value(next_obs)
+                bootstrap = next_value * (~done).to(dtype=reward.dtype)
+            obs_buf.append(obs)
+            act_buf.append(action)
+            logp_buf.append(log_prob)
+            val_buf.append(value)
+            rew_buf.append(reward)
+            boot_buf.append(bootstrap)
+            done_buf.append(done.to(dtype=reward.dtype))
+            gail_sum += float(gail_r.mean())
+            env_sum += float(env_reward.mean())
+            obs = next_obs
+
+        flat_obs = torch.cat(obs_buf, dim=0)
+        flat_act = torch.cat(act_buf, dim=0)
+        disc_metrics = train_discriminator(
+            disc,
+            opt_d,
+            expert_obs,
+            expert_act,
+            flat_obs.detach(),
+            flat_act.detach(),
+            epochs=args.disc_epochs,
+            batch_size=min(args.disc_batch_size, expert_obs.shape[0], flat_obs.shape[0]),
+            action_mask=action_mask,
+        )
+
+        rewards = torch.stack(rew_buf)
+        values = torch.stack(val_buf)
+        dones = torch.stack(done_buf)
+        advantages, returns = compute_gae(
+            rewards,
+            values,
+            torch.stack(boot_buf),
+            dones,
+            args.gamma,
+            args.lam,
+        )
+        metrics = ppo_update(
+            agent,
+            opt_pi,
+            flat_obs,
+            flat_act,
+            torch.cat(logp_buf, dim=0),
+            returns.reshape(-1),
+            advantages.reshape(-1),
+            clip=args.clip,
+            epochs=args.epochs,
+            minibatch_size=minibatch_size_for(args, flat_obs.shape[0]),
+            entropy_coef=args.entropy_coef,
+            value_coef=args.value_coef,
+            max_grad_norm=args.max_grad_norm,
+            old_values=values.reshape(-1),
+            desired_kl=args.desired_kl if args.desired_kl > 0 else None,
+        )
+        elapsed = time.perf_counter() - started
+        if iteration == 1 or iteration % max(1, args.iterations // 20) == 0 or iteration == args.iterations:
+            print(
+                f"  gail {iteration}/{args.iterations}  "
+                f"r_gail {gail_sum / args.num_steps:.3f}  "
+                f"r_env {env_sum / args.num_steps:.3f}  "
+                f"disc_loss {disc_metrics['disc_loss']:.3f}  "
+                f"disc_acc {disc_metrics['disc_acc']:.2f}  "
+                f"pi_loss {metrics['policy_loss']:.3f}  "
+                f"{elapsed:.1f}s",
+                flush=True,
+            )
+
+
+def main() -> None:
+    args = parse_args()
+    ns, easy = _build_walk_args(args)
+    from pick_and_carry.env import PickAndCarryEnv
+
+    demo_seconds = args.demo_seconds if args.play_seconds is None else float(args.play_seconds)
+    cfg = make_config(ns)
+    if easy:
+        cfg.terrain = False
+        cfg.arm_disturb = False
+        cfg.push_robots = False
+        cfg.randomize_friction = False
+    ns.log_dir.mkdir(parents=True, exist_ok=True)
+    out = args.output or (ns.log_dir / "gail_trot.pt")
+
+    if args.demo_only != "none":
+        which = _resolve_demo_which(args.demo_only, args.save_demos)
+        if which is None:
+            print("save-demos=none → デモ mp4 は書きません。", flush=True)
+            return
+        agent = None
+        if which in ("all", "bc"):
+            load_path = out if out.is_file() else (ns.log_dir / "bc_trot.pt")
+            if not load_path.is_file():
+                raise SystemExit(f"GAIL/BC デモ用の重みがありません: {load_path}")
+            blob = torch_load(load_path, torch.device("cpu"))
+            agent = ActorCritic(int(blob["obs_dim"]), int(blob["act_dim"]), init_std=0.3)
+            agent.load_state_dict(blob["model"])
+            agent.set_action_mask(locomotion_action_mask(int(blob["act_dim"])))
+        videos = record_demos(
+            cfg,
+            log_dir=ns.log_dir,
+            seconds=demo_seconds,
+            frequency_hz=args.frequency,
+            agent=agent,
+            which=which,
+        )
+        if which in ("all", "bc") and agent is not None and videos:
+            _rename_policy_demos(videos[0].parent)
+        for path in videos:
+            print(f"demo ready: {path.resolve()}", flush=True)
+        if videos:
+            print(f"demo folder: {videos[0].parent.resolve()}", flush=True)
+        return
+
+    env = PickAndCarryEnv(cfg=cfg)
+    device = env.device
+    teacher = TrotTeacher(
+        env.num_envs,
+        dt=cfg.dt,
+        frequency_hz=args.frequency,
+        leg_action_scale=cfg.leg_action_scale,
+        device=device,
+    )
+    expert_obs, expert_act = collect_demos(env, teacher, args.seconds)
+    # Keep the same env for on-policy rollouts (already closed in BC path; reopen).
+    env.close()
+    env = PickAndCarryEnv(cfg=cfg)
+    device = env.device
+    expert_obs = expert_obs.to(device)
+    expert_act = expert_act.to(device)
+
+    init_std = initial_action_std(int(expert_act.shape[-1]), ns.leg_init_std, ns.arm_init_std)
+    agent = ActorCritic(int(expert_obs.shape[-1]), int(expert_act.shape[-1]), init_std=init_std).to(device)
+    mask = locomotion_action_mask(int(expert_act.shape[-1]), device=device)
+    agent.set_action_mask(mask)
+    disc = Discriminator(int(expert_obs.shape[-1]), int(expert_act.shape[-1])).to(device)
+
+    if args.bc_epochs > 0:
+        print(f"BC warm-start epochs={args.bc_epochs}…", flush=True)
+        train_bc(
+            agent,
+            expert_obs,
+            expert_act,
+            epochs=args.bc_epochs,
+            batch_size=min(args.bc_batch_size, expert_obs.shape[0]),
+            lr=3e-4,
+            action_mask=mask,
+        )
+
+    run_gail(
+        env=env,
+        agent=agent,
+        disc=disc,
+        expert_obs=expert_obs,
+        expert_act=expert_act,
+        args=args,
+        action_mask=mask,
+    )
+    env.close()
+
+    optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
+    save_checkpoint(
+        out,
+        agent,
+        optimizer,
+        iteration=0,
+        obs_dim=int(expert_obs.shape[-1]),
+        act_dim=int(expert_act.shape[-1]),
+        arm=cfg.arm,
+        curriculum="walk",
+        algo=normalize_algo(ns.algo),
+    )
+    blob = torch.load(out, map_location="cpu", weights_only=False)
+    blob["gail_trot"] = True
+    blob["bc_trot"] = True  # play / init-from treat it like an imitation warm-start
+    blob["easy_walk"] = easy
+    blob["discriminator"] = disc.cpu().state_dict()
+    torch.save(blob, out)
+    print(f"saved GAIL checkpoint {out.resolve()}", flush=True)
+
+    which = _resolve_demo_which("none", args.save_demos)
+    if which is None:
+        print("save-demos=none → デモ mp4 はスキップします。", flush=True)
+    else:
+        from pick_and_carry.video_paths import make_video_run_dir, video_task_name
+
+        task = video_task_name("walk", easy=easy)
+        video_dir = make_video_run_dir(
+            ns.log_dir,
+            task=task,
+            kind="gail",
+            iteration=int(args.iterations),
+            epochs=int(args.bc_epochs) if args.bc_epochs else None,
+            extra={"checkpoint": str(out.name)},
+        )
+        # Force policy demos into the GAIL run folder (teacher clips use their own if which=all).
+        if which == "all":
+            teacher_videos = record_demos(
+                cfg,
+                log_dir=ns.log_dir,
+                seconds=demo_seconds,
+                frequency_hz=args.frequency,
+                agent=None,
+                which="teacher",
+            )
+            cfg._demo_epochs = int(args.bc_epochs)
+            policy_videos = record_demos(
+                cfg,
+                log_dir=ns.log_dir,
+                seconds=demo_seconds,
+                frequency_hz=args.frequency,
+                agent=agent.cpu(),
+                which="bc",
+                video_dir=video_dir,
+            )
+            _rename_policy_demos(video_dir)
+            videos = teacher_videos + policy_videos
+        else:
+            videos = record_demos(
+                cfg,
+                log_dir=ns.log_dir,
+                seconds=demo_seconds,
+                frequency_hz=args.frequency,
+                agent=agent.cpu(),
+                which=which,
+                video_dir=video_dir if which == "bc" else None,
+            )
+            if which == "bc":
+                _rename_policy_demos(video_dir)
+        for path in videos:
+            print(f"demo ready: {path.resolve()}", flush=True)
+        if videos:
+            print(f"demo folder: {videos[-1].parent.resolve()}", flush=True)
+    print(
+        f"next: python -m pick_and_carry.train_ppo --curriculum walk --easy-walk "
+        f"--init-from {out} --iterations 1000",
+        flush=True,
+    )
+
+
+def _rename_policy_demos(folder: Path) -> None:
+    """record_demos writes bc_trot_*; rename to gail_trot_* for this entry point."""
+    mapping = [("bc_trot_demo.mp4", "gail_trot_demo.mp4")]
+    from pick_and_carry.trot_teacher import DEMO_SKILLS
+
+    for skill in DEMO_SKILLS:
+        mapping.append((f"bc_trot_{skill}.mp4", f"gail_trot_{skill}.mp4"))
+    for src_name, dst_name in mapping:
+        src = folder / src_name
+        dst = folder / dst_name
+        if src.is_file():
+            src.replace(dst)
+
+
+if __name__ == "__main__":
+    main()

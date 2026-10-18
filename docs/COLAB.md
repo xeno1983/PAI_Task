@@ -1,6 +1,6 @@
 # Colab で実行する
 
-ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。セルは上から順に実行します。起動スクリプトと同じく、段階・学習手法を選んで `train_ppo` で学習・推論します。3D ウィンドウは使わず、確認は mp4 です。
+ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。セルは上から順に実行します。起動スクリプトと同じく、段階・学習手法を選んで `train_ppo` で学習・推論します（必要なら `train_bc` / `train_gail`）。観測 81・行動 17（CPG + 腕 IK 残差）。3D ウィンドウは使わず、確認は mp4 です。
 
 ローカルの `.venv` は Windows 用なので zip に入れません。Colab には CUDA 付き PyTorch が入っているので、Windows 用の cu128 は入れません。
 
@@ -25,7 +25,7 @@ Drive にリポジトリを置く場合の例: `MyDrive/PAI_Task`。以前退避
 
 ## 3. プロジェクトを置く
 
-ローカルでは、デスクトップの `起動スクリプト\PickAndCarry\PickAndCarry_run.bat` を開き、`6` を選びます。同じフォルダに `PAI_Task_colab.zip` ができます。`.venv`、`logs`、`__pycache__`、`.git` は除いてあります。
+ローカルでは、デスクトップの `起動スクリプト\PickAndCarry\PickAndCarry_run.bat` を開き、`7` を選びます。同じフォルダに `PAI_Task_colab.zip` ができます。`.venv`、`logs`、`__pycache__`、`.git` は除いてあります。
 
 Colab のファイルパネルから、この zip をアップロードして展開します。
 
@@ -59,12 +59,18 @@ Colab のファイルパネルから、この zip をアップロードして展
 | `NUM_ENVS` | 並列数 | T4 は `8` から。通ったら `32` |
 | `ITERATIONS` | 追加学習回数 | `50` など |
 | `NUM_STEPS` | 1 iteration のステップ | 起動と同じ `128` |
+| `EASY_WALK` | 平地・腕固定の歩行暖機 | `True` / `False`（`STAGE=walk` のとき） |
+
+観測は 81、行動は 17（CPG パラメータ 10 + 腕残差 6 + グリッパ残差 1）です。脚は環境内 CPG、操作段階の腕は IK ベース + 小さな残差です。
 
 保存先の例:
 
 - 歩行 PPO → `logs/ppo_curriculum_walk`
+- 簡単歩行（模倣暖機）→ `logs/ppo_curriculum_walk_easy`（`bc_trot.pt` / `gail_trot.pt`）
 - 箱運び GRPO → `logs/grpo_z1`
 - キャッチ Symmetric PPO（静止）→ `logs/sym_ppo_curriculum_catch_static`
+
+デモ・再生 mp4 は `logs/.../videos/<タスク>/<学習回>/` に分かれます。
 
 ## 6. 学習
 
@@ -74,11 +80,18 @@ Colab のファイルパネルから、この zip をアップロードして展
 python -m pick_and_carry.train_ppo --resume latest --algo ... --curriculum ... --log-dir ...
 ```
 
-同じフォルダに重みがあれば続きから、無ければ前段階の重みから、それも無ければ初期値から始めます。
+同じフォルダに重みがあれば続きから、無ければ前段階の重みから、それも無ければ初期値から始めます。`--easy-walk` で PPO が無く `--init-from` も無いときは、同フォルダの `gail_trot.pt` → `bc_trot.pt` の順で自動初期化します。
+
+模倣だけ先に回す場合:
+
+```text
+python -m pick_and_carry.train_bc --easy-walk --num-envs 8 --seconds 60 --epochs 40
+python -m pick_and_carry.train_gail --easy-walk --num-envs 8 --seconds 60 --bc-epochs 20 --iterations 100
+```
 
 ## 7. 推論
 
-推論セルは `--play --resume latest --num-envs 1 --record ...` で mp4 を作り、ノート内で再生します。Colab ではクリック GUI と ROS 2 は使いません。
+推論セルは `--play --resume latest --num-envs 1 --record ...` で mp4 を作り、ノート内で再生します。実体は `videos/<タスク>/...` 以下にも残り、ノートはそれを開きます。Colab ではクリック GUI と ROS 2 は使いません。
 
 ## 8. 曲線と比較
 

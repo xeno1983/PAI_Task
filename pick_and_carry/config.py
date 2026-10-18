@@ -79,9 +79,11 @@ OBS_LAYOUT = (
     # The leg action applied on the previous step, as in legged_gym and Walk These Ways.
     ("last_leg_action", 12),
 )
-# [12 leg positions | 6 Z1 arm positions | 1 gripper open/close]
+# Policy actions: CPG params drive the 12 legs; arm/gripper are residual Δq / Δg
+# on top of IK / phase baselines (see ``pick_and_carry.ik`` and ``control``).
+CPG_PARAM_DIM = 10
 ACTION_LAYOUT = (
-    ("leg", 12),
+    ("cpg", CPG_PARAM_DIM),
     ("arm", 6),
     ("gripper", 1),
 )
@@ -190,7 +192,7 @@ class EnvConfig:
     # walk: legs the whole time, arm held still, reward is travel and not falling.
     # both: legs and arm together for the whole episode.
     control_split: str = "split"
-    # The arm is the Unitree Z1 (6 DoF, about 5.2 kg). Observation 81, action 19.
+    # The arm is the Unitree Z1 (6 DoF, about 5.2 kg). Observation 81, action CPG+arm (17).
     arm: str = "z1"
     # Wrist camera on the hand. Grasp uses the segmented cube, not the simulator position.
     wrist_camera: bool = False
@@ -212,9 +214,11 @@ class EnvConfig:
     action_clip: float = 100.0
     # Radians of leg motion per action unit. The Genesis Go2 example and legged_gym use 0.25.
     leg_action_scale: float = 0.25
-    # One action unit. Large enough that joint 2 can go from the forward pose
-    # (0.9) to the low reach (about 1.6) and back.
-    arm_action_scale: float = 1.2
+    # Arm policy is a residual on IK (radians per action unit). Kept small so
+    # RL fine-tunes contact / tracking rather than inventing full reaches.
+    arm_action_scale: float = 0.12
+    # Gripper residual scale (joint radians per action unit) around the phase baseline.
+    gripper_residual_scale: float = 0.35
     # The Genesis Go2 example uses 20 and 0.5 for the bare Go2. With the Z1 on its back the
     # robot is about 5 kg heavier and 20 cannot hold it: it sinks to the joint limits and
     # bounces. Holding the standing pose, 30 sags to 0.23 m, 40 to 0.29 m, 60 to 0.305 m,

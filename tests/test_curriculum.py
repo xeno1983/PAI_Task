@@ -50,7 +50,7 @@ class LayoutTests(unittest.TestCase):
         for stage in STAGES:
             self.assertEqual(stage_layouts(stage, 6), shared)
         self.assertEqual(layout_dim(shared[0]), 81)
-        self.assertEqual(layout_dim(shared[1]), 19)
+        self.assertEqual(layout_dim(shared[1]), 17)
 
 
 class CommandTests(unittest.TestCase):
@@ -369,7 +369,7 @@ class TransferTests(unittest.TestCase):
 
         from pick_and_carry.checkpoints import resolve_checkpoint
 
-        def save(directory: Path, name: str, stage: str, obs: int = 81, act: int = 19, arm: str = "z1") -> None:
+        def save(directory: Path, name: str, stage: str, obs: int = 81, act: int = 17, arm: str = "z1") -> None:
             directory.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {"obs_dim": obs, "act_dim": act, "arm": arm, "curriculum": stage},
@@ -382,22 +382,22 @@ class TransferTests(unittest.TestCase):
             haul = stage_log_dir("haul", root=root)
             slow = stage_log_dir("catch", "slow", root=root)
             save(walk, "ppo_0001.pt", "walk", arm="panda")
-            found = resolve_checkpoint(reach, "latest", 81, 19, "z1", "reach", root=root)
+            found = resolve_checkpoint(reach, "latest", 81, 17, "z1", "reach", root=root)
             self.assertIsNone(found)
             save(walk, "ppo_0002.pt", "walk")
-            found = resolve_checkpoint(reach, "latest", 81, 19, "z1", "reach", root=root)
+            found = resolve_checkpoint(reach, "latest", 81, 17, "z1", "reach", root=root)
             self.assertEqual(found, walk / "ppo_0002.pt")
             save(reach, "ppo_0004.pt", "reach")
-            found = resolve_checkpoint(reach, "latest", 81, 19, "z1", "reach", root=root)
+            found = resolve_checkpoint(reach, "latest", 81, 17, "z1", "reach", root=root)
             self.assertEqual(found, reach / "ppo_0004.pt")
             # The catch levels start from reach, and not from the box task.
             save(haul, "ppo_0001.pt", "haul")
-            found = resolve_checkpoint(slow, "latest", 81, 19, "z1", "catch", "slow", root=root)
+            found = resolve_checkpoint(slow, "latest", 81, 17, "z1", "catch", "slow", root=root)
             self.assertEqual(found, reach / "ppo_0004.pt")
             # Practicing walk again prefers the harder stage's weights.
-            found = resolve_checkpoint(walk, "latest", 81, 19, "z1", "walk", root=root, retreat=True)
+            found = resolve_checkpoint(walk, "latest", 81, 17, "z1", "walk", root=root, retreat=True)
             self.assertEqual(found, reach / "ppo_0004.pt")
-            found = resolve_checkpoint(walk, "latest", 81, 19, "z1", "walk", root=root)
+            found = resolve_checkpoint(walk, "latest", 81, 17, "z1", "walk", root=root)
             self.assertEqual(found, walk / "ppo_0002.pt")
 
     def test_latest_checkpoint_is_numeric_not_lexicographic(self):
@@ -414,7 +414,7 @@ class TransferTests(unittest.TestCase):
             torch.save(
                 {
                     "obs_dim": 81,
-                    "act_dim": 19,
+                    "act_dim": 17,
                     "arm": "z1",
                     "curriculum": "walk",
                     "iteration": iteration,
@@ -428,7 +428,7 @@ class TransferTests(unittest.TestCase):
             save(walk, "ppo_9980.pt", 9980)
             save(walk, "ppo_10000.pt", 10000)
             save(walk, "ppo_29980.pt", 29980)
-            found = latest_matching(walk, 81, 19, "z1", "walk")
+            found = latest_matching(walk, 81, 17, "z1", "walk")
             self.assertEqual(found, walk / "ppo_29980.pt")
 
     def test_a_removed_stage_has_no_folder(self):
@@ -495,9 +495,9 @@ class TrainerSetupTests(unittest.TestCase):
     def test_leg_noise_is_wide_and_arm_noise_is_narrow(self):
         from pick_and_carry.train_ppo import initial_action_std
 
-        std = initial_action_std(19, 1.0, 0.4)
-        self.assertEqual(std[:12].tolist(), [1.0] * 12)
-        for value in std[12:].tolist():
+        std = initial_action_std(17, 1.0, 0.4)
+        self.assertEqual(std[:10].tolist(), [1.0] * 10)
+        for value in std[10:].tolist():
             self.assertAlmostEqual(value, 0.4, places=6)
 
     def test_old_weights_are_moved_aside_but_matching_ones_stay(self):
@@ -508,23 +508,23 @@ class TrainerSetupTests(unittest.TestCase):
 
         def save(directory: Path, name: str, obs: int) -> None:
             torch.save(
-                {"obs_dim": obs, "act_dim": 19, "arm": "z1", "curriculum": "walk"},
+                {"obs_dim": obs, "act_dim": 17, "arm": "z1", "curriculum": "walk"},
                 directory / name)
 
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            self.assertIsNone(archive_incompatible_logs(folder, 81, 19, "z1", "walk"))
+            self.assertIsNone(archive_incompatible_logs(folder, 81, 17, "z1", "walk"))
             save(folder, "ppo_0100.pt", 69)
             (folder / "metrics.jsonl").write_text("{}\n", encoding="utf-8")
             (folder / "events.out.tfevents.1").write_text("x", encoding="utf-8")
-            moved = archive_incompatible_logs(folder, 81, 19, "z1", "walk")
+            moved = archive_incompatible_logs(folder, 81, 17, "z1", "walk")
             self.assertIsNotNone(moved)
             self.assertTrue((moved / "ppo_0100.pt").is_file())
             self.assertTrue((moved / "metrics.jsonl").is_file())
             self.assertTrue((moved / "events.out.tfevents.1").is_file())
             self.assertEqual(list(folder.glob("ppo_*.pt")), [])
             save(folder, "ppo_0001.pt", 81)
-            self.assertIsNone(archive_incompatible_logs(folder, 81, 19, "z1", "walk"))
+            self.assertIsNone(archive_incompatible_logs(folder, 81, 17, "z1", "walk"))
             self.assertTrue((folder / "ppo_0001.pt").is_file())
 
 

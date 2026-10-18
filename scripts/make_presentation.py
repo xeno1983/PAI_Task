@@ -31,6 +31,9 @@ WHITE = (255, 255, 255)
 PREFERRED = (
     "PickAndCarry_smoke.mp4",
     "PickAndCarry_z1_smoke.mp4",
+    "trot_teacher_demo.mp4",
+    "bc_trot_demo.mp4",
+    "gail_trot_demo.mp4",
     "PickAndCarry_walk.mp4",
     "PickAndCarry_reach.mp4",
     "PickAndCarry_haul.mp4",
@@ -47,6 +50,9 @@ PREFERRED = (
 TITLES = {
     "PickAndCarry_smoke.mp4": ("起動確認", "ロボットが足場に立つかを見ます"),
     "PickAndCarry_z1_smoke.mp4": ("起動確認（Z1）", "軽い腕でも足場に立つかを見ます"),
+    "trot_teacher_demo.mp4": ("教師デモ（CPG）", "立つ・座る・歩く・旋回などを CPG 教師が示します"),
+    "bc_trot_demo.mp4": ("BC デモ", "教師を模倣した行動クローニングの方策です"),
+    "gail_trot_demo.mp4": ("GAIL デモ", "識別器報酬で強化学習した模倣方策です"),
     "PickAndCarry_walk.mp4": ("歩行", "止まる・歩く・曲がるを、腕を動かしながら続けます"),
     "PickAndCarry_reach.mp4": ("到達", "歩行の重みから続け、空中の点に手先を届かせます"),
     "PickAndCarry_ppo.mp4": ("箱運び", "保存した重みで、拾って目標へ置きます"),
@@ -64,9 +70,10 @@ TITLES = {
 OUTPUT_NAME = "PickAndCarry_presentation.mp4"
 SLIDE_NARRATION = (
     "学習条件です。ユニットリーのゴーツーに、ユニットリーのゼットワンを載せます。"
-    "学習はピーピーオーです。全段階が観測81、制御19です。"
-    "腕が違う古い保存は続きに使いません。"
-    "脚と腕と指は位置で動かし、箱運びの段階は、歩く、拾う、運ぶ、置く、の4つです。",
+    "学習はピーピーオーと、行動クローニング、ゲイルです。全段階が観測81、制御17です。"
+    "脚はシーピージーのパラメータを方策が出し、環境が12関節へ展開します。"
+    "腕が違う古い保存や、制御19の古い重みは続きに使いません。"
+    "箱運びの段階は、歩く、拾う、運ぶ、置く、の4つです。",
     "問題設定です。平らな場所から出発し、不整地を渡って箱を拾います。"
     "もう一度不整地を渡り、目標に置きます。箱と目標の下は平らです。"
     "茶色の段は、段差を選んだときだけで、箱の前に1段、置く前に2段です。"
@@ -77,7 +84,7 @@ SLIDE_NARRATION = (
     "箱運びは、歩きながら持つ段階の重みから続けます。キャッチは到達の重みから続け、静止、ゆっくり、ばらす、飛ぶ、ノイズの順に難しくします。"
     "1秒保持すると成功です。次の段階へ進むかは、録画を見て決めます。人の点数で報酬は置き換えていません。",
     "学習の工夫です。歩行と把持を一度に覚えさせず、段階に分けています。"
-    "同じ観測と行動です。直前の段階の重みを初期値にします。"
+    "同じ観測81と行動17です。直前の段階の重みを初期値にします。"
     "報酬は、成功した瞬間だけではなく、毎ステップの接近と、速度の一致でも点を出します。"
     "歩行で成績が低いあいだは平地に戻し、キャッチで成功が少ないあいだは易しいボールに戻します。"
     "8回続いて回復したら、選んだ課題まで上げます。メニューからは、上の段階の重みで易しい課題を学び直すこともできます。",
@@ -97,6 +104,9 @@ OPENING_SLIDES = 4
 VIDEO_NARRATION = {
     "PickAndCarry_smoke.mp4": "起動確認です。ロボットが足場に立つかを見ます。",
     "PickAndCarry_z1_smoke.mp4": "ゼットワンでの起動確認です。軽い腕でも足場に立つかを見ます。",
+    "trot_teacher_demo.mp4": "教師デモです。シーピージー教師が立つ、座る、歩く、旋回などの技能を示します。",
+    "bc_trot_demo.mp4": "行動クローニングのデモです。教師のシーピージー出力を模倣した方策です。",
+    "gail_trot_demo.mp4": "ゲイルのデモです。識別器の報酬で強化学習した模倣方策です。",
     "PickAndCarry_walk.mp4": "歩行です。止まる、歩く、曲がるを、腕を動かしながら続ける方策を再生しています。",
     "PickAndCarry_reach.mp4": "到達です。歩行の重みから続けて、空中の点に手先を届かせる様子です。",
     "PickAndCarry_ppo.mp4": "箱運びです。保存した重みで、不整地を渡って箱を拾い、目標へ運ぶ様子です。",
@@ -113,13 +123,40 @@ VIDEO_NARRATION = {
 }
 
 
+def _newest_named(folder: Path, name: str) -> Path | None:
+    direct = folder / name
+    if direct.is_file():
+        return direct
+    matches = [path for path in folder.rglob(name) if path.is_file()]
+    if not matches:
+        return None
+    return max(matches, key=lambda path: path.stat().st_mtime)
+
+
 def presentation_videos(folder: Path) -> list[Path]:
-    files = [path for path in folder.glob("*.mp4") if path.name != OUTPUT_NAME]
+    """Collect clips by preferred basename (flat or under videos/<task>/<run>/)."""
     rank = {name: index for index, name in enumerate(PREFERRED)}
-    return sorted(files, key=lambda path: (rank.get(path.name, len(PREFERRED)), path.name.lower()))
+    chosen: list[Path] = []
+    seen: set[str] = set()
+    for name in PREFERRED:
+        path = _newest_named(folder, name)
+        if path is None:
+            continue
+        chosen.append(path)
+        seen.add(name)
+    extras = [
+        path
+        for path in folder.rglob("*.mp4")
+        if path.name != OUTPUT_NAME and path.name not in seen and path not in chosen
+    ]
+    extras.sort(key=lambda path: (rank.get(path.name, len(PREFERRED)), path.stat().st_mtime, path.name.lower()))
+    return chosen + extras
 
 
 STAGE_CLIPS = (
+    ("trot_teacher_demo.mp4", "教師デモ（CPG）"),
+    ("bc_trot_demo.mp4", "BC デモ"),
+    ("gail_trot_demo.mp4", "GAIL デモ"),
     ("PickAndCarry_walk.mp4", "歩行"),
     ("PickAndCarry_reach.mp4", "到達"),
     ("PickAndCarry_haul.mp4", "歩きながら持つ"),
@@ -136,10 +173,13 @@ def report_stage_clips(folder: Path) -> None:
     """Say which curriculum recordings the final video can already show."""
     print("提出動画に入る段階:", flush=True)
     for name, label in STAGE_CLIPS:
-        if (folder / name).is_file():
-            print(f"  あり  {label}  {name}", flush=True)
+        path = _newest_named(folder, name)
+        if path is not None:
+            rel = path.relative_to(folder) if path.is_relative_to(folder) else path
+            print(f"  あり  {label}  {rel}", flush=True)
         else:
-            print(f"  まだない  {label}  メニュー 1 でその段階を学習すると {name} が残ります", flush=True)
+            hint = "メニュー 1 の模倣学習" if "trot" in name or name.startswith("bc_") or name.startswith("gail_") else "メニュー 2 でその段階を学習"
+            print(f"  まだない  {label}  {hint}すると videos/<タスク>/<学習回>/{name} が残ります", flush=True)
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:

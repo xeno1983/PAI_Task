@@ -27,19 +27,23 @@ class AlgoNameTests(unittest.TestCase):
 
 class ActionMaskTests(unittest.TestCase):
     def test_masked_entropy_ignores_arm_dims(self):
+        from pick_and_carry.config import CPG_PARAM_DIM, NUM_ACTIONS
         from pick_and_carry.curriculum import locomotion_action_mask
 
-        agent = ActorCritic(81, 19, init_std=0.5)
-        agent.set_action_mask(locomotion_action_mask(19))
+        agent = ActorCritic(81, NUM_ACTIONS, init_std=0.5)
+        agent.set_action_mask(locomotion_action_mask(NUM_ACTIONS))
         with torch.no_grad():
             agent.actor.log_std.fill_(0.0)  # std = 1 for all dims
         obs = torch.zeros(4, 81)
-        action = torch.zeros(4, 19)
+        action = torch.zeros(4, NUM_ACTIONS)
         _, entropy_full = agent.actor.log_prob(obs, action, None)
-        _, entropy_legs = agent.actor.log_prob(obs, action, agent.action_mask)
-        # Full 19-dim entropy at std=1 is larger than legs-only (12 dims).
-        self.assertGreater(float(entropy_full.mean()), float(entropy_legs.mean()))
-        self.assertAlmostEqual(float(entropy_legs.mean()), float(entropy_full.mean()) * 12 / 19, places=3)
+        _, entropy_cpg = agent.actor.log_prob(obs, action, agent.action_mask)
+        self.assertGreater(float(entropy_full.mean()), float(entropy_cpg.mean()))
+        self.assertAlmostEqual(
+            float(entropy_cpg.mean()),
+            float(entropy_full.mean()) * CPG_PARAM_DIM / NUM_ACTIONS,
+            places=3,
+        )
 
     def test_easy_walk_log_dir(self):
         self.assertTrue(str(stage_log_dir("walk", easy=True)).endswith("curriculum_walk_easy"))
@@ -65,8 +69,10 @@ class GroupRelativeTests(unittest.TestCase):
 
 class MirrorTests(unittest.TestCase):
     def test_mirror_twice_is_identity(self):
+        from pick_and_carry.config import NUM_ACTIONS
+
         obs = torch.randn(4, 81)
-        action = torch.randn(4, 19)
+        action = torch.randn(4, NUM_ACTIONS)
         self.assertTrue(torch.allclose(mirror_observation(mirror_observation(obs)), obs, atol=1e-6))
         self.assertTrue(torch.allclose(mirror_action(mirror_action(action)), action, atol=1e-6))
 
@@ -79,22 +85,25 @@ class MirrorTests(unittest.TestCase):
         self.assertAlmostEqual(float(mirrored[0, 3]), -0.5, places=5)
 
     def test_arm_yaw_and_wrist_axes_flip(self):
+        from pick_and_carry.config import NUM_ACTIONS
+
         obs = torch.zeros(1, 81)
-        action = torch.zeros(1, 19)
+        action = torch.zeros(1, NUM_ACTIONS)
         obs[0, 38] = 0.3  # joint1
         obs[0, 42] = 0.4  # joint5
         obs[0, 43] = -0.5  # joint6
-        action[0, 12] = 0.3
-        action[0, 16] = 0.4
-        action[0, 17] = -0.5
+        # Arm block starts after CPG_PARAM_DIM (10): joints at 10, 14, 15.
+        action[0, 10] = 0.3
+        action[0, 14] = 0.4
+        action[0, 15] = -0.5
         mirrored_obs = mirror_observation(obs)
         mirrored_act = mirror_action(action)
         self.assertAlmostEqual(float(mirrored_obs[0, 38]), -0.3, places=5)
         self.assertAlmostEqual(float(mirrored_obs[0, 42]), -0.4, places=5)
         self.assertAlmostEqual(float(mirrored_obs[0, 43]), 0.5, places=5)
-        self.assertAlmostEqual(float(mirrored_act[0, 12]), -0.3, places=5)
-        self.assertAlmostEqual(float(mirrored_act[0, 16]), -0.4, places=5)
-        self.assertAlmostEqual(float(mirrored_act[0, 17]), 0.5, places=5)
+        self.assertAlmostEqual(float(mirrored_act[0, 10]), -0.3, places=5)
+        self.assertAlmostEqual(float(mirrored_act[0, 14]), -0.4, places=5)
+        self.assertAlmostEqual(float(mirrored_act[0, 15]), 0.5, places=5)
 
     def test_catch_command_keeps_z(self):
         obs = torch.zeros(1, 81)
@@ -107,9 +116,11 @@ class MirrorTests(unittest.TestCase):
         self.assertAlmostEqual(float(walk[0, 68]), -0.5, places=5)
 
     def test_augment_recomputes_mirrored_log_prob(self):
-        agent = ActorCritic(81, 19, hidden=(32, 32))
+        from pick_and_carry.config import NUM_ACTIONS
+
+        agent = ActorCritic(81, NUM_ACTIONS, hidden=(32, 32))
         obs = torch.randn(3, 81)
-        actions = torch.randn(3, 19)
+        actions = torch.randn(3, NUM_ACTIONS)
         with torch.no_grad():
             old_logp, _ = agent.actor.log_prob(obs, actions)
         returns = torch.randn(3)

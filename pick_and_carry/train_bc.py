@@ -10,6 +10,10 @@ Demos only (teacher / BC policy):
     python -m pick_and_carry.train_bc --demo-only bc
     python -m pick_and_carry.train_bc --demo-only all
 
+Teacher demos write one mp4 per skill under
+``--log-dir/videos/<task>/<kind>_ep…_iter…_<stamp>/``:
+stand / sit / jump / forward / backward / turn_left / turn_right / stop.
+
 Then warm-start PPO:
 
     python -m pick_and_carry.train_ppo --curriculum walk --easy-walk --init-from \\
@@ -29,7 +33,12 @@ from pick_and_carry.algorithms import normalize_algo
 from pick_and_carry.checkpoints import save_checkpoint, torch_load
 from pick_and_carry.curriculum import locomotion_action_mask, stage_log_dir
 from pick_and_carry.train_ppo import initial_action_std, make_config
-from pick_and_carry.trot_teacher import TrotTeacher
+from pick_and_carry.trot_teacher import (
+    DEMO_SKILL_SECONDS,
+    DEMO_SKILLS,
+    TrotTeacher,
+    skill_command,
+)
 
 
 def parse_args():
@@ -47,12 +56,13 @@ def parse_args():
     parser.add_argument("--no-easy-walk", action="store_true", help="Collect on the hard walk setup.")
     parser.add_argument("--log-dir", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None, help="Checkpoint path. Default: <log-dir>/bc_trot.pt")
-    parser.add_argument("--frequency", type=float, default=2.0, help="Trot frequency in Hz.")
+    parser.add_argument("--frequency", type=float, default=2.5, help="Trot frequency in Hz.")
     parser.add_argument(
         "--demo-seconds",
         type=float,
-        default=20.0,
-        help="Record teacher/BC mp4s for this many seconds. 0 skips demos after training.",
+        default=0.0,
+        help="If >0, override per-skill demo length (every skill uses this many seconds). "
+        "0 keeps the built-in lengths (stand/sit/jump/walk/turn/stop).",
     )
     parser.add_argument(
         "--play-seconds",
@@ -66,8 +76,30 @@ def parse_args():
         default="none",
         help="Skip training; only record demos. 'bc' needs an existing bc_trot.pt.",
     )
+    parser.add_argument(
+        "--save-demos",
+        choices=("all", "teacher", "bc", "none"),
+        default="all",
+        help="Which demo mp4s to write after BC training. "
+        "With --demo-only, this still filters (e.g. teacher-only runs ignore 'bc').",
+    )
     parser.add_argument("--record", type=str, default=None, help="Ignored; demos use fixed names under --log-dir.")
     return parser.parse_args()
+
+
+def _resolve_demo_which(demo_only: str, save_demos: str) -> str | None:
+    """Return ``record_demos`` which, or None to skip writing mp4s."""
+    if demo_only != "none":
+        if save_demos == "none":
+            return None
+        if demo_only == "teacher":
+            return "teacher" if save_demos in ("all", "teacher") else None
+        if demo_only == "bc":
+            return "bc" if save_demos in ("all", "bc") else None
+        return save_demos  # demo_only=all → all/teacher/bc
+    if save_demos == "none":
+        return None
+    return save_demos
 
 
 def _build_walk_args(bc_args):
@@ -133,27 +165,47 @@ def _demo_cfg(base_cfg, log_dir: Path, record_path: Path):
     cfg.push_robots = False
     cfg.randomize_friction = False
     cfg.num_envs = 1
-    cfg.record_path = str(record_path)
+    record_path = Path(record_path)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.record_path = str(record_path.resolve())
     return cfg
+
+
+def _skill_seconds(override: float) -> dict[str, float]:
+    if override and override > 0:
+        return {name: float(override) for name in DEMO_SKILLS}
+    return dict(DEMO_SKILL_SECONDS)
 
 
 def collect_demos(env, teacher: TrotTeacher, seconds: float) -> tuple[torch.Tensor, torch.Tensor]:
     steps = max(1, int(round(seconds / env.cfg.dt)))
+    resample_every = max(1, int(round(2.5 / env.cfg.dt)))
     obs_list: list[torch.Tensor] = []
     act_list: list[torch.Tensor] = []
     obs = env.reset()
     teacher.reset()
-    print(f"collecting {steps} steps × {env.num_envs} envs (~{seconds:.0f}s)…", flush=True)
+    teacher.sample_skills()
+    # Lock teacher commands into both env.command and the obs command slice.
+    obs = env.set_commands(teacher.commands_for_skills(), hold=True)
+    print(f"collecting {steps} steps × {env.num_envs} envs (~{seconds:.0f}s, mixed skills)…", flush=True)
     started = time.perf_counter()
     for step in range(steps):
+        if step > 0 and step % resample_every == 0:
+            teacher.sample_skills()
+            obs = env.set_commands(teacher.commands_for_skills(), hold=True)
         action = teacher.act(env.command)
         obs_list.append(obs.detach())
         act_list.append(action.detach())
         obs, _, done, _ = env.step(action)
         if bool(done.any()):
-            teacher.reset(torch.nonzero(done, as_tuple=False).squeeze(-1))
+            done_ids = torch.nonzero(done, as_tuple=False).squeeze(-1)
+            teacher.reset(done_ids)
+            teacher.sample_skills()
+            # Re-sample all; simpler than per-env partial update for BC.
+            obs = env.set_commands(teacher.commands_for_skills(), hold=True)
         if (step + 1) % max(1, steps // 10) == 0:
             print(f"  collect {step + 1}/{steps}", flush=True)
+    env.hold_commands = False
     elapsed = time.perf_counter() - started
     obs_all = torch.cat(obs_list, dim=0)
     act_all = torch.cat(act_list, dim=0)
@@ -193,6 +245,141 @@ def train_bc(
             print(f"  bc epoch {epoch}/{epochs}  leg_mse {total / max(count, 1):.5f}", flush=True)
 
 
+def _record_skill_clip(
+    *,
+    cfg,
+    log_dir: Path,
+    skill: str,
+    seconds: float,
+    frequency_hz: float,
+    path: Path,
+) -> Path:
+    from pick_and_carry.env import PickAndCarryEnv
+
+    demo_cfg = _demo_cfg(cfg, log_dir, path)
+    env = PickAndCarryEnv(cfg=demo_cfg)
+    teacher = TrotTeacher(
+        1,
+        dt=demo_cfg.dt,
+        frequency_hz=frequency_hz,
+        leg_action_scale=demo_cfg.leg_action_scale,
+        device=env.device,
+    )
+    env.reset()
+    teacher.reset()
+    teacher.set_skill(skill)
+    cmd = skill_command(skill, device=env.device, n=1)
+    env.set_commands(cmd, hold=True)
+    steps = max(1, int(round(seconds / demo_cfg.dt)))
+    print(f"  {skill:12s} {seconds:.1f}s → {path.name}", flush=True)
+    for _ in range(steps):
+        action = teacher.act(env.command, skill=skill)
+        _, _, done, _ = env.step(action)
+        if bool(done.any()):
+            teacher.reset()
+            teacher.set_skill(skill)
+            env.set_commands(cmd, hold=True)
+    env.close()
+    return path
+
+
+def _record_bc_skill_clip(
+    *,
+    cfg,
+    log_dir: Path,
+    skill: str,
+    seconds: float,
+    agent: ActorCritic,
+    path: Path,
+) -> Path:
+    from pick_and_carry.env import PickAndCarryEnv
+
+    demo_cfg = _demo_cfg(cfg, log_dir, path)
+    env = PickAndCarryEnv(cfg=demo_cfg)
+    agent = agent.to(env.device)
+    obs = env.reset()
+    cmd = skill_command(skill, device=env.device, n=1)
+    obs = env.set_commands(cmd, hold=True)
+    steps = max(1, int(round(seconds / demo_cfg.dt)))
+    print(f"  {skill:12s} {seconds:.1f}s → {path.name}", flush=True)
+    with torch.no_grad():
+        for _ in range(steps):
+            action = agent.act_mean(obs)
+            obs, _, _, _ = env.step(action)
+    env.close()
+    return path
+
+
+def _record_teacher_reel(
+    *,
+    cfg,
+    log_dir: Path,
+    lengths: dict[str, float],
+    frequency_hz: float,
+    path: Path,
+) -> Path:
+    """One mp4 with stand→sit→jump→walk→turn→stop in order."""
+    from pick_and_carry.env import PickAndCarryEnv
+
+    demo_cfg = _demo_cfg(cfg, log_dir, path)
+    env = PickAndCarryEnv(cfg=demo_cfg)
+    teacher = TrotTeacher(
+        1,
+        dt=demo_cfg.dt,
+        frequency_hz=frequency_hz,
+        leg_action_scale=demo_cfg.leg_action_scale,
+        device=env.device,
+    )
+    env.reset()
+    teacher.reset()
+    total = sum(lengths[s] for s in DEMO_SKILLS)
+    print(f"  reel         {total:.0f}s (all skills) → {path.name}", flush=True)
+    for skill in DEMO_SKILLS:
+        teacher.set_skill(skill)
+        cmd = skill_command(skill, device=env.device, n=1)
+        env.set_commands(cmd, hold=True)
+        steps = max(1, int(round(lengths[skill] / demo_cfg.dt)))
+        print(f"    … {skill} ({lengths[skill]:.1f}s)", flush=True)
+        for _ in range(steps):
+            action = teacher.act(env.command, skill=skill)
+            _, _, done, _ = env.step(action)
+            if bool(done.any()):
+                teacher.reset()
+                teacher.set_skill(skill)
+                env.set_commands(cmd, hold=True)
+    env.close()
+    return path
+
+
+def _record_bc_reel(
+    *,
+    cfg,
+    log_dir: Path,
+    lengths: dict[str, float],
+    agent: ActorCritic,
+    path: Path,
+) -> Path:
+    from pick_and_carry.env import PickAndCarryEnv
+
+    demo_cfg = _demo_cfg(cfg, log_dir, path)
+    env = PickAndCarryEnv(cfg=demo_cfg)
+    agent = agent.to(env.device)
+    obs = env.reset()
+    total = sum(lengths[s] for s in DEMO_SKILLS)
+    print(f"  reel         {total:.0f}s (all skills) → {path.name}", flush=True)
+    with torch.no_grad():
+        for skill in DEMO_SKILLS:
+            cmd = skill_command(skill, device=env.device, n=1)
+            obs = env.set_commands(cmd, hold=True)
+            steps = max(1, int(round(lengths[skill] / demo_cfg.dt)))
+            print(f"    … {skill} ({lengths[skill]:.1f}s)", flush=True)
+            for _ in range(steps):
+                action = agent.act_mean(obs)
+                obs, _, _, _ = env.step(action)
+    env.close()
+    return path
+
+
 def record_demos(
     cfg,
     *,
@@ -201,55 +388,92 @@ def record_demos(
     frequency_hz: float,
     agent: ActorCritic | None,
     which: str = "all",
+    video_dir: Path | None = None,
 ) -> list[Path]:
-    """Record teacher and/or BC policy demos under ``log_dir``."""
-    from pick_and_carry.env import PickAndCarryEnv
+    """Record a skill reel plus one mp4 per skill under ``video_dir`` (or ``log_dir``)."""
+    from pick_and_carry.video_paths import make_video_run_dir, video_task_name
 
+    log_dir = Path(log_dir).resolve()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    lengths = _skill_seconds(seconds)
     paths: list[Path] = []
-    if which in ("all", "teacher"):
-        teacher_path = log_dir / "trot_teacher_demo.mp4"
-        demo_cfg = _demo_cfg(cfg, log_dir, teacher_path)
-        env = PickAndCarryEnv(cfg=demo_cfg)
-        teacher = TrotTeacher(
-            1,
-            dt=demo_cfg.dt,
-            frequency_hz=frequency_hz,
-            leg_action_scale=demo_cfg.leg_action_scale,
-            device=env.device,
+    easy = bool(getattr(cfg, "easy_walk", False) or "walk_easy" in log_dir.name)
+    task = video_task_name(getattr(cfg, "curriculum", "walk"), easy=easy)
+    print(f"demo videos root: {log_dir / 'videos'}  task={task}", flush=True)
+
+    def _out(kind: str, epochs: int | None = None) -> Path:
+        if video_dir is not None:
+            out = Path(video_dir).resolve()
+            out.mkdir(parents=True, exist_ok=True)
+            return out
+        out = make_video_run_dir(
+            log_dir,
+            task=task,
+            kind=kind,
+            epochs=epochs,
+            extra={"curriculum": getattr(cfg, "curriculum", "walk"), "which": which},
         )
-        obs = env.reset()
-        steps = max(1, int(round(seconds / demo_cfg.dt)))
-        # Force a clear +X command so the demo is a forward walk check, not a random mix.
-        forward = torch.tensor([[0.40, 0.0, 0.0]], dtype=torch.float32, device=env.device)
-        print(f"recording teacher {seconds:.0f}s (vx=+0.4) → {teacher_path}", flush=True)
-        for _ in range(steps):
-            env.command.copy_(forward)
-            action = teacher.act(env.command)
-            obs, _, done, _ = env.step(action)
-            if bool(done.any()):
-                teacher.reset(torch.nonzero(done, as_tuple=False).squeeze(-1))
-                env.command.copy_(forward)
-        env.close()
-        print(f"video: {teacher_path.resolve()}", flush=True)
-        paths.append(teacher_path)
+        print(f"  run folder: {out}", flush=True)
+        return out
+
+    if which in ("all", "teacher"):
+        out_dir = _out("teacher")
+        print(f"recording teacher demos → {out_dir}", flush=True)
+        reel = out_dir / "trot_teacher_demo.mp4"
+        paths.append(
+            _record_teacher_reel(
+                cfg=cfg,
+                log_dir=log_dir,
+                lengths=lengths,
+                frequency_hz=frequency_hz,
+                path=reel,
+            )
+        )
+        print(f"video: {reel.resolve()}", flush=True)
+        for skill in DEMO_SKILLS:
+            path = out_dir / f"trot_teacher_{skill}.mp4"
+            paths.append(
+                _record_skill_clip(
+                    cfg=cfg,
+                    log_dir=log_dir,
+                    skill=skill,
+                    seconds=lengths[skill],
+                    frequency_hz=frequency_hz,
+                    path=path,
+                )
+            )
+            print(f"video: {path.resolve()}", flush=True)
 
     if which in ("all", "bc"):
         if agent is None:
             raise SystemExit("BC デモには学習済みの agent か bc_trot.pt が必要です。")
-        bc_path = log_dir / "bc_trot_demo.mp4"
-        demo_cfg = _demo_cfg(cfg, log_dir, bc_path)
-        env = PickAndCarryEnv(cfg=demo_cfg)
-        agent = agent.to(env.device)
-        obs = env.reset()
-        steps = max(1, int(round(seconds / demo_cfg.dt)))
-        print(f"recording BC policy {seconds:.0f}s → {bc_path}", flush=True)
-        with torch.no_grad():
-            for _ in range(steps):
-                action = agent.act_mean(obs)
-                obs, _, _, _ = env.step(action)
-        env.close()
-        print(f"video: {bc_path.resolve()}", flush=True)
-        paths.append(bc_path)
+        epochs = int(getattr(cfg, "_demo_epochs", 0) or 0) or None
+        out_dir = _out("bc", epochs=epochs)
+        print(f"recording BC demos → {out_dir}", flush=True)
+        reel = out_dir / "bc_trot_demo.mp4"
+        paths.append(
+            _record_bc_reel(
+                cfg=cfg,
+                log_dir=log_dir,
+                lengths=lengths,
+                agent=agent,
+                path=reel,
+            )
+        )
+        print(f"video: {reel.resolve()}", flush=True)
+        for skill in DEMO_SKILLS:
+            path = out_dir / f"bc_trot_{skill}.mp4"
+            paths.append(
+                _record_bc_skill_clip(
+                    cfg=cfg,
+                    log_dir=log_dir,
+                    skill=skill,
+                    seconds=lengths[skill],
+                    agent=agent,
+                    path=path,
+                )
+            )
+            print(f"video: {path.resolve()}", flush=True)
     return paths
 
 
@@ -269,8 +493,12 @@ def main() -> None:
     out = args.output or (ns.log_dir / "bc_trot.pt")
 
     if args.demo_only != "none":
+        which = _resolve_demo_which(args.demo_only, args.save_demos)
+        if which is None:
+            print("save-demos=none → デモ mp4 は書きません。", flush=True)
+            return
         agent = None
-        if args.demo_only in ("all", "bc"):
+        if which in ("all", "bc"):
             if not out.is_file():
                 raise SystemExit(f"BC デモ用の重みがありません: {out}")
             blob = torch_load(out, torch.device("cpu"))
@@ -280,13 +508,15 @@ def main() -> None:
         videos = record_demos(
             cfg,
             log_dir=ns.log_dir,
-            seconds=demo_seconds if demo_seconds > 0 else 20.0,
+            seconds=demo_seconds,
             frequency_hz=args.frequency,
             agent=agent,
-            which="all" if args.demo_only == "all" else args.demo_only,
+            which=which,
         )
         for path in videos:
             print(f"demo ready: {path.resolve()}", flush=True)
+        if videos:
+            print(f"demo folder: {videos[0].parent.resolve()}", flush=True)
         return
 
     env = PickAndCarryEnv(cfg=cfg)
@@ -333,17 +563,23 @@ def main() -> None:
     torch.save(blob, out)
     print(f"saved BC checkpoint {out.resolve()}", flush=True)
 
-    if demo_seconds and demo_seconds > 0:
+    which = _resolve_demo_which("none", args.save_demos)
+    if which is None:
+        print("save-demos=none → デモ mp4 はスキップします。", flush=True)
+    else:
+        cfg._demo_epochs = int(args.epochs)
         videos = record_demos(
             cfg,
             log_dir=ns.log_dir,
             seconds=demo_seconds,
             frequency_hz=args.frequency,
             agent=agent.cpu(),
-            which="all",
+            which=which,
         )
         for path in videos:
             print(f"demo ready: {path.resolve()}", flush=True)
+        if videos:
+            print(f"demo folder: {videos[0].parent.resolve()}", flush=True)
     print(
         f"next: python -m pick_and_carry.train_ppo --curriculum walk --easy-walk "
         f"--init-from {out} --iterations 1000",

@@ -1,6 +1,6 @@
 """The Unitree Z1 on the Go2.
 
-Six arm joints: observation 81, action 19. Every curriculum stage uses that layout.
+Six arm joints: observation 81, action CPG+arm (17). Every curriculum stage uses that layout.
 """
 
 from __future__ import annotations
@@ -102,7 +102,8 @@ def _z1() -> ArmSpec:
         joint_open=-0.5 * math.pi,
         joint_closed=0.0,
         closed_threshold=0.20,
-        action_scale=1.0,
+        # Residual scale used when EnvConfig.arm_action_scale is not overridden.
+        action_scale=0.12,
         kp=80.0,
         kd=8.0,
         gripper_kp=20.0,

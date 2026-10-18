@@ -1,6 +1,6 @@
 # Go2 Pick-and-Carry（Genesis）
 
-Unitree Go2 の背中に腕を固定し、不整地を渡って立方体を拾い、目標へ置く環境です。学習は PPO が既定で、起動時に GRPO と Symmetric PPO（左右対称の増強）も選べます。手法ごとの保存先は `logs/{algo}_*` で、メニュー 7 で曲線を重ねて比較できます。画面は出さず、結果は mp4 で確認します。この GPU では Genesis の 3D ウィンドウが落ちるため、`--viewer` は使いません。
+Unitree Go2 の背中に腕を固定し、不整地を渡って立方体を拾い、目標へ置く環境です。学習は PPO が既定で、起動時に GRPO と Symmetric PPO（左右対称の増強）も選べます。手法ごとの保存先は `logs/{algo}_*` で、メニュー 8 で曲線を重ねて比較できます。画面は出さず、結果は mp4 で確認します。この GPU では Genesis の 3D ウィンドウが落ちるため、`--viewer` は使いません。
 
 確認済みの組み合わせは Windows、Python 3.12、PyTorch 2.11.0+cu128、Genesis 1.4.3、RTX 5070 Laptop（8 GB）です。
 
@@ -48,26 +48,27 @@ Genesis がなくても、報酬と方策のテストは通ります。
 
 | 番号 | 内容 | 主な出力 |
 | --- | --- | --- |
-| 1 | 段階を選んで PPO 学習（歩行 / 到達 / 持ち運び / 箱運び / キャッチ） | 各 `logs/ppo_*` |
-| 2 | 推論。段階を選んで保存した重みを再生 | mp4 |
-| 3 | 箱運びの途中経過を並べた比較動画 | `PickAndCarry_z1_compare.mp4` |
-| 4 | 学習曲線をブラウザで開く | `PickAndCarry_curves.html` |
-| 5 | スライドと録画を、説明音声つきの 1 本にする | `PickAndCarry_presentation.mp4` |
-| 6 | Colab 用 zip | `起動スクリプト\PickAndCarry\PAI_Task_colab.zip` |
-| 7 | 学習手法（PPO / GRPO / Symmetric PPO）の曲線比較 | `PickAndCarry_compare_curves.html` |
+| 1 | 模倣学習（トロット教師 → BC / GAIL）。デモ保存の有無を選べる | `bc_trot.pt` / `gail_trot.pt`、`videos/...` |
+| 2 | 段階を選んで学習（歩行 / 到達 / 持ち運び / 箱運び / キャッチ） | 各 `logs/{algo}_*` |
+| 3 | 推論。段階を選んで保存した重みを再生 | mp4（`videos/<タスク>/...`） |
+| 4 | 箱運びの途中経過を並べた比較動画 | `PickAndCarry_z1_compare.mp4` |
+| 5 | 学習曲線をブラウザで開く | `PickAndCarry_curves.html` |
+| 6 | スライドと録画を、説明音声つきの 1 本にする | `PickAndCarry_presentation.mp4` |
+| 7 | Colab 用 zip | `起動スクリプト\PickAndCarry\PAI_Task_colab.zip` |
+| 8 | 学習手法（PPO / GRPO / Symmetric PPO）の曲線比較 | `PickAndCarry_compare_curves.html` |
 
-出力ファイルは、bat と同じ `起動スクリプト\PickAndCarry` フォルダにできます。
+出力ファイルは、bat と同じ `起動スクリプト\PickAndCarry` フォルダにできます。デモ・再生 mp4 は `logs/.../videos/<タスク>/<学習回>/` に分かれ、起動フォルダへもコピーします。
 
-1 番を選ぶと、次を順に聞きます。Enter は括弧内の既定です。
+2 番を選ぶと、次を順に聞きます。Enter は括弧内の既定です。
 
-1. カリキュラム段階（歩行 / 到達 / 持ち運び / 箱運び / キャッチ）。
+1. カリキュラム段階（歩行 / 到達 / 持ち運び / 箱運び / キャッチ）。歩行→簡単では BC / GAIL 暖機も選べます。
 2. 学習回数。今の iteration にこの回数を足します。
 3. 同時に動かすロボット数（既定 64）。
 4. 歩行では地形の高さ。到達以降は平地です。
 
 途中で止めても、最後に `saved ppo_XXXX.pt` と出た時点から次回続けられます。保存は 20 iteration ごとです。画面の iteration がファイルより先に進んでいることがあります。
 
-2 番の箱運び推論では、クリックで物資と運び先を決められます。ROS 2 を選ぶと rviz2 のクリックで運び先だけが動きます。物資の位置は、最初のクリック画面のままです。
+3 番の箱運び推論では、クリックで物資と運び先を決められます。ROS 2 を選ぶと rviz2 のクリックで運び先だけが動きます。物資の位置は、最初のクリック画面のままです。
 
 ## 4. コマンドで実行する
 
@@ -75,21 +76,26 @@ Genesis がなくても、報酬と方策のテストは通ります。
 
 ```powershell
 $env:PYTHONUTF8 = "1"
-# 1) トロット教師のデモ → 模倣学習（BC）。出力: logs/ppo_curriculum_walk_easy/bc_trot.pt
+# 1a) トロット教師 → BC。出力: logs/ppo_curriculum_walk_easy/bc_trot.pt
 .\.venv\Scripts\python.exe -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs 80
-# 2) BC 重みから easy-walk PPO
-.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --easy-walk --init-from logs/ppo_curriculum_walk_easy/bc_trot.pt --num-envs 64 --iterations 1000 --num-steps 128 --save-interval 20 --curriculum walk --arm z1
+# 1b) トロット教師 → GAIL（BC 暖機あり）。出力: logs/ppo_curriculum_walk_easy/gail_trot.pt
+.\.venv\Scripts\python.exe -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs 40 --iterations 300
+# 2) 模倣重みから easy-walk PPO（--init-from を省略すると gail_trot.pt → bc_trot.pt の順で自動採用）
+.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --easy-walk --resume latest --num-envs 64 --iterations 1000 --num-steps 128 --save-interval 20 --curriculum walk --arm z1
+# 明示する場合:
+# --init-from logs/ppo_curriculum_walk_easy/gail_trot.pt
+# --init-from logs/ppo_curriculum_walk_easy/bc_trot.pt
 ```
 
 起動メニュー:
 
-- **8** … 模倣学習だけ（BC＋デモ mp4）。教員デモ `trot_teacher_demo.mp4` / BC デモ `bc_trot_demo.mp4`
-- **1 → 歩行 → 簡単 → BCしてから PPO** … 学習の一連
-- **2 → 歩行 → 簡単** … BC 重みや教師デモの再生
+- **1** … 模倣学習（BC / GAIL）。教師デモ mp4 の保存有無を選べます。動画は `logs/.../videos/<タスク>/<種別>_ep####_iter######_<時刻>/` に分けて保存（リール `*_demo.mp4` とスキル別クリップ）
+- **2 → 歩行 → 簡単 → BC / GAIL してから PPO** … 学習の一連（ここでも教師デモ保存の有無を選べます）
+- **3 → 歩行 → 簡単** … 模倣重みや教師デモの再生
 
-教師は対角トロットの位相振動子（脚 12 次元のみ）です。
+教師は立つ・座る・ジャンプ・前後進・左右旋回・停止と、対角トロット歩行を CPG パラメータ（10 次元）として出します。環境側の CPG が 12 関節指令へ展開します。GAIL は識別器報酬 `-log(1-D(s,a))` で PPO を回します（既定は環境報酬なし・BC 暖機あり）。`--easy-walk` で PPO チェックポイントが無いとき、`--init-from` 未指定なら `gail_trot.pt` があればそれを、無ければ `bc_trot.pt` を自動で載せます（起動スクリプトと同じ順）。
 
-再生は学習せず、保存した重みで mp4 を書きます。
+再生は学習せず、保存した重みで mp4 を書きます。保存先は同様に `videos/<タスク>/<algo>_iter######_<時刻>/` です（起動フォルダ側にも同じ木をコピーします）。
 
 ```powershell
 .\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --seconds 20 --record "$env:USERPROFILE\Desktop\起動スクリプト\PickAndCarry\PickAndCarry_ppo.mp4" --log-dir logs/ppo_curriculum_walk --curriculum walk --arm z1
@@ -106,8 +112,8 @@ $env:PYTHONUTF8 = "1"
 | `--terrain-steps` | 移動区間に段差を足す |
 | `--terrain-amplitude 0.045` | 波または段の高さ（メートル） |
 | `--resume latest` | そのログフォルダの最新の適合する重みから続ける（iteration 数値順） |
-| `--init-from PATH` | BC などから重みだけ載せて iteration 0 から PPO |
-| `--easy-walk` | 平坦・腕固定・押しなし。保存先 `*_walk_easy` |
+| `--init-from PATH` | 模倣重みなどから重みだけ載せて iteration 0 から PPO |
+| `--easy-walk` | 平坦・腕固定・押しなし。保存先 `*_walk_easy`。PPO 無し時は `gail_trot.pt` → `bc_trot.pt` を自動初期化 |
 | `--play` | 学習せず再生する |
 | `--ros` | 推論だけ。状態を送り、実行中の運び先を受け取る。学習中に付けると止まる |
 
@@ -156,7 +162,7 @@ Windows では起動スクリプトで「ROS 2 で表示する」を選びます
 
 ### 段階的な学習
 
-段階は `--curriculum` で選びます。全段階が観測 81・行動 19 で、重みは次の順に引き継ぎます。
+段階は `--curriculum` で選びます。全段階が観測 81・行動 17（CPG パラメータ + 腕）で、重みは次の順に引き継ぎます。
 
 | 段階 | 内容 | 重みの元 |
 | --- | --- | --- |
@@ -172,7 +178,9 @@ Windows では起動スクリプトで「ROS 2 で表示する」を選びます
 
 ### 観測と行動（Z1）
 
-`reset()` は `(環境数, 81)`、`step(action)` は `obs, reward, done, info` を返します。行動は `(環境数, 19)` で、各成分は -1 から 1 です。| 区間 | 内容 |
+`reset()` は `(環境数, 81)`、`step(action)` は `obs, reward, done, info` を返します。行動は `(環境数, 17)` で、各成分はおおよそ -1 から 1 です。
+
+| 区間 | 内容 |
 | --- | --- |
 | 0:12 | 脚の関節角（立ち姿勢との差。FL, FR, RL, RR の順に hip, thigh, calf） |
 | 12:24 | 脚の関節速度 × 0.05 |
@@ -191,9 +199,9 @@ Windows では起動スクリプトで「ROS 2 で表示する」を選びます
 | 61:62 | 把持フラグ |
 | 62:66 | 段階 one-hot（箱へ歩く、拾う、運ぶ、置く） |
 | 66:69 | 速度指令。キャッチでは 0.3 秒先のボール位置 × 0.1 |
-| 69:81 | 直前の脚の指令 |
+| 69:81 | 直前の脚の指令（CPG が展開した 12 関節） |
 
-行動は `[脚 12 | 腕 | グリッパ 1]` です。脚は立ち姿勢からの差分に 0.25 を掛け、PD（kp 60、kd 1.5）で追従します。腕は初期姿勢からの差分、グリッパは -1 で閉じ +1 で開きます。
+行動は `[CPG 10 | 腕 Δq 6 | グリッパ Δg 1]` です。脚は環境内の対角トロット CPG（`pick_and_carry/cpg.py`）が位相を進め、12 関節指令へ展開してから PD（kp 60、kd 1.5）で追従します。reach / haul / carry / catch では腕は数値 IK（`pick_and_carry/ik.py`）が EE 目標へベース姿勢を出し、方策は小さな残差（×0.12 rad）だけを足します。グリッパも段階ベースの開閉に残差（×0.35 rad）を足します。walk では腕は方策外です。旧・腕フル指令の重みは reach 以降で使えません。
 
 歩行の報酬は legged_gym の標準の組み合わせです（速度の追従、縦揺れ・横揺れ、高さ 0.30 m、トルク、加速度、行動の変化、足を上げた時間、衝突、終了）。方策は 512×256×128 の ELU で、行動は正規分布です。学習率は KL 0.01 を目標に自動で調整します。
 
@@ -201,7 +209,7 @@ Windows では起動スクリプトで「ROS 2 で表示する」を選びます
 
 ## 6. 腕
 
-腕は Unitree Z1 のみです。公式の関節位置と慣性を使い、グリッパ込みで約 5.2 kg、6 軸です。URDF は `assets/urdf/quadruped_z1.urdf` です。観測 81、行動 19 です。
+腕は Unitree Z1 のみです。公式の関節位置と慣性を使い、グリッパ込みで約 5.2 kg、6 軸です。URDF は `assets/urdf/quadruped_z1.urdf` です。観測 81、行動 17（CPG+腕）です。
 
 Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(-0.05, 0, 0.08)` に固定します。胴体の少し後ろ、上面のすぐ上です。
 
@@ -215,7 +223,10 @@ Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(
 
 | ファイル | 内容 |
 | --- | --- |
-| `pick_and_carry/config.py` | 環境設定、Z1 の観測 81 と行動 19 |
+| `pick_and_carry/config.py` | 環境設定、Z1 の観測 81 と行動 17（CPG） |
+| `pick_and_carry/cpg.py` | 脚用の学習可能 CPG（パラメータ → 12 関節） |
+| `pick_and_carry/ik.py` | Z1 の FK / 数値 IK（腕ベース指令） |
+| `pick_and_carry/video_paths.py` | デモ・再生 mp4 の `videos/<タスク>/<学習回>/` 配置 |
 | `pick_and_carry/arms.py` | Z1 の関節、質量の前提、次元 |
 | `pick_and_carry/observation.py` | 観測ベクトルの組み立て |
 | `pick_and_carry/reward.py` | 箱運びの報酬 |
@@ -224,7 +235,9 @@ Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(
 | `pick_and_carry/helpers.py` | 座標変換、把持・設置・転倒、手先カメラの重心 |
 | `pick_and_carry/env.py` | Genesis のシーン |
 | `pick_and_carry/agents.py` | PPO の方策と clip 付きの更新 |
-| `pick_and_carry/train_ppo.py` | 学習と再生 |
+| `pick_and_carry/train_ppo.py` | 学習と再生（easy-walk の模倣自動初期化含む） |
+| `pick_and_carry/train_bc.py` | トロット教師デモの Behavioral Cloning |
+| `pick_and_carry/train_gail.py` | トロット教師デモの GAIL |
 | `pick_and_carry/checkpoints.py` | 重みの保存、互換する最新の探索、古い保存の退避 |
 | `pick_and_carry/difficulty.py` | 学習中の難しさ（地形、ボール）を、成績で上げ下げする |
 | `pick_and_carry/ros_bridge.py` | 推論中の状態送信と運び先の受信。ROS 自体は入れない |

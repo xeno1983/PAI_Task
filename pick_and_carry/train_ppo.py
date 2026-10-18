@@ -73,10 +73,13 @@ def minibatch_size_for(args, batch: int) -> int:
     return max(1, batch // max(1, int(args.num_mini_batches)))
 
 
-def initial_action_std(num_actions: int, leg_std: float, arm_std: float, leg_count: int = 12):
-    """Exploration noise per action: wide on the legs, narrow on the arm and gripper."""
+def initial_action_std(num_actions: int, leg_std: float, arm_std: float, cpg_count: int | None = None):
+    """Exploration noise per action: wider on CPG params, narrower on arm/gripper."""
+    from pick_and_carry.config import CPG_PARAM_DIM
+
+    count = CPG_PARAM_DIM if cpg_count is None else int(cpg_count)
     std = torch.full((num_actions,), float(arm_std))
-    std[:leg_count] = float(leg_std)
+    std[:count] = float(leg_std)
     return std
 
 
@@ -122,7 +125,7 @@ def parse_args():
         "--arm",
         choices=("z1",),
         default="z1",
-        help="Unitree Z1. Observation 81, action 19.",
+        help="Unitree Z1. Observation 81, action CPG+arm (see config.NUM_ACTIONS).",
     )
     parser.add_argument(
         "--control-split",
@@ -204,6 +207,71 @@ def _parse_xy(text: str | None) -> tuple[float, float] | None:
     if len(parts) != 2:
         raise SystemExit(f"Expected x,y, got {text}")
     return float(parts[0]), float(parts[1])
+
+
+def _latest_checkpoint_iteration(log_dir: Path, resume: str | None) -> int:
+    """Best-effort iteration for naming play videos before the env exists."""
+    import re
+
+    if resume and resume != "latest":
+        path = Path(resume)
+        match = re.search(r"(\d{4,})", path.stem)
+        if match:
+            return int(match.group(1))
+        return 0
+    if not log_dir.is_dir():
+        return 0
+    best = 0
+    for path in log_dir.glob("ppo_*.pt"):
+        match = re.search(r"(\d+)", path.stem)
+        if match:
+            best = max(best, int(match.group(1)))
+    for name in ("bc_trot.pt", "gail_trot.pt"):
+        if (log_dir / name).is_file() and best == 0 and resume in (None, "latest", name, str(log_dir / name)):
+            return 0
+    return best
+
+
+def prepare_record_path(args) -> None:
+    """Nest ``--record`` under ``log_dir/videos/{task}/{algo}_iter…_stamp/``."""
+    if not args.record:
+        return
+    from pick_and_carry.video_paths import make_video_run_dir, video_task_name, videos_root
+
+    log_dir = Path(args.log_dir).resolve()
+    args.log_dir = log_dir
+    requested = Path(args.record)
+    # Already nested under this log_dir's videos/ tree — keep as-is (ensure parent exists).
+    try:
+        requested.resolve().relative_to(videos_root(log_dir).resolve())
+        requested.parent.mkdir(parents=True, exist_ok=True)
+        args.record = str(requested.resolve())
+        return
+    except ValueError:
+        pass
+    easy = bool(getattr(args, "easy_walk", False) or "walk_easy" in log_dir.name)
+    task = video_task_name(
+        getattr(args, "curriculum", "carry"),
+        easy=easy,
+        catch_level=getattr(args, "catch_level", "static"),
+    )
+    iteration = _latest_checkpoint_iteration(log_dir, getattr(args, "resume", None))
+    kind = normalize_algo(getattr(args, "algo", "ppo"))
+    resume = str(getattr(args, "resume", "") or "")
+    if "bc_trot" in resume:
+        kind = "bc"
+    elif "gail_trot" in resume:
+        kind = "gail"
+    run_dir = make_video_run_dir(
+        log_dir,
+        task=task,
+        kind=kind,
+        iteration=iteration,
+        extra={"requested_name": requested.name, "resume": resume},
+    )
+    nested = (run_dir / requested.name).resolve()
+    args.record = str(nested)
+    print(f"record → {nested}", flush=True)
 
 
 def make_config(args) -> EnvConfig:
@@ -666,6 +734,7 @@ def main() -> None:
         if "walk_easy" not in Path(args.log_dir).name:
             args.log_dir = stage_log_dir("walk", algo=algo, easy=True)
             print(f"easy-walk: log-dir → {args.log_dir}", flush=True)
+    prepare_record_path(args)
     cfg = make_config(args)
     missing = missing_play_checkpoint(args, cfg)
     if missing:
@@ -694,11 +763,15 @@ def main() -> None:
     start_iteration, resumed_from = resume_agent(args, env, cfg, agent, optimizer)
     init_from = getattr(args, "init_from", None)
     if resumed_from is None:
-        # Auto-pick BC warm-start in the easy-walk folder when no PPO checkpoint exists.
+        # Auto-pick imitation warm-start in the easy-walk folder when no PPO checkpoint exists.
+        # Prefer GAIL over BC (same order as the launcher).
         if init_from is None and getattr(args, "easy_walk", False):
-            candidate = Path(args.log_dir) / "bc_trot.pt"
-            if candidate.is_file():
-                init_from = candidate
+            log_dir = Path(args.log_dir)
+            for name in ("gail_trot.pt", "bc_trot.pt"):
+                candidate = log_dir / name
+                if candidate.is_file():
+                    init_from = candidate
+                    break
         if init_from is not None:
             resumed_from = load_init_weights(init_from, env, cfg, agent)
             start_iteration = 0

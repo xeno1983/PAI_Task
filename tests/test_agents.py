@@ -39,11 +39,14 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(torch.allclose(returns[0], rewards[0]))
 
     def test_actions_are_not_squashed_and_the_noise_starts_per_action(self):
-        init = torch.cat((torch.full((12,), 1.0), torch.full((7,), 0.4)))
+        from pick_and_carry.config import CPG_PARAM_DIM
+
+        arm_dims = NUM_ACTIONS - CPG_PARAM_DIM
+        init = torch.cat((torch.full((CPG_PARAM_DIM,), 1.0), torch.full((arm_dims,), 0.4)))
         agent = ActorCritic(NUM_OBS, NUM_ACTIONS, hidden=(32, 32), init_std=init)
         std = agent.actor.std()
-        self.assertTrue(torch.allclose(std[:12], torch.ones(12)))
-        self.assertTrue(torch.allclose(std[12:], torch.full((7,), 0.4)))
+        self.assertTrue(torch.allclose(std[:CPG_PARAM_DIM], torch.ones(CPG_PARAM_DIM)))
+        self.assertTrue(torch.allclose(std[CPG_PARAM_DIM:], torch.full((arm_dims,), 0.4)))
         action, _, _ = agent.act(torch.zeros(4096, NUM_OBS))
         # A tanh policy could never exceed 1; a Gaussian one does.
         self.assertGreater(float(action.abs().max()), 1.5)

@@ -212,8 +212,23 @@ def main() -> None:
     if args.fps < 1:
         raise SystemExit("--fps は 1 以上にしてください。")
     output = args.output or default_output()
+    from pick_and_carry.video_paths import make_video_run_dir, video_task_name
+
     arm = get_arm(args.arm)
     records, skipped = load_snapshots(args.log_dir, arm.num_obs, arm.num_actions, arm.name)
+    # Nest under log_dir/videos/{task}/compare_iter…/ even when --output is a flat desktop path.
+    requested = Path(output)
+    if "videos" not in requested.parts:
+        last_iter = int(records[-1]["iteration"]) if records else 0
+        run_dir = make_video_run_dir(
+            args.log_dir,
+            task=video_task_name("carry"),
+            kind="compare",
+            iteration=last_iter,
+            extra={"panels": args.panels},
+        )
+        output = run_dir / requested.name
+        print(f"compare → {output}", flush=True)
     if skipped:
         print(f"サイズが違う重みを {skipped} 件スキップしました。", flush=True)
     if not records:

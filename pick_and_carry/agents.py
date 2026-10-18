@@ -114,22 +114,29 @@ class ActorCritic(nn.Module):
     def set_action_mask(self, mask: torch.Tensor | None) -> None:
         self.action_mask = None if mask is None else mask.detach().clone().bool()
 
+    def _mask_on(self, ref: torch.Tensor) -> torch.Tensor | None:
+        """Mask on ``ref``'s device (plain attribute is not moved by ``module.to``)."""
+        if self.action_mask is None:
+            return None
+        return self.action_mask.to(device=ref.device)
+
     def act(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        action, log_prob = self.actor.sample(obs, self.action_mask)
+        action, log_prob = self.actor.sample(obs, self._mask_on(obs))
         value = self.value(obs)
         return action, log_prob, value
 
     def act_mean(self, obs: torch.Tensor) -> torch.Tensor:
         action = self.actor.mean_action(obs)
-        if self.action_mask is not None:
-            action = torch.where(self.action_mask.expand_as(action), action, torch.zeros_like(action))
+        mask = self._mask_on(action)
+        if mask is not None:
+            action = torch.where(mask.expand_as(action), action, torch.zeros_like(action))
         return action
 
     def value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.critic(obs).squeeze(-1)
 
     def evaluate(self, obs: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        log_prob, entropy = self.actor.log_prob(obs, action, self.action_mask)
+        log_prob, entropy = self.actor.log_prob(obs, action, self._mask_on(obs))
         return log_prob, entropy, self.value(obs)
 
 
