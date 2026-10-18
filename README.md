@@ -79,6 +79,7 @@ $env:PYTHONUTF8 = "1"
 # 1a) トロット教師 → BC。出力: logs/ppo_curriculum_walk_easy/bc_trot.pt
 .\.venv\Scripts\python.exe -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs 3000
 # 1b) トロット教師 → GAIL（BC 暖機あり）。出力: logs/ppo_curriculum_walk_easy/gail_trot.pt
+# 既定: --env-coef 10（歩行報酬を混ぜる） / --disc-epochs 4（識別器を方策より多めに更新）
 .\.venv\Scripts\python.exe -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs 3000 --iterations 1000
 # 追加学習（既存 gail_trot.pt から）
 .\.venv\Scripts\python.exe -m pick_and_carry.train_gail --easy-walk --resume latest --iterations 1000
@@ -95,7 +96,7 @@ $env:PYTHONUTF8 = "1"
 - **2 → 歩行 → 簡単 → BC / GAIL してから PPO** … 学習の一連（ここでも教師デモ保存の有無を選べます）
 - **3 → 歩行 → 簡単** … 模倣重みや教師デモの再生
 
-教師は立つ・座る・ジャンプ・前後進・左右旋回・停止と、対角トロット歩行を CPG パラメータ（10 次元）として出します。環境側の CPG が 12 関節指令へ展開します。GAIL は識別器報酬 `-log(1-D(s,a))` で PPO を回します（既定は環境報酬なし・BC 暖機あり）。`--easy-walk` で PPO チェックポイントが無いとき、`--init-from` 未指定なら `gail_trot.pt` があればそれを、無ければ `bc_trot.pt` を自動で載せます（起動スクリプトと同じ順）。
+教師は立つ・座る・ジャンプ・前後進・左右旋回・停止と、対角トロット歩行を CPG パラメータ（10 次元）として出します。環境側の CPG が 12 関節指令へ展開します。GAIL は識別器報酬 `-log(1-D(s,a))` と歩行の環境報酬を混ぜて PPO を回します（既定 `--gail-coef 1 --env-coef 10`、識別器は `--disc-epochs 4`、BC 暖機あり）。純模倣にするなら `--env-coef 0`。`--easy-walk` で PPO チェックポイントが無いとき、`--init-from` 未指定なら `gail_trot.pt` があればそれを、無ければ `bc_trot.pt` を自動で載せます（起動スクリプトと同じ順）。
 
 再生は学習せず、保存した重みで mp4 を書きます。保存先は同様に `videos/<タスク>/<algo>_iter######_<時刻>/` です（起動フォルダ側にも同じ木をコピーします）。
 

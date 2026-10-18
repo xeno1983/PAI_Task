@@ -8,6 +8,9 @@ Optional BC warm-start (recommended on a fresh run):
 
     python -m pick_and_carry.train_gail --easy-walk --bc-epochs 3000 --iterations 1000
 
+Defaults mix walk env reward (``--env-coef 10``) with the discriminator signal
+and run ``--disc-epochs 4`` discriminator passes per PPO iteration.
+
 Continue from an existing ``gail_trot.pt`` (skips BC by default):
 
     python -m pick_and_carry.train_gail --easy-walk --resume latest --iterations 1000
@@ -55,22 +58,33 @@ def parse_args():
         help="BC warm-start epochs before GAIL. Default 3000 on a fresh run, 0 when --resume is set. 0 skips.",
     )
     parser.add_argument("--bc-batch-size", type=int, default=4096)
-    parser.add_argument("--disc-epochs", type=int, default=1, help="Discriminator passes per iteration.")
+    parser.add_argument(
+        "--disc-epochs",
+        type=int,
+        default=4,
+        help="Discriminator passes per iteration (raised vs PPO so D stays ahead of the policy).",
+    )
     parser.add_argument("--disc-batch-size", type=int, default=4096)
     parser.add_argument("--disc-lr", type=float, default=3e-4)
     parser.add_argument("--gail-coef", type=float, default=1.0, help="Weight on -log(1-D) reward.")
     parser.add_argument(
         "--env-coef",
         type=float,
-        default=0.0,
-        help="Weight on environment reward mixed into the GAIL signal (0 = pure imitation).",
+        default=10.0,
+        help="Weight on environment (walk) reward mixed into the GAIL signal (0 = pure imitation). "
+        "Default 10 balances ~dt-scaled locomotion terms against softplus GAIL rewards.",
     )
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--desired-kl", type=float, default=0.01)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--lam", type=float, default=0.95)
     parser.add_argument("--clip", type=float, default=0.2)
-    parser.add_argument("--epochs", type=int, default=5, help="PPO epochs per iteration.")
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=4,
+        help="PPO epochs per iteration (matched near --disc-epochs so the discriminator keeps pace).",
+    )
     parser.add_argument("--num-mini-batches", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=0)
     parser.add_argument("--entropy-coef", type=float, default=0.001)
@@ -193,7 +207,8 @@ def run_gail(
     print(
         f"GAIL iterations {start_iteration + 1}…{last_iteration} "
         f"(+{args.iterations}) steps={args.num_steps} "
-        f"gail_coef={args.gail_coef} env_coef={args.env_coef}",
+        f"gail_coef={args.gail_coef} env_coef={args.env_coef} "
+        f"disc_epochs={args.disc_epochs} ppo_epochs={args.epochs}",
         flush=True,
     )
     finished = start_iteration
@@ -269,10 +284,13 @@ def run_gail(
         finished = iteration
         span = max(1, args.iterations)
         if iteration == start_iteration + 1 or iteration % max(1, span // 20) == 0 or iteration == last_iteration:
+            r_gail = gail_sum / args.num_steps
+            r_env = env_sum / args.num_steps
             print(
                 f"  gail {iteration}/{last_iteration}  "
-                f"r_gail {gail_sum / args.num_steps:.3f}  "
-                f"r_env {env_sum / args.num_steps:.3f}  "
+                f"r_gail {r_gail:.3f}  "
+                f"r_env {r_env:.3f}  "
+                f"r_mix {args.gail_coef * r_gail + args.env_coef * r_env:.3f}  "
                 f"disc_loss {disc_metrics['disc_loss']:.3f}  "
                 f"disc_acc {disc_metrics['disc_acc']:.2f}  "
                 f"pi_loss {metrics['policy_loss']:.3f}  "
@@ -492,7 +510,8 @@ def main() -> None:
     )
     print(
         f"追加学習: python -m pick_and_carry.train_gail --easy-walk --resume latest "
-        f"--bc-epochs 0 --iterations 1000 --log-dir {ns.log_dir}",
+        f"--bc-epochs 0 --iterations 1000 --env-coef {args.env_coef} "
+        f"--disc-epochs {args.disc_epochs} --log-dir {ns.log_dir}",
         flush=True,
     )
 

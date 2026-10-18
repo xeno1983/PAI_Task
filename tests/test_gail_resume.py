@@ -36,6 +36,10 @@ class GailResumeTests(unittest.TestCase):
             self.assertEqual(args.resume, "latest")
             self.assertIsNone(args.bc_epochs)
             self.assertEqual(args.iterations, 1000)
+            self.assertEqual(args.env_coef, 10.0)
+            self.assertEqual(args.disc_epochs, 4)
+            self.assertEqual(args.epochs, 4)
+            self.assertEqual(args.gail_coef, 1.0)
         finally:
             sys.argv = old
 

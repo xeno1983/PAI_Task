@@ -276,6 +276,36 @@ function Ask-TeacherDemoSave {
     return @("--save-demos", "all")
 }
 
+function Ask-EnvCoef {
+    param([double]$Default = 10.0)
+    while ($true) {
+        $raw = Read-Host "env-coef (walk reward weight) [$Default]"
+        if ([string]::IsNullOrWhiteSpace($raw)) { $raw = "$Default" }
+        $parsed = 0.0
+        if (-not [double]::TryParse($raw, [ref]$parsed) -or $parsed -lt 0) {
+            Write-Host "Enter a number >= 0."
+            continue
+        }
+        Write-Host "env-coef: $parsed"
+        return $parsed
+    }
+}
+
+function Ask-DiscEpochs {
+    param([int]$Default = 4)
+    while ($true) {
+        $raw = Read-Host "disc-epochs (discriminator updates/iter) [$Default]"
+        if ([string]::IsNullOrWhiteSpace($raw)) { $raw = "$Default" }
+        $parsed = 0
+        if (-not [int]::TryParse($raw, [ref]$parsed) -or $parsed -lt 1) {
+            Write-Host "Enter an integer >= 1."
+            continue
+        }
+        Write-Host "disc-epochs: $parsed"
+        return $parsed
+    }
+}
+
 function Ask-BcEpochs {
     param([int]$Default = 3000)
     $epochs = 0
@@ -568,7 +598,9 @@ switch ($choice) {
             }
             Write-Host "デモを集め（約90秒相当）てから GAIL を実行します（iterations=1000）。"
             if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
+            $envCoef = Ask-EnvCoef -Default 10
+            $discEpochs = Ask-DiscEpochs -Default 4
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --env-coef $envCoef --disc-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) {
                 if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
@@ -672,7 +704,9 @@ switch ($choice) {
                 }
             }
             if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
+            $envCoef = Ask-EnvCoef -Default 10
+            $discEpochs = Ask-DiscEpochs -Default 4
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --env-coef $envCoef --disc-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
             if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
