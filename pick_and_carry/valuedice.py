@@ -7,7 +7,8 @@ the residual form follows DualDICE / ValueDICE with a **χ²** conjugate
     δ = ν(s, a) − γ ν(s′, a′)
     L = ½ E_π[δ²] − E_E[ν(s, a)] + λ (‖ν_E‖² + ‖ν_π‖²)
 
-ν is used as a dense imitation reward for PPO (Kostrikov et al., ValueDICE).
+For PPO, the imitation signal is the **rollout-centered** ν reward so a near-constant
+abs(ν) still yields relative advantages (otherwise GAE collapses when ν saturates).
 Hard clamps are avoided in the loss path; ``tanh`` soft bounds keep gradients alive.
 """
 
@@ -22,7 +23,10 @@ from pick_and_carry.agents import mlp
 _NU_SCALE = 5.0
 _REWARD_SCALE = 2.0
 # L2 on bounded ν — must be strong enough to fight −E_E[ν] racing to +scale.
-_NU_L2 = 5e-2
+_NU_L2 = 0.1
+# Soft pull of expert ν toward a moderate target (keeps reward in the linear tanh region).
+_NU_TARGET = 1.0
+_NU_TARGET_COEF = 0.05
 
 
 def soft_bound(x: torch.Tensor, scale: float) -> torch.Tensor:
@@ -50,8 +54,15 @@ class NuNet(nn.Module):
         return soft_bound(self.forward(obs, actions), _NU_SCALE)
 
     def valuedice_reward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        """Imitation reward for PPO: softer bound than the dual ν."""
+        """Raw imitation score for PPO (caller should rollout-center before GAE)."""
         return soft_bound(self.forward(obs, actions), _REWARD_SCALE)
+
+
+def center_imitation_rewards(nu_rewards: torch.Tensor) -> torch.Tensor:
+    """Mean/std-center ν rewards over a rollout so relative ranking drives PPO."""
+    mean = nu_rewards.mean()
+    std = nu_rewards.std().clamp(min=0.1)
+    return (nu_rewards - mean) / std
 
 
 def apply_action_mask(actions: torch.Tensor, action_mask: torch.Tensor | None) -> torch.Tensor:
@@ -95,8 +106,9 @@ def train_nu(
     When ``next_obs`` / ``next_act`` are provided:
 
         L = ½ E_π[(ν(s,a) − γ ν(s′,a′))²] − E_E[ν(s, a)] + λ‖ν‖²
+          + α (E_E[ν] − target)²
 
-    Otherwise falls back to the memoryless form ``½ E_π[ν²] − E_E[ν] + λ‖ν‖²``.
+    Otherwise falls back to the memoryless form ``½ E_π[ν²] − E_E[ν] + …``.
     """
     expert_act = apply_action_mask(expert_act, action_mask)
     policy_act = apply_action_mask(policy_act, action_mask)
@@ -135,6 +147,7 @@ def train_nu(
                 0.5 * delta.pow(2).mean()
                 - nu_e.mean()
                 + _NU_L2 * (nu_e.pow(2).mean() + nu_p.pow(2).mean())
+                + _NU_TARGET_COEF * (nu_e.mean() - _NU_TARGET).pow(2)
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -151,4 +164,5 @@ def train_nu(
         "nu_expert": total_nu_e / denom,
         "nu_policy": total_nu_p / denom,
         "nu_delta": total_delta / denom,
+        "nu_gap": (total_nu_e - total_nu_p) / denom,
     }

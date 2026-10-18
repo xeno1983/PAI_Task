@@ -7,7 +7,13 @@ import unittest
 import torch
 
 from pick_and_carry.config import NUM_ACTIONS, NUM_OBS
-from pick_and_carry.valuedice import NuNet, apply_action_mask, soft_bound, train_nu
+from pick_and_carry.valuedice import (
+    NuNet,
+    apply_action_mask,
+    center_imitation_rewards,
+    soft_bound,
+    train_nu,
+)
 
 
 class ValueDiceTests(unittest.TestCase):
@@ -144,6 +150,12 @@ class ValueDiceTests(unittest.TestCase):
             self.assertEqual(_resolve_resume_path("latest", log_dir, missing), legacy)
         self.assertEqual(_valuedice_iteration({"valuedice_iteration": 12, "iteration": 0}), 12)
         self.assertEqual(_valuedice_iteration({"gail_iteration": 7}), 7)
+
+    def test_center_imitation_rewards_zero_mean_unit_scale(self):
+        raw = torch.tensor([[1.0, 3.0], [5.0, 7.0]])
+        centered = center_imitation_rewards(raw)
+        self.assertAlmostEqual(float(centered.mean()), 0.0, places=5)
+        self.assertGreater(float(centered.std()), 0.5)
 
     def test_resolve_init_from_bc_latest(self):
         import tempfile

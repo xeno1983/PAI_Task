@@ -317,7 +317,7 @@ function Ask-EnvCoef {
 }
 
 function Ask-DiscEpochs {
-    param([int]$Default = 1)
+    param([int]$Default = 2)
     while ($true) {
         $raw = Read-Host "nu-epochs (ValueDICE nu updates/iter) [$Default]"
         if ([string]::IsNullOrWhiteSpace($raw)) { $raw = "$Default" }
@@ -685,7 +685,7 @@ switch ($choice) {
             if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
             $gailIters = Ask-GailIterations -Default 1000
             $envCoef = Ask-EnvCoef -Default 10
-            $discEpochs = Ask-DiscEpochs -Default 1
+            $discEpochs = Ask-DiscEpochs -Default 2
             & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --nu-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @($script:vdResumeArgs) @($script:vdInitFromArgs)
             $code = $LASTEXITCODE
             if ($code -eq 0) {
@@ -789,7 +789,7 @@ switch ($choice) {
             if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
             $gailIters = Ask-GailIterations -Default 1000
             $envCoef = Ask-EnvCoef -Default 10
-            $discEpochs = Ask-DiscEpochs -Default 1
+            $discEpochs = Ask-DiscEpochs -Default 2
             & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --nu-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @($script:vdResumeArgs) @($script:vdInitFromArgs)
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }

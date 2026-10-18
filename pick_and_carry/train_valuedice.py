@@ -13,7 +13,7 @@ Reuse a saved BC checkpoint (skips BC training by default):
     python -m pick_and_carry.train_valuedice --easy-walk --init-from latest --iterations 1000
 
 Defaults mix walk env reward (``--env-coef 10``) with the ν imitation signal
-and run ``--nu-epochs 1`` χ²-dual ν pass per PPO iteration.
+and run ``--nu-epochs 2`` χ²-dual ν passes plus light BC mix-in per PPO iteration.
 
 Continue from an existing ``valuedice_trot.pt`` (skips BC by default):
 
@@ -50,7 +50,9 @@ from pick_and_carry.train_bc import (
 )
 from pick_and_carry.train_ppo import initial_action_std, make_config, minibatch_size_for
 from pick_and_carry.trot_teacher import TrotTeacher
-from pick_and_carry.valuedice import NuNet, apply_action_mask, train_nu
+from pick_and_carry.config import ACTION_LAYOUT, OBS_LAYOUT, layout_slices
+from pick_and_carry.cpg import command_is_moving
+from pick_and_carry.valuedice import NuNet, apply_action_mask, center_imitation_rewards, train_nu
 
 
 def parse_args(argv: list[str] | None = None):
@@ -70,10 +72,16 @@ def parse_args(argv: list[str] | None = None):
     )
     parser.add_argument("--bc-batch-size", type=int, default=4096)
     parser.add_argument(
+        "--bc-mix-steps",
+        type=int,
+        default=8,
+        help="Expert BC minibatch updates mixed into each ValueDICE iteration (0 disables).",
+    )
+    parser.add_argument(
         "--nu-epochs",
         type=int,
         default=None,
-        help="ν network passes per iteration. Default 1 (or --disc-epochs if set).",
+        help="ν network passes per iteration. Default 2 (or --disc-epochs if set).",
     )
     parser.add_argument(
         "--disc-epochs",
@@ -89,7 +97,7 @@ def parse_args(argv: list[str] | None = None):
         "--imit-coef",
         type=float,
         default=None,
-        help="Weight on ν(s,a) reward. Default 1 (or --gail-coef if set).",
+        help="Weight on centered ν(s,a) reward. Default 2 (or --gail-coef if set).",
     )
     parser.add_argument("--gail-coef", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -99,7 +107,7 @@ def parse_args(argv: list[str] | None = None):
         help="Weight on environment (walk) reward mixed into the imitation signal (0 = pure imitation).",
     )
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--desired-kl", type=float, default=0.01)
+    parser.add_argument("--desired-kl", type=float, default=0.02)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--lam", type=float, default=0.95)
     parser.add_argument("--clip", type=float, default=0.2)
@@ -161,7 +169,7 @@ def parse_args(argv: list[str] | None = None):
     args = parser.parse_args(argv)
     # Resolve aliases.
     args.nu_epochs = int(
-        args.nu_epochs if args.nu_epochs is not None else (args.disc_epochs if args.disc_epochs is not None else 1)
+        args.nu_epochs if args.nu_epochs is not None else (args.disc_epochs if args.disc_epochs is not None else 2)
     )
     args.nu_batch_size = int(
         args.nu_batch_size
@@ -170,8 +178,9 @@ def parse_args(argv: list[str] | None = None):
     )
     args.nu_lr = float(args.nu_lr if args.nu_lr is not None else (args.disc_lr if args.disc_lr is not None else 3e-4))
     args.imit_coef = float(
-        args.imit_coef if args.imit_coef is not None else (args.gail_coef if args.gail_coef is not None else 1.0)
+        args.imit_coef if args.imit_coef is not None else (args.gail_coef if args.gail_coef is not None else 2.0)
     )
+    args.bc_mix_steps = int(getattr(args, "bc_mix_steps", 8) or 0)
     # Keep legacy attribute names for any external callers.
     args.disc_epochs = args.nu_epochs
     args.disc_batch_size = args.nu_batch_size
@@ -265,6 +274,47 @@ def _save_valuedice_blob(
         torch.save(blob, snap)
 
 
+def _bc_mix_updates(
+    agent: ActorCritic,
+    optimizer: torch.optim.Optimizer,
+    expert_obs: torch.Tensor,
+    expert_act: torch.Tensor,
+    action_mask: torch.Tensor,
+    *,
+    steps: int,
+    batch_size: int,
+    still_amp_weight: float = 8.0,
+) -> float:
+    """A few expert BC steps so ValueDICE cannot drift away from the demo."""
+    if steps <= 0 or expert_obs.shape[0] == 0:
+        return 0.0
+    mask = action_mask.to(dtype=expert_obs.dtype, device=expert_obs.device)
+    cmd_slice = layout_slices(OBS_LAYOUT)["command"]
+    amp_index = layout_slices(ACTION_LAYOUT)["cpg"].start + 1
+    n = expert_obs.shape[0]
+    bs = min(batch_size, n)
+    total = 0.0
+    for _ in range(steps):
+        idx = torch.randint(0, n, (bs,), device=expert_obs.device)
+        batch_obs = expert_obs[idx]
+        pred = agent.actor.mean_action(batch_obs)
+        err = (pred - expert_act[idx]).pow(2)
+        still = ~command_is_moving(batch_obs[:, cmd_slice])
+        amp_w = torch.where(
+            still,
+            torch.full_like(err[:, amp_index], float(still_amp_weight)),
+            torch.ones_like(err[:, amp_index]),
+        )
+        err = err.clone()
+        err[:, amp_index] = err[:, amp_index] * amp_w
+        loss = (err * mask.expand_as(err)).sum(dim=-1).mean() / mask.sum().clamp(min=1.0)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        total += float(loss.detach())
+    return total / max(steps, 1)
+
+
 def run_valuedice(
     *,
     env,
@@ -285,12 +335,14 @@ def run_valuedice(
     opt_pi = torch.optim.Adam(agent.parameters(), lr=args.lr)
     opt_nu = torch.optim.Adam(nu_net.parameters(), lr=args.nu_lr)
     last_iteration = start_iteration + int(args.iterations)
+    bc_mix_steps = int(getattr(args, "bc_mix_steps", 0) or 0)
     obs = env.reset()
     print(
         f"ValueDICE iterations {start_iteration + 1}…{last_iteration} "
         f"(+{args.iterations}) steps={args.num_steps} "
         f"imit_coef={args.imit_coef} env_coef={args.env_coef} "
-        f"nu_epochs={args.nu_epochs} ppo_epochs={args.epochs}",
+        f"nu_epochs={args.nu_epochs} bc_mix={bc_mix_steps} "
+        f"ppo_epochs={args.epochs} desired_kl={args.desired_kl}",
         flush=True,
     )
     finished = start_iteration
@@ -298,7 +350,8 @@ def run_valuedice(
     for iteration in range(start_iteration + 1, last_iteration + 1):
         started = time.perf_counter()
         obs_buf, act_buf, next_obs_buf = [], [], []
-        logp_buf, val_buf, rew_buf, boot_buf, done_buf = [], [], [], [], []
+        logp_buf, val_buf, boot_buf, done_buf = [], [], [], []
+        nu_rew_buf, env_rew_buf, timeout_buf = [], [], []
         nu_sum = 0.0
         env_sum = 0.0
         for _ in range(args.num_steps):
@@ -307,18 +360,19 @@ def run_valuedice(
                 next_obs, env_reward, done, info = env.step(action)
                 masked_act = apply_action_mask(action, action_mask)
                 nu_r = nu_net.valuedice_reward(obs, masked_act)
-                reward = args.imit_coef * nu_r + args.env_coef * env_reward
-                reward = reward + args.gamma * value * info["time_outs"]
                 next_value = agent.value(next_obs)
-                bootstrap = next_value * (~done).to(dtype=reward.dtype)
+                bootstrap = next_value * (~done).to(dtype=env_reward.dtype)
+                timeout = args.gamma * value * info["time_outs"]
             obs_buf.append(obs)
             act_buf.append(action)
             next_obs_buf.append(next_obs)
             logp_buf.append(log_prob)
             val_buf.append(value)
-            rew_buf.append(reward)
+            nu_rew_buf.append(nu_r)
+            env_rew_buf.append(env_reward)
+            timeout_buf.append(timeout)
             boot_buf.append(bootstrap)
-            done_buf.append(done.to(dtype=reward.dtype))
+            done_buf.append(done.to(dtype=env_reward.dtype))
             nu_sum += float(nu_r.mean())
             env_sum += float(env_reward.mean())
             obs = next_obs
@@ -344,7 +398,10 @@ def run_valuedice(
             action_mask=action_mask,
         )
 
-        rewards = torch.stack(rew_buf)
+        # Center ν rewards over the rollout so a flat abs(ν) still yields PPO signal.
+        nu_stack = center_imitation_rewards(torch.stack(nu_rew_buf))
+        rewards = args.imit_coef * nu_stack + args.env_coef * torch.stack(env_rew_buf)
+        rewards = rewards + torch.stack(timeout_buf)
         values = torch.stack(val_buf)
         dones = torch.stack(done_buf)
         advantages, returns = compute_gae(
@@ -372,23 +429,36 @@ def run_valuedice(
             old_values=values.reshape(-1),
             desired_kl=args.desired_kl if args.desired_kl > 0 else None,
         )
+        bc_mse = _bc_mix_updates(
+            agent,
+            opt_pi,
+            expert_obs,
+            expert_act,
+            action_mask,
+            steps=bc_mix_steps,
+            batch_size=min(args.bc_batch_size, expert_obs.shape[0]),
+        )
         elapsed = time.perf_counter() - started
         finished = iteration
         r_nu = nu_sum / args.num_steps
         r_env = env_sum / args.num_steps
-        r_mix = args.imit_coef * r_nu + args.env_coef * r_env
+        r_mix = args.imit_coef * float(nu_stack.mean()) + args.env_coef * r_env
+        nu_gap = float(nu_metrics.get("nu_gap", nu_metrics["nu_expert"] - nu_metrics["nu_policy"]))
         if tracker is not None:
             tracker.log_row(
                 {
                     "iteration": iteration,
                     "r_nu": r_nu,
+                    "r_nu_centered": float(nu_stack.mean()),
                     "r_env": r_env,
                     "r_mix": r_mix,
                     "nu_loss": nu_metrics["nu_loss"],
                     "nu_expert": nu_metrics["nu_expert"],
                     "nu_policy": nu_metrics["nu_policy"],
+                    "nu_gap": nu_gap,
                     "nu_delta": nu_metrics.get("nu_delta", 0.0),
                     "policy_loss": metrics["policy_loss"],
+                    "bc_mix_mse": bc_mse,
                 }
             )
         span = max(1, args.iterations)
@@ -404,8 +474,9 @@ def run_valuedice(
                 f"{format_metric('r_env', r_env, prev.get('r_env'), higher_is_better=True, fmt='.3f')}  "
                 f"{format_metric('r_mix', r_mix, prev.get('r_mix'), higher_is_better=True, fmt='.3f')}  "
                 f"{format_metric('nu_loss', nu_loss, prev.get('nu_loss'), higher_is_better=False, fmt='.3f')}  "
-                f"nu_e {nu_e:.2f} nu_p {nu_p:.2f}  "
+                f"nu_e {nu_e:.2f} nu_p {nu_p:.2f} gap {nu_gap:.2f}  "
                 f"pi_loss {pi_loss:.3f}  "
+                f"bc_mse {bc_mse:.4f}  "
                 f"{elapsed:.1f}s",
                 flush=True,
             )
@@ -581,6 +652,7 @@ def main(argv: list[str] | None = None) -> None:
             "imit_coef": args.imit_coef,
             "env_coef": args.env_coef,
             "nu_epochs": args.nu_epochs,
+            "bc_mix_steps": args.bc_mix_steps,
             "demo_seconds": args.seconds,
             "resumed_from": str(resume_path) if resume_path is not None else None,
             "init_from": str(init_path) if init_path is not None else None,
