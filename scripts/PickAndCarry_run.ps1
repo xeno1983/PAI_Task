@@ -233,34 +233,55 @@ function Ask-BcWarmStart {
     $script:runBcFirst = $false
     $script:runGailFirst = $false
     $script:initFromArgs = @()
-    Write-Host "   1  トロット教師を BC してから PPO（推奨・初回）"
-    Write-Host "   2  トロット教師を GAIL してから PPO"
+    Write-Host "   1  トロット教師を BC してから PPO（推奨・初回。PPO は iteration 0 から）"
+    Write-Host "   2  トロット教師を GAIL してから PPO（PPO は iteration 0 から）"
     Write-Host "   3  既存の bc_trot.pt / gail_trot.pt / PPO 重みから PPO のみ"
     Write-Host "   4  ゼロから PPO のみ"
     Write-Host "   （模倣学習だけ・デモ再生だけはメニュー 1）"
+    Write-Host "   （続き学習は 3。1/2 を選ぶと BC/GAIL のあと PPO を iteration 0 からやり直します）"
     $answer = Read-Host "初期化 [1]"
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = "1" }
     if ($answer -eq "2") {
         $script:runGailFirst = $true
-        Write-Host "先にトロット教師のデモを集めて GAIL し、デモ動画のあと PPO を始めます。"
+        Write-Host "先にトロット教師のデモを集めて GAIL し、デモ動画のあと PPO を始めます（既存 ppo_*.pt は使いません）。"
     } elseif ($answer -eq "3") {
         $folder = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
         $gail = Join-Path $folder "gail_trot.pt"
         $bc = Join-Path $folder "bc_trot.pt"
+        $hasPpo = @(Get-ChildItem -Path $folder -Filter "ppo_*.pt" -File -ErrorAction SilentlyContinue).Count -gt 0
+        $imit = $null
+        $kind = ""
         if (Test-Path $gail) {
-            $script:initFromArgs = @("--init-from", $gail)
-            Write-Host "既存の GAIL 重みを初期値にします: $gail"
+            $imit = $gail
+            $kind = "GAIL"
         } elseif (Test-Path $bc) {
-            $script:initFromArgs = @("--init-from", $bc)
-            Write-Host "既存の BC 重みを初期値にします: $bc"
+            $imit = $bc
+            $kind = "BC"
+        }
+        if ($hasPpo -and $null -ne $imit) {
+            Write-Host "PPO チェックポイントと $kind 重みの両方があります。"
+            Write-Host "   1  PPO の続きから（進捗維持・推奨）"
+            Write-Host "   2  $kind から暖気し直し（iteration 0。重みは $kind、乱数ゼロ開始ではない）"
+            $pick = Read-Host "既存重み [1]"
+            if ($pick -eq "2") {
+                $script:initFromArgs = @("--init-from", $imit)
+                Write-Host "$kind 重みで PPO を iteration 0 から始めます（--resume なし）: $imit"
+            } else {
+                Write-Host "既存の PPO を続行します（$kind 暖気は使いません）。"
+            }
+        } elseif ($null -ne $imit) {
+            $script:initFromArgs = @("--init-from", $imit)
+            Write-Host "既存の $kind 重みを初期値にします（--resume なし）: $imit"
+        } elseif ($hasPpo) {
+            Write-Host "既存の PPO を続行します。"
         } else {
-            Write-Host "gail_trot.pt / bc_trot.pt が無いので、PPO の latest（あれば）またはゼロからになります。"
+            Write-Host "gail_trot.pt / bc_trot.pt / ppo_*.pt が無いので、ゼロからになります。"
         }
     } elseif ($answer -eq "4") {
-        Write-Host "模倣学習なしで PPO します。"
+        Write-Host "模倣学習なしで PPO します（既存 ppo があれば --resume latest で続きます）。"
     } else {
         $script:runBcFirst = $true
-        Write-Host "先にトロット教師のデモを集めて BC し、デモ動画のあと PPO を始めます。"
+        Write-Host "先にトロット教師のデモを集めて BC し、デモ動画のあと PPO を始めます（既存 ppo_*.pt は使いません）。"
     }
 }
 
@@ -733,7 +754,12 @@ switch ($choice) {
             Write-Host "GAIL 完了。PPO は $gailPath から iteration 0 で開始します（既存の ppo_*.pt は使いません）。"
             & $python -u -m pick_and_carry.train_ppo --init-from $gailPath --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
         } else {
-            & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs @initFromArgs
+            if ($script:initFromArgs.Count -gt 0) {
+                Write-Host "暖気起動: --init-from のみ（--resume は付けません）。"
+                & $python -u -m pick_and_carry.train_ppo --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs @initFromArgs
+            } else {
+                & $python -u -m pick_and_carry.train_ppo --resume latest --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
+            }
         }
         $code = $LASTEXITCODE
         Open-Mlflow
