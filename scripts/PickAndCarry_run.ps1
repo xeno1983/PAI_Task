@@ -306,6 +306,21 @@ function Ask-DiscEpochs {
     }
 }
 
+function Ask-GailIterations {
+    param([int]$Default = 1000)
+    while ($true) {
+        $raw = Read-Host "GAIL iterations [$Default]"
+        if ([string]::IsNullOrWhiteSpace($raw)) { $raw = "$Default" }
+        $parsed = 0
+        if (-not [int]::TryParse($raw, [ref]$parsed) -or $parsed -lt 1) {
+            Write-Host "Enter an integer >= 1."
+            continue
+        }
+        Write-Host "GAIL iterations: $parsed"
+        return $parsed
+    }
+}
+
 function Ask-BcEpochs {
     param([int]$Default = 3000)
     $epochs = 0
@@ -588,7 +603,7 @@ switch ($choice) {
             if (Test-Path $gailPath) {
                 Write-Host "既存の gail_trot.pt があります。"
                 Write-Host "   1  最初から（BC 温め直し）"
-                Write-Host "   2  追加学習（続きから +1000 iter）"
+                Write-Host "   2  追加学習（続きから・iter 数は次で指定）"
                 $gailMode = Read-Host "GAIL [1]"
                 if ($gailMode -eq "2") {
                     $resumeArgs = @("--resume", "latest")
@@ -596,11 +611,12 @@ switch ($choice) {
                     Write-Host "gail_trot.pt から追加学習します。"
                 }
             }
-            Write-Host "デモを集め（約90秒相当）てから GAIL を実行します（iterations=1000）。"
+            Write-Host "デモを集め（約90秒相当）てから GAIL を実行します。"
             if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
+            $gailIters = Ask-GailIterations -Default 1000
             $envCoef = Ask-EnvCoef -Default 10
             $discEpochs = Ask-DiscEpochs -Default 4
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --env-coef $envCoef --disc-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --disc-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) {
                 if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
@@ -696,7 +712,7 @@ switch ($choice) {
             if (Test-Path $gailPathResume) {
                 Write-Host "既存の gail_trot.pt があります。追加学習しますか？"
                 Write-Host "   1  最初から（BC 温め直し）"
-                Write-Host "   2  追加学習（続きから +1000 iter）"
+                Write-Host "   2  追加学習（続きから・iter 数は次で指定）"
                 $gailMode = Read-Host "GAIL [1]"
                 if ($gailMode -eq "2") {
                     $resumeArgs = @("--resume", "latest")
@@ -704,9 +720,10 @@ switch ($choice) {
                 }
             }
             if ($bcEpochs -gt 0) { $bcEpochs = Ask-BcEpochs -Default $bcEpochs }
+            $gailIters = Ask-GailIterations -Default 1000
             $envCoef = Ask-EnvCoef -Default 10
             $discEpochs = Ask-DiscEpochs -Default 4
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --env-coef $envCoef --disc-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations $gailIters --env-coef $envCoef --disc-epochs $discEpochs --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
             if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
