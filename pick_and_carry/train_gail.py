@@ -33,6 +33,7 @@ from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
 from pick_and_carry.algorithms import normalize_algo
 from pick_and_carry.checkpoints import save_checkpoint, torch_load
 from pick_and_carry.curriculum import locomotion_action_mask
+from pick_and_carry.console import format_metric, paint
 from pick_and_carry.gail import Discriminator, apply_action_mask, train_discriminator
 from pick_and_carry.mlflow_log import LocalTracker
 from pick_and_carry.train_bc import (
@@ -214,6 +215,7 @@ def run_gail(
         flush=True,
     )
     finished = start_iteration
+    prev_log: dict[str, float] | None = None
     for iteration in range(start_iteration + 1, last_iteration + 1):
         started = time.perf_counter()
         obs_buf, act_buf, logp_buf, val_buf, rew_buf, boot_buf, done_buf = [], [], [], [], [], [], []
@@ -301,17 +303,41 @@ def run_gail(
             )
         span = max(1, args.iterations)
         if iteration == start_iteration + 1 or iteration % max(1, span // 20) == 0 or iteration == last_iteration:
+            disc_loss = float(disc_metrics["disc_loss"])
+            disc_acc = float(disc_metrics["disc_acc"])
+            pi_loss = float(metrics["policy_loss"])
+            # disc_acc≈0.65 is healthier than saturation at 1.0; pi_loss by |·|.
+            prev_acc = None if prev_log is None else prev_log["disc_acc"]
+            acc_better = None
+            if prev_acc is not None:
+                target = 0.65
+                d_now = abs(disc_acc - target)
+                d_prev = abs(prev_acc - target)
+                if abs(d_now - d_prev) > 1e-9:
+                    acc_better = d_now < d_prev
+            prev_pi = None if prev_log is None else prev_log["pi_loss"]
+            pi_better = None
+            if prev_pi is not None and abs(abs(pi_loss) - abs(prev_pi)) > 1e-9:
+                pi_better = abs(pi_loss) < abs(prev_pi)
             print(
                 f"  gail {iteration}/{last_iteration}  "
-                f"r_gail {r_gail:.3f}  "
-                f"r_env {r_env:.3f}  "
-                f"r_mix {r_mix:.3f}  "
-                f"disc_loss {disc_metrics['disc_loss']:.3f}  "
-                f"disc_acc {disc_metrics['disc_acc']:.2f}  "
-                f"pi_loss {metrics['policy_loss']:.3f}  "
+                f"{format_metric('r_gail', r_gail, None if prev_log is None else prev_log['r_gail'], higher_is_better=True, fmt='.3f')}  "
+                f"{format_metric('r_env', r_env, None if prev_log is None else prev_log['r_env'], higher_is_better=True, fmt='.3f')}  "
+                f"{format_metric('r_mix', r_mix, None if prev_log is None else prev_log['r_mix'], higher_is_better=True, fmt='.3f')}  "
+                f"{format_metric('disc_loss', disc_loss, None if prev_log is None else prev_log['disc_loss'], higher_is_better=False, fmt='.3f')}  "
+                f"{paint(f'disc_acc {disc_acc:.2f}', better=acc_better)}  "
+                f"{paint(f'pi_loss {pi_loss:.3f}', better=pi_better)}  "
                 f"{elapsed:.1f}s",
                 flush=True,
             )
+            prev_log = {
+                "r_gail": r_gail,
+                "r_env": r_env,
+                "r_mix": r_mix,
+                "disc_loss": disc_loss,
+                "disc_acc": disc_acc,
+                "pi_loss": pi_loss,
+            }
         if save_path is not None and (
             iteration % max(1, args.save_interval) == 0 or iteration == last_iteration
         ):
