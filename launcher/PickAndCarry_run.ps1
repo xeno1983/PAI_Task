@@ -535,8 +535,22 @@ switch ($choice) {
         $logDir = $script:logDir
         if ($bcPick -eq "2") {
             $demoArgs = Ask-TeacherDemoSave
-            Write-Host "デモを集め（約90秒相当）て BC 温めてから GAIL を実行します。"
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs 40 --iterations 300 --log-dir $logDir @algoArgs @armArgs @demoArgs
+            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            $resumeArgs = @()
+            $bcEpochs = 40
+            if (Test-Path $gailPath) {
+                Write-Host "既存の gail_trot.pt があります。"
+                Write-Host "   1  最初から（BC 温め直し）"
+                Write-Host "   2  追加学習（続きから +1000 iter）"
+                $gailMode = Read-Host "GAIL [1]"
+                if ($gailMode -eq "2") {
+                    $resumeArgs = @("--resume", "latest")
+                    $bcEpochs = 0
+                    Write-Host "gail_trot.pt から追加学習します。"
+                }
+            }
+            Write-Host "デモを集め（約90秒相当）てから GAIL を実行します（iterations=1000）。"
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) {
                 if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
@@ -624,7 +638,20 @@ switch ($choice) {
             Write-Host "トロット教師のデモを集めて模倣学習（GAIL）を実行します…"
             $demoArgs = Ask-TeacherDemoSave
             $gailEnvs = [Math]::Min(32, $numEnvs)
-            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs 40 --iterations 300 --log-dir $logDir @algoArgs @armArgs @demoArgs
+            $gailPathResume = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+            $resumeArgs = @()
+            $bcEpochs = 40
+            if (Test-Path $gailPathResume) {
+                Write-Host "既存の gail_trot.pt があります。追加学習しますか？"
+                Write-Host "   1  最初から（BC 温め直し）"
+                Write-Host "   2  追加学習（続きから +1000 iter）"
+                $gailMode = Read-Host "GAIL [1]"
+                if ($gailMode -eq "2") {
+                    $resumeArgs = @("--resume", "latest")
+                    $bcEpochs = 0
+                }
+            }
+            & $python -u -m pick_and_carry.train_gail --easy-walk --num-envs $gailEnvs --seconds 90 --bc-epochs $bcEpochs --iterations 1000 --log-dir $logDir @algoArgs @armArgs @demoArgs @resumeArgs
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
             if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }

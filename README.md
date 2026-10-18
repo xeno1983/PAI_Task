@@ -79,7 +79,9 @@ $env:PYTHONUTF8 = "1"
 # 1a) トロット教師 → BC。出力: logs/ppo_curriculum_walk_easy/bc_trot.pt
 .\.venv\Scripts\python.exe -m pick_and_carry.train_bc --easy-walk --num-envs 32 --seconds 90 --epochs 80
 # 1b) トロット教師 → GAIL（BC 暖機あり）。出力: logs/ppo_curriculum_walk_easy/gail_trot.pt
-.\.venv\Scripts\python.exe -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs 40 --iterations 300
+.\.venv\Scripts\python.exe -m pick_and_carry.train_gail --easy-walk --num-envs 32 --seconds 90 --bc-epochs 40 --iterations 1000
+# 追加学習（既存 gail_trot.pt から）
+.\.venv\Scripts\python.exe -m pick_and_carry.train_gail --easy-walk --resume latest --iterations 1000
 # 2) 模倣重みから easy-walk PPO（--init-from を省略すると gail_trot.pt → bc_trot.pt の順で自動採用）
 .\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --easy-walk --resume latest --num-envs 64 --iterations 1000 --num-steps 128 --save-interval 20 --curriculum walk --arm z1
 # 明示する場合:

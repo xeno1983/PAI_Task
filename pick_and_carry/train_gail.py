@@ -2,11 +2,15 @@
 
 Typical use (easy walk folder):
 
-    python -m pick_and_carry.train_gail --easy-walk --seconds 90 --iterations 300
+    python -m pick_and_carry.train_gail --easy-walk --seconds 90 --iterations 1000
 
-Optional BC warm-start (recommended):
+Optional BC warm-start (recommended on a fresh run):
 
-    python -m pick_and_carry.train_gail --easy-walk --bc-epochs 40 --iterations 300
+    python -m pick_and_carry.train_gail --easy-walk --bc-epochs 40 --iterations 1000
+
+Continue from an existing ``gail_trot.pt`` (skips BC by default):
+
+    python -m pick_and_carry.train_gail --easy-walk --resume latest --iterations 1000
 
 Then continue with task PPO:
 
@@ -25,7 +29,7 @@ import torch
 from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
 from pick_and_carry.algorithms import normalize_algo
 from pick_and_carry.checkpoints import save_checkpoint, torch_load
-from pick_and_carry.curriculum import locomotion_action_mask, stage_log_dir
+from pick_and_carry.curriculum import locomotion_action_mask
 from pick_and_carry.gail import Discriminator, apply_action_mask, train_discriminator
 from pick_and_carry.train_bc import (
     _build_walk_args,
@@ -42,9 +46,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Collect trot demos and train GAIL (PPO + discriminator).")
     parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--seconds", type=float, default=60.0, help="Simulated seconds of teacher demos.")
-    parser.add_argument("--iterations", type=int, default=300, help="GAIL / PPO outer iterations.")
+    parser.add_argument("--iterations", type=int, default=1000, help="GAIL / PPO outer iterations to run.")
     parser.add_argument("--num-steps", type=int, default=128)
-    parser.add_argument("--bc-epochs", type=int, default=40, help="BC warm-start epochs before GAIL. 0 skips.")
+    parser.add_argument(
+        "--bc-epochs",
+        type=int,
+        default=None,
+        help="BC warm-start epochs before GAIL. Default 40 on a fresh run, 0 when --resume is set. 0 skips.",
+    )
     parser.add_argument("--bc-batch-size", type=int, default=4096)
     parser.add_argument("--disc-epochs", type=int, default=1, help="Discriminator passes per iteration.")
     parser.add_argument("--disc-batch-size", type=int, default=4096)
@@ -75,6 +84,12 @@ def parse_args():
     parser.add_argument("--no-easy-walk", action="store_true")
     parser.add_argument("--log-dir", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None, help="Default: <log-dir>/gail_trot.pt")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Continue GAIL from a checkpoint: 'latest' (= <log-dir>/gail_trot.pt) or a .pt path.",
+    )
     parser.add_argument("--frequency", type=float, default=2.5)
     parser.add_argument("--demo-seconds", type=float, default=0.0)
     parser.add_argument("--play-seconds", type=float, default=None)
@@ -95,6 +110,66 @@ def parse_args():
     return parser.parse_args()
 
 
+def _resolve_resume_path(resume: str | None, log_dir: Path, output: Path) -> Path | None:
+    if not resume:
+        return None
+    if resume in ("latest", "gail", "gail_trot"):
+        if output.is_file():
+            return output
+        fallback = log_dir / "gail_trot.pt"
+        if fallback.is_file():
+            return fallback
+        raise SystemExit(f"--resume latest ですが GAIL 重みがありません: {output}")
+    path = Path(resume)
+    if not path.is_file():
+        raise SystemExit(f"--resume のファイルがありません: {path}")
+    return path
+
+
+def _gail_iteration(blob: dict) -> int:
+    if "gail_iteration" in blob:
+        return int(blob["gail_iteration"])
+    # Older files used iteration=0 for PPO init; treat missing as 0.
+    return int(blob.get("iteration", 0) or 0)
+
+
+def _save_gail_blob(
+    path: Path,
+    *,
+    agent: ActorCritic,
+    disc: Discriminator,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    obs_dim: int,
+    act_dim: int,
+    arm: str,
+    algo: str,
+    easy: bool,
+) -> None:
+    save_checkpoint(
+        path,
+        agent,
+        optimizer,
+        iteration=0,  # PPO --init-from always starts task PPO at 0
+        obs_dim=obs_dim,
+        act_dim=act_dim,
+        arm=arm,
+        curriculum="walk",
+        algo=algo,
+    )
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    blob["gail_trot"] = True
+    blob["bc_trot"] = True
+    blob["easy_walk"] = easy
+    blob["gail_iteration"] = int(iteration)
+    blob["discriminator"] = disc.state_dict()
+    torch.save(blob, path)
+    # Also keep a numbered snapshot for resume archaeology.
+    if iteration > 0:
+        snap = path.parent / f"gail_{iteration:06d}.pt"
+        torch.save(blob, snap)
+
+
 def run_gail(
     *,
     env,
@@ -104,17 +179,25 @@ def run_gail(
     expert_act: torch.Tensor,
     args,
     action_mask: torch.Tensor,
-) -> None:
+    start_iteration: int = 0,
+    save_path: Path | None = None,
+    easy: bool = True,
+    arm: str = "z1",
+    algo: str = "ppo",
+) -> int:
     device = env.device
     opt_pi = torch.optim.Adam(agent.parameters(), lr=args.lr)
     opt_d = torch.optim.Adam(disc.parameters(), lr=args.disc_lr)
+    last_iteration = start_iteration + int(args.iterations)
     obs = env.reset()
     print(
-        f"GAIL iterations={args.iterations} steps={args.num_steps} "
+        f"GAIL iterations {start_iteration + 1}…{last_iteration} "
+        f"(+{args.iterations}) steps={args.num_steps} "
         f"gail_coef={args.gail_coef} env_coef={args.env_coef}",
         flush=True,
     )
-    for iteration in range(1, args.iterations + 1):
+    finished = start_iteration
+    for iteration in range(start_iteration + 1, last_iteration + 1):
         started = time.perf_counter()
         obs_buf, act_buf, logp_buf, val_buf, rew_buf, boot_buf, done_buf = [], [], [], [], [], [], []
         gail_sum = 0.0
@@ -183,9 +266,11 @@ def run_gail(
             desired_kl=args.desired_kl if args.desired_kl > 0 else None,
         )
         elapsed = time.perf_counter() - started
-        if iteration == 1 or iteration % max(1, args.iterations // 20) == 0 or iteration == args.iterations:
+        finished = iteration
+        span = max(1, args.iterations)
+        if iteration == start_iteration + 1 or iteration % max(1, span // 20) == 0 or iteration == last_iteration:
             print(
-                f"  gail {iteration}/{args.iterations}  "
+                f"  gail {iteration}/{last_iteration}  "
                 f"r_gail {gail_sum / args.num_steps:.3f}  "
                 f"r_env {env_sum / args.num_steps:.3f}  "
                 f"disc_loss {disc_metrics['disc_loss']:.3f}  "
@@ -194,6 +279,22 @@ def run_gail(
                 f"{elapsed:.1f}s",
                 flush=True,
             )
+        if save_path is not None and (
+            iteration % max(1, args.save_interval) == 0 or iteration == last_iteration
+        ):
+            _save_gail_blob(
+                save_path,
+                agent=agent,
+                disc=disc,
+                optimizer=opt_pi,
+                iteration=iteration,
+                obs_dim=int(expert_obs.shape[-1]),
+                act_dim=int(expert_act.shape[-1]),
+                arm=arm,
+                algo=algo,
+                easy=easy,
+            )
+    return finished
 
 
 def main() -> None:
@@ -210,6 +311,7 @@ def main() -> None:
         cfg.randomize_friction = False
     ns.log_dir.mkdir(parents=True, exist_ok=True)
     out = args.output or (ns.log_dir / "gail_trot.pt")
+    resume_path = _resolve_resume_path(args.resume, ns.log_dir, out)
 
     if args.demo_only != "none":
         which = _resolve_demo_which(args.demo_only, args.save_demos)
@@ -251,7 +353,6 @@ def main() -> None:
         device=device,
     )
     expert_obs, expert_act = collect_demos(env, teacher, args.seconds)
-    # Keep the same env for on-policy rollouts (already closed in BC path; reopen).
     env.close()
     env = PickAndCarryEnv(cfg=cfg)
     device = env.device
@@ -264,19 +365,43 @@ def main() -> None:
     agent.set_action_mask(mask)
     disc = Discriminator(int(expert_obs.shape[-1]), int(expert_act.shape[-1])).to(device)
 
-    if args.bc_epochs > 0:
-        print(f"BC warm-start epochs={args.bc_epochs}…", flush=True)
+    start_iteration = 0
+    if resume_path is not None:
+        blob = torch_load(resume_path, device)
+        if int(blob.get("obs_dim", -1)) != int(expert_obs.shape[-1]) or int(blob.get("act_dim", -1)) != int(
+            expert_act.shape[-1]
+        ):
+            raise SystemExit(
+                f"--resume {resume_path} は obs/act "
+                f"{blob.get('obs_dim')}/{blob.get('act_dim')} で、"
+                f"今の環境は {expert_obs.shape[-1]}/{expert_act.shape[-1]} です。"
+            )
+        agent.load_state_dict(blob["model"])
+        if "discriminator" in blob:
+            disc.load_state_dict(blob["discriminator"])
+        else:
+            print("checkpoint に識別器が無いので、識別器だけ新規です。", flush=True)
+        start_iteration = _gail_iteration(blob)
+        print(f"resumed GAIL from {resume_path} at gail_iteration={start_iteration}", flush=True)
+
+    if args.bc_epochs is None:
+        bc_epochs = 0 if resume_path is not None else 40
+    else:
+        bc_epochs = int(args.bc_epochs)
+
+    if bc_epochs > 0:
+        print(f"BC warm-start epochs={bc_epochs}…", flush=True)
         train_bc(
             agent,
             expert_obs,
             expert_act,
-            epochs=args.bc_epochs,
+            epochs=bc_epochs,
             batch_size=min(args.bc_batch_size, expert_obs.shape[0]),
             lr=3e-4,
             action_mask=mask,
         )
 
-    run_gail(
+    finished = run_gail(
         env=env,
         agent=agent,
         disc=disc,
@@ -284,28 +409,29 @@ def main() -> None:
         expert_act=expert_act,
         args=args,
         action_mask=mask,
+        start_iteration=start_iteration,
+        save_path=out,
+        easy=easy,
+        arm=cfg.arm,
+        algo=normalize_algo(ns.algo),
     )
     env.close()
 
+    # Final save (also covered by last-iter save inside run_gail, but keep explicit).
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
-    save_checkpoint(
+    _save_gail_blob(
         out,
-        agent,
-        optimizer,
-        iteration=0,
+        agent=agent,
+        disc=disc,
+        optimizer=optimizer,
+        iteration=finished,
         obs_dim=int(expert_obs.shape[-1]),
         act_dim=int(expert_act.shape[-1]),
         arm=cfg.arm,
-        curriculum="walk",
         algo=normalize_algo(ns.algo),
+        easy=easy,
     )
-    blob = torch.load(out, map_location="cpu", weights_only=False)
-    blob["gail_trot"] = True
-    blob["bc_trot"] = True  # play / init-from treat it like an imitation warm-start
-    blob["easy_walk"] = easy
-    blob["discriminator"] = disc.cpu().state_dict()
-    torch.save(blob, out)
-    print(f"saved GAIL checkpoint {out.resolve()}", flush=True)
+    print(f"saved GAIL checkpoint {out.resolve()} (gail_iteration={finished})", flush=True)
 
     which = _resolve_demo_which("none", args.save_demos)
     if which is None:
@@ -318,11 +444,10 @@ def main() -> None:
             ns.log_dir,
             task=task,
             kind="gail",
-            iteration=int(args.iterations),
-            epochs=int(args.bc_epochs) if args.bc_epochs else None,
+            iteration=int(finished),
+            epochs=int(bc_epochs) if bc_epochs else None,
             extra={"checkpoint": str(out.name)},
         )
-        # Force policy demos into the GAIL run folder (teacher clips use their own if which=all).
         if which == "all":
             teacher_videos = record_demos(
                 cfg,
@@ -332,7 +457,7 @@ def main() -> None:
                 agent=None,
                 which="teacher",
             )
-            cfg._demo_epochs = int(args.bc_epochs)
+            cfg._demo_epochs = int(bc_epochs)
             policy_videos = record_demos(
                 cfg,
                 log_dir=ns.log_dir,
@@ -363,6 +488,11 @@ def main() -> None:
     print(
         f"next: python -m pick_and_carry.train_ppo --curriculum walk --easy-walk "
         f"--init-from {out} --iterations 1000",
+        flush=True,
+    )
+    print(
+        f"追加学習: python -m pick_and_carry.train_gail --easy-walk --resume latest "
+        f"--bc-epochs 0 --iterations 1000 --log-dir {ns.log_dir}",
         flush=True,
     )
 
