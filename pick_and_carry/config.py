@@ -81,7 +81,9 @@ OBS_LAYOUT = (
 )
 # Policy actions: CPG params drive the 12 legs; arm/gripper are residual Δq / Δg
 # on top of IK / phase baselines (see ``pick_and_carry.ik`` and ``control``).
-CPG_PARAM_DIM = 10
+# CPG 15 = classic 10 + dphi_ab/a/b + couple + entrain (uneven-terrain phase adapt).
+# Old 10-D / act-17 checkpoints are incompatible.
+CPG_PARAM_DIM = 15
 ACTION_LAYOUT = (
     ("cpg", CPG_PARAM_DIM),
     ("arm", 6),
@@ -192,7 +194,7 @@ class EnvConfig:
     # walk: legs the whole time, arm held still, reward is travel and not falling.
     # both: legs and arm together for the whole episode.
     control_split: str = "split"
-    # The arm is the Unitree Z1 (6 DoF, about 5.2 kg). Observation 81, action CPG+arm (17).
+    # The arm is the Unitree Z1 (6 DoF, about 5.2 kg). Observation 81, action CPG+arm (22).
     arm: str = "z1"
     # Wrist camera on the hand. Grasp uses the segmented cube, not the simulator position.
     wrist_camera: bool = False

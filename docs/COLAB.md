@@ -1,6 +1,6 @@
 # Colab で実行する
 
-ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。セルは上から順に実行します。起動スクリプトと同じく、段階・学習手法を選んで `train_ppo` で学習・推論します（必要なら `train_bc` / `train_gail`）。観測 81・行動 17（CPG + 腕 IK 残差）。3D ウィンドウは使わず、確認は mp4 です。
+ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。セルは上から順に実行します。起動スクリプトと同じく、段階・学習手法を選んで `train_ppo` で学習・推論します（必要なら `train_bc` / `train_gail`）。観測 81・行動 22（CPG 15 + 腕 IK 残差）。3D ウィンドウは使わず、確認は mp4 です。
 
 ローカルの `.venv` は Windows 用なので zip に入れません。Colab には CUDA 付き PyTorch が入っているので、Windows 用の cu128 は入れません。
 
@@ -61,7 +61,7 @@ Colab のファイルパネルから、この zip をアップロードして展
 | `NUM_STEPS` | 1 iteration のステップ | 起動と同じ `128` |
 | `EASY_WALK` | 平地・腕固定の歩行暖機 | `True` / `False`（`STAGE=walk` のとき） |
 
-観測は 81、行動は 17（CPG パラメータ 10 + 腕残差 6 + グリッパ残差 1）です。脚は環境内 CPG、操作段階の腕は IK ベース + 小さな残差です。
+観測は 81、行動は 22（CPG パラメータ 15 + 腕残差 6 + グリッパ残差 1）です。脚は環境内 CPG（対角オフセット・軟結合・接地引き込み付き）、操作段階の腕は IK ベース + 小さな残差です。
 
 保存先の例:
 

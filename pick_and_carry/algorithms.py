@@ -123,7 +123,7 @@ def mirror_observation(obs: torch.Tensor, *, command_has_yaw: bool = True) -> to
 
 def mirror_action(action: torch.Tensor) -> torch.Tensor:
     """Sagittal reflection of a CPG+arm action batch ``(N, CPG+7)``."""
-    from pick_and_carry.config import ACTION_LAYOUT, NUM_ACTIONS, layout_slices
+    from pick_and_carry.config import ACTION_LAYOUT, CPG_PARAM_DIM, NUM_ACTIONS, layout_slices
 
     if action.shape[-1] < NUM_ACTIONS:
         raise ValueError(f"expected at least {NUM_ACTIONS}-dim action, got {tuple(action.shape)}")
@@ -132,6 +132,13 @@ def mirror_action(action: torch.Tensor) -> torch.Tensor:
     out[:, 5] *= -1.0
     out[:, 6] *= -1.0
     out[:, 7] *= -1.0
+    # Phase offsets: L–R swaps pair A↔B within-offsets; negate pair-B π offset.
+    if CPG_PARAM_DIM >= 15:
+        out[:, 10] *= -1.0  # dphi_ab
+        a, b = out[:, 11].clone(), out[:, 12].clone()
+        out[:, 11] = b  # dphi_a ↔ dphi_b
+        out[:, 12] = a
+        # couple (13) and entrain (14) are scalars — unchanged
     arm = layout_slices(ACTION_LAYOUT)["arm"]
     _flip_arm_signs(out, arm.start)
     return out

@@ -748,7 +748,8 @@ class PickAndCarryEnv:
         cpg_act = action[:, self.action_slices["cpg"]]
         arm_act = action[:, self.action_slices["arm"]]
         grip_act = action[:, self.action_slices["gripper"]]
-        leg_act = self.cpg.step(cpg_act)
+        # Previous-step contacts drive entrainment (contacts refresh after scene.step).
+        leg_act = self.cpg.step(cpg_act, foot_contact=self.foot_contact)
         self.leg_joint_actions = leg_act
         leg_target = self._leg_command(leg_act)
         self._estimate_leg_torque(leg_target)

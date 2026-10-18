@@ -33,7 +33,7 @@ class LayoutTests(unittest.TestCase):
     def test_dimensions(self):
         self.assertEqual(layout_dim(OBS_LAYOUT), 81)
         self.assertEqual(NUM_OBS, 81)
-        self.assertEqual(NUM_ACTIONS, 17)
+        self.assertEqual(NUM_ACTIONS, 22)
 
 
 class GeometryTests(unittest.TestCase):

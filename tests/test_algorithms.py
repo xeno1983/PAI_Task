@@ -92,18 +92,21 @@ class MirrorTests(unittest.TestCase):
         obs[0, 38] = 0.3  # joint1
         obs[0, 42] = 0.4  # joint5
         obs[0, 43] = -0.5  # joint6
-        # Arm block starts after CPG_PARAM_DIM (10): joints at 10, 14, 15.
-        action[0, 10] = 0.3
-        action[0, 14] = 0.4
-        action[0, 15] = -0.5
+        # Arm block starts after CPG_PARAM_DIM (15): joints at 15, 19, 20.
+        from pick_and_carry.config import CPG_PARAM_DIM
+
+        j1, j5, j6 = CPG_PARAM_DIM, CPG_PARAM_DIM + 4, CPG_PARAM_DIM + 5
+        action[0, j1] = 0.3
+        action[0, j5] = 0.4
+        action[0, j6] = -0.5
         mirrored_obs = mirror_observation(obs)
         mirrored_act = mirror_action(action)
         self.assertAlmostEqual(float(mirrored_obs[0, 38]), -0.3, places=5)
         self.assertAlmostEqual(float(mirrored_obs[0, 42]), -0.4, places=5)
         self.assertAlmostEqual(float(mirrored_obs[0, 43]), 0.5, places=5)
-        self.assertAlmostEqual(float(mirrored_act[0, 10]), -0.3, places=5)
-        self.assertAlmostEqual(float(mirrored_act[0, 14]), -0.4, places=5)
-        self.assertAlmostEqual(float(mirrored_act[0, 15]), 0.5, places=5)
+        self.assertAlmostEqual(float(mirrored_act[0, j1]), -0.3, places=5)
+        self.assertAlmostEqual(float(mirrored_act[0, j5]), -0.4, places=5)
+        self.assertAlmostEqual(float(mirrored_act[0, j6]), 0.5, places=5)
 
     def test_catch_command_keeps_z(self):
         obs = torch.zeros(1, 81)
