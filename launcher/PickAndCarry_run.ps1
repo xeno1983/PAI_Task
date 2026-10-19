@@ -175,16 +175,17 @@ function Select-Curriculum {
         $script:stage = "reach"
         $script:curriculumArgs = @("--curriculum", "reach")
         Write-Host "到達です。歩行の重みから続けます。胴の前の空中に点が出て、手先がそこへ届いて少し保つと成功です。"
-        Write-Host "脚は歩行の姿勢を保ちます。追加で選ぶ項目はありません。"
+        Write-Host "脚は歩行の姿勢を保ちます。このあと初期重みを選べます。"
     } elseif ($picked -eq "3") {
         $script:stage = "haul"
         $script:curriculumArgs = @("--curriculum", "haul")
         Write-Host "掴んだまま歩く段階です。到達の重みから、脚も腕も同じネットワークで続けます。"
+        Write-Host "このあと初期重みを選べます。"
     } elseif ($picked -eq "4") {
         $script:stage = "carry"
         $script:curriculumArgs = @()
         Write-Host "ピック＆プレースです。歩きながら持つ段階と同じ観測・行動なので、その重みから続けます。"
-        Write-Host "このあと、走行環境・学習の分け方・手先カメラを選びます。"
+        Write-Host "このあと、走行環境・学習の分け方・手先カメラと、初期重みを選びます。"
         if ($ForPlay) {
             Write-Host "推論では、クリックで物資と運び先を決められます。ROS 2 を選ぶと rviz2 で運び先を変えられます。"
         }
@@ -200,6 +201,7 @@ function Select-Curriculum {
         $script:catchLevel = @("static", "slow", "random", "fly", "noisy")[[Math]::Min(4, [Math]::Max(0, [int]$levelPick - 1))]
         $script:curriculumArgs = @("--curriculum", "catch", "--catch-level", $script:catchLevel)
         Write-Host "キャッチ（$($script:catchLevel)）です。到達の重みから続けます。観測にはボールの速度と 0.3 秒先の位置が入ります。"
+        Write-Host "このあと初期重みを選べます。"
         if ($script:catchLevel -ne "static") {
             Write-Host "成績が低いあいだは易しいボールに戻し、回復したら上げます。"
         }
@@ -234,6 +236,9 @@ function Select-Curriculum {
     Write-Host "保存先は $($script:logDir -replace '/', '\') です。今の iteration: $($script:activeIter)"
     if (-not $ForPlay -and $script:stage -eq "walk") {
         Ask-BcWarmStart
+    }
+    if (-not $ForPlay -and ($script:stage -in @("reach", "haul", "carry", "catch"))) {
+        Ask-LaterStageInit
     }
     if (-not $ForPlay -and ($script:stage -in @("walk", "reach", "haul", "catch"))) {
         Ask-Retreat
@@ -274,21 +279,40 @@ function Get-ImitationWeightPath {
     return (Join-Path (Get-ImitationFolder) $Name)
 }
 
+function Get-PriorStageLogDir {
+    # Default folder to browse when picking a transfer weight for later stages.
+    $algo = if ($script:algo) { $script:algo } else { "ppo" }
+    switch ($script:stage) {
+        "reach" { return (Get-StageFolder $algo "walk" "static") }
+        "haul" { return (Get-StageFolder $algo "reach" "static") }
+        "carry" { return (Get-StageFolder $algo "haul" "static") }
+        "catch" { return (Get-StageFolder $algo "reach" "static") }
+        default { return $script:logDir }
+    }
+}
+
 function Select-InitWeightFile {
-    $startDir = Get-ImitationFolder
-    if (-not (Test-Path $startDir)) {
-        $startDir = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
+    param(
+        [string]$PreferredDir = "",
+        [string]$Title = "初期重みを選択（*.pt）"
+    )
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($PreferredDir)) {
+        $candidates += (Join-Path (Get-Location) ($PreferredDir -replace "/", "\"))
     }
-    if (-not (Test-Path $startDir)) {
-        $startDir = Join-Path (Get-Location) "logs"
+    $candidates += (Get-ImitationFolder)
+    $candidates += (Join-Path (Get-Location) ($script:logDir -replace "/", "\"))
+    $candidates += (Join-Path (Get-Location) "logs")
+    $candidates += (Get-Location).Path
+    $startDir = $null
+    foreach ($dir in $candidates) {
+        if (Test-Path $dir) { $startDir = $dir; break }
     }
-    if (-not (Test-Path $startDir)) {
-        $startDir = (Get-Location).Path
-    }
+    if ($null -eq $startDir) { $startDir = (Get-Location).Path }
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         $dialog = New-Object System.Windows.Forms.OpenFileDialog
-        $dialog.Title = "PPO 初期重みを選択（bc_trot / dagger_trot / valuedice など）"
+        $dialog.Title = $Title
         $dialog.Filter = "PyTorch weights (*.pt)|*.pt|All files (*.*)|*.*"
         $dialog.FilterIndex = 1
         $dialog.InitialDirectory = $startDir
@@ -302,6 +326,47 @@ function Select-InitWeightFile {
         Write-Host "ファイル選択ウィンドウを開けませんでした: $($_.Exception.Message)"
     }
     return $null
+}
+
+function Ask-LaterStageInit {
+    # Reach / haul / carry / catch: continue automatically, or pick an explicit .pt.
+    $script:initFromArgs = @()
+    $script:noAutoInit = $false
+    $label = switch ($script:stage) {
+        "reach" { "到達" }
+        "haul" { "持ち歩き" }
+        "carry" { "箱運び" }
+        "catch" { "キャッチ" }
+        default { $script:stage }
+    }
+    $prior = Get-PriorStageLogDir
+    $priorWin = $prior -replace "/", "\"
+    Write-Host ""
+    Write-Host "$label の初期化:"
+    Write-Host "   1  自動（この段階の続き。無ければ前段階の最新）← 推奨"
+    Write-Host "   2  重みファイルを選ぶ（--init-from。別フォルダなら iteration 0）"
+    Write-Host "      候補フォルダ例: $priorWin"
+    $answer = Read-Host "初期化 [1]"
+    if ([string]::IsNullOrWhiteSpace($answer)) { $answer = "1" }
+    if ($answer -eq "2") {
+        Write-Host "ファイル選択ウィンドウを開きます（キャンセル後はパスを手入力できます）。"
+        $picked = Select-InitWeightFile -PreferredDir $prior -Title "$label の初期重みを選択（前段階の ppo_*.pt など）"
+        if (-not [string]::IsNullOrWhiteSpace($picked)) {
+            $script:initFromArgs = @("--init-from", $picked)
+            Write-Host "指定重みを --init-from します: $picked"
+        } else {
+            Write-Host "キャンセルされました。手入力する場合は .pt のパスを入れてください。"
+            $raw = Read-Host "初期重みパス（空=自動に戻す）"
+            if ([string]::IsNullOrWhiteSpace($raw)) {
+                Write-Host "未入力なので自動（--resume latest）にします。"
+            } else {
+                $script:initFromArgs = @("--init-from", $raw.Trim().Trim('"'))
+                Write-Host "指定重みを --init-from します: $($script:initFromArgs[1])"
+            }
+        }
+    } else {
+        Write-Host "自動で続けます（この段階に重みが無ければ前段階から借ります）。"
+    }
 }
 
 function Ask-BcWarmStart {
