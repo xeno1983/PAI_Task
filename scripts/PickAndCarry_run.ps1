@@ -225,12 +225,30 @@ function Select-Curriculum {
     }
     Set-LogDirFromStage
     Write-Host "保存先は $($script:logDir -replace '/', '\') です。今の iteration: $($script:activeIter)"
-    if (-not $ForPlay -and $script:easyWalk) {
+    if (-not $ForPlay -and $script:stage -eq "walk") {
         Ask-BcWarmStart
     }
     if (-not $ForPlay -and ($script:stage -in @("walk", "reach", "haul", "catch"))) {
         Ask-Retreat
     }
+}
+
+function Find-ImitationWeight {
+    param([string]$Name)
+    # Current log folder first, then easy-walk sibling (for hard walk warm-start from BC/DAgger).
+    $folders = @()
+    $folder = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
+    $folders += $folder
+    if ($script:logDir -match 'curriculum_walk$' -and $script:logDir -notmatch 'curriculum_walk_easy$') {
+        $easyRel = $script:logDir + "_easy"
+        $easy = Join-Path (Get-Location) ($easyRel -replace "/", "\")
+        if (Test-Path $easy) { $folders += $easy }
+    }
+    foreach ($dir in $folders) {
+        $path = Join-Path $dir $Name
+        if (Test-Path $path) { return $path }
+    }
+    return $null
 }
 
 function Ask-BcWarmStart {
@@ -240,17 +258,20 @@ function Ask-BcWarmStart {
     $script:initFromArgs = @()
     $script:noAutoInit = $false
     $folder = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
-    $dagger = Join-Path $folder "dagger_trot.pt"
-    $valuedice = Join-Path $folder "valuedice_trot.pt"
-    $gail = Join-Path $folder "gail_trot.pt"
-    $bc = Join-Path $folder "bc_trot.pt"
-    $hasDagger = Test-Path $dagger
-    $hasBc = Test-Path $bc
-    Write-Host "簡単歩行の初期化（推奨は DAgger/BC → PPO。ValueDICE は任意）:"
+    $dagger = Find-ImitationWeight "dagger_trot.pt"
+    $valuedice = Find-ImitationWeight "valuedice_trot.pt"
+    $gail = Find-ImitationWeight "gail_trot.pt"
+    $bc = Find-ImitationWeight "bc_trot.pt"
+    $hasDagger = $null -ne $dagger
+    $hasBc = $null -ne $bc
+    $modeLabel = if ($script:easyWalk) { "簡単歩行" } else { "本番歩行" }
+    Write-Host "$modeLabel の初期化（推奨は DAgger/BC → PPO。ファイルパス指定可）:"
     if ($hasDagger) {
         Write-Host "   1  保存 DAgger から PPO（推奨。再学習なし・iteration 0）"
+        Write-Host "      $dagger"
     } elseif ($hasBc) {
         Write-Host "   1  保存 BC から PPO（推奨。BC 再学習なし・iteration 0）"
+        Write-Host "      $bc"
     } else {
         Write-Host "   1  BC してから PPO（推奨・初回。保存模倣がまだ無い）"
     }
@@ -258,6 +279,7 @@ function Ask-BcWarmStart {
     Write-Host "   3  DAgger してから PPO（対話的模倣・推奨の次点）"
     Write-Host "   4  ValueDICE してから PPO（任意・上級。PPO は iteration 0）"
     Write-Host "   5  ゼロから PPO のみ"
+    Write-Host "   6  重みファイルのパスを指定（--init-from。iteration 0）"
     Write-Host "   （模倣学習だけ・デモ再生だけはメニュー 1）"
     $answer = Read-Host "初期化 [1]"
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = "1" }
@@ -265,16 +287,16 @@ function Ask-BcWarmStart {
         $hasPpo = @(Get-ChildItem -Path $folder -Filter "ppo_*.pt" -File -ErrorAction SilentlyContinue).Count -gt 0
         $imit = $null
         $kind = ""
-        if (Test-Path $dagger) {
+        if ($hasDagger) {
             $imit = $dagger
             $kind = "DAgger"
-        } elseif (Test-Path $bc) {
+        } elseif ($hasBc) {
             $imit = $bc
             $kind = "BC"
-        } elseif (Test-Path $valuedice) {
+        } elseif ($null -ne $valuedice) {
             $imit = $valuedice
             $kind = "ValueDICE"
-        } elseif (Test-Path $gail) {
+        } elseif ($null -ne $gail) {
             $imit = $gail
             $kind = "GAIL"
         }
@@ -306,6 +328,16 @@ function Ask-BcWarmStart {
     } elseif ($answer -eq "5") {
         $script:noAutoInit = $true
         Write-Host "模倣学習なしで PPO します（既存 ppo があれば --resume latest。無い場合は本当にゼロから・模倣重みは使いません）。"
+    } elseif ($answer -eq "6") {
+        Write-Host "例: logs\ppo_curriculum_walk_easy\bc_trot.pt  /  bc  /  dagger  /  latest"
+        $raw = Read-Host "初期重みパスまたは別名"
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            Write-Host "未入力なのでゼロから PPO します。"
+            $script:noAutoInit = $true
+        } else {
+            $script:initFromArgs = @("--init-from", $raw.Trim().Trim('"'))
+            Write-Host "指定重みで PPO を iteration 0 から始めます: $($script:initFromArgs[1])"
+        }
     } else {
         if ($hasDagger) {
             $script:initFromArgs = @("--init-from", $dagger)

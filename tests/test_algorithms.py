@@ -146,5 +146,24 @@ class StageLogDirAlgoTests(unittest.TestCase):
         self.assertEqual(stage_log_dir("carry", algo="sym_ppo").as_posix(), "logs/sym_ppo_z1")
 
 
+class PpoInitFromTests(unittest.TestCase):
+    def test_resolve_init_from_searches_easy_sibling(self):
+        import tempfile
+        from pathlib import Path
+
+        from pick_and_carry.train_ppo import resolve_init_from
+
+        root = Path(tempfile.mkdtemp())
+        hard = root / "ppo_curriculum_walk"
+        easy = root / "ppo_curriculum_walk_easy"
+        hard.mkdir()
+        easy.mkdir()
+        bc = easy / "bc_trot.pt"
+        bc.write_bytes(b"stub")
+        self.assertEqual(resolve_init_from("bc", hard), bc)
+        self.assertEqual(resolve_init_from("latest", hard), bc)
+        self.assertEqual(resolve_init_from(str(bc), hard), bc)
+
+
 if __name__ == "__main__":
     unittest.main()

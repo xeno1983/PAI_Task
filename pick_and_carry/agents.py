@@ -178,6 +178,33 @@ def adapt_learning_rate(learning_rate: float, kl: float, desired_kl: float) -> f
     return learning_rate
 
 
+# Clamp log π/π_old before exp so a bad minibatch cannot overflow to inf/NaN.
+# exp(±8) ≈ 2980 — enough headroom for PPO, far below float overflow.
+_LOG_RATIO_CLAMP = 8.0
+# Dual-clip ceiling for negative advantages (Ye et al.). Caps the unclipped r·A < 0 term.
+_DUAL_CLIP = 3.0
+
+
+def _params_finite(module: nn.Module) -> bool:
+    return all(torch.isfinite(p).all().item() for p in module.parameters())
+
+
+def _ppo_policy_loss(ratio: torch.Tensor, adv: torch.Tensor, clip: float) -> torch.Tensor:
+    """Clipped PPO surrogate with dual-clip on negative advantages.
+
+    Standard ``min(r·A, clip(r)·A)`` does **not** bound the loss when ``A < 0`` and
+    ``r ≫ 1`` (the unclipped term wins). That is what blew Sym PPO to NaN. Dual-clip
+    floors the surrogate at ``c·A`` for ``A < 0`` so one bad ratio cannot destroy the actor.
+    """
+    clipped = ratio.clamp(1.0 - clip, 1.0 + clip)
+    surrogate = torch.minimum(ratio * adv, clipped * adv)
+    if _DUAL_CLIP > 1.0:
+        neg = adv < 0
+        if bool(neg.any()):
+            surrogate = torch.where(neg, torch.maximum(surrogate, _DUAL_CLIP * adv), surrogate)
+    return -surrogate.mean()
+
+
 def ppo_update(
     agent: ActorCritic,
     optimizer: torch.optim.Optimizer,
@@ -200,7 +227,7 @@ def ppo_update(
     """One PPO update.
 
     ``old_values`` turns on the clipped value loss. ``desired_kl`` turns on the
-    adaptive learning rate, which changes the optimizer's rate between minibatches.
+    adaptive learning rate and rsl_rl-style early stop when KL exceeds 2× target.
     Set ``normalize_advantages`` False when advantages are already group-normalized (GRPO).
     """
     if normalize_advantages:
@@ -208,16 +235,27 @@ def ppo_update(
     n = obs.shape[0]
     with torch.no_grad():
         old_mean, old_std = agent.actor.distribution_params(obs)
+    backup = {key: value.detach().clone() for key, value in agent.state_dict().items()}
     totals = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "kl": 0.0}
     updates = 0
+    aborted = 0.0
+    early_stop = False
     for _ in range(epochs):
+        if early_stop:
+            break
         order = torch.randperm(n, device=obs.device)
         for start in range(0, n, minibatch_size):
             batch = order[start : start + minibatch_size]
             log_prob, entropy, value = agent.evaluate(obs[batch], actions[batch])
-            ratio = torch.exp(log_prob - old_log_prob[batch])
+            if not torch.isfinite(log_prob).all():
+                agent.load_state_dict(backup)
+                aborted = 1.0
+                early_stop = True
+                break
+            # Bound the importance ratio so exp never overflows to inf.
+            ratio = torch.exp((log_prob - old_log_prob[batch]).clamp(-_LOG_RATIO_CLAMP, _LOG_RATIO_CLAMP))
             adv = advantages[batch]
-            policy_loss = -torch.minimum(ratio * adv, ratio.clamp(1.0 - clip, 1.0 + clip) * adv).mean()
+            policy_loss = _ppo_policy_loss(ratio, adv, clip)
             if old_values is None:
                 value_loss = 0.5 * (returns[batch] - value).pow(2).mean()
             else:
@@ -226,10 +264,23 @@ def ppo_update(
                 value_loss = 0.5 * torch.maximum((returns[batch] - value).pow(2), (returns[batch] - clipped).pow(2)).mean()
             entropy_mean = entropy.mean()
             loss = policy_loss + value_coef * value_loss - entropy_coef * entropy_mean
+            if not torch.isfinite(loss):
+                optimizer.zero_grad(set_to_none=True)
+                continue
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in agent.parameters()):
+                optimizer.zero_grad(set_to_none=True)
+                continue
             nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
             optimizer.step()
+            if not _params_finite(agent):
+                agent.load_state_dict(backup)
+                for group in optimizer.param_groups:
+                    group["lr"] = max(MIN_LEARNING_RATE, float(group["lr"]) / 1.5)
+                aborted = 1.0
+                early_stop = True
+                break
             with torch.no_grad():
                 new_mean, new_std = agent.actor.distribution_params(obs[batch])
                 kl = float(
@@ -238,18 +289,29 @@ def ppo_update(
                         old_std[batch],
                         new_mean,
                         new_std,
-                        action_mask=agent.action_mask,
+                        action_mask=agent._mask_on(obs),
                     )
                 )
+            if not (kl == kl):  # NaN
+                agent.load_state_dict(backup)
+                aborted = 1.0
+                early_stop = True
+                break
             if desired_kl is not None:
                 for group in optimizer.param_groups:
                     group["lr"] = adapt_learning_rate(float(group["lr"]), kl, desired_kl)
+                # rsl_rl: stop the rest of this update once the policy moved too far.
+                if kl > desired_kl * 2.0:
+                    early_stop = True
             totals["policy_loss"] += float(policy_loss.detach())
             totals["value_loss"] += float(value_loss.detach())
             totals["entropy"] += float(entropy_mean.detach())
             totals["kl"] += kl
             updates += 1
+            if early_stop:
+                break
     metrics = {key: value / max(updates, 1) for key, value in totals.items()}
     metrics["lr"] = float(optimizer.param_groups[0]["lr"])
+    metrics["aborted"] = aborted
     return metrics
 

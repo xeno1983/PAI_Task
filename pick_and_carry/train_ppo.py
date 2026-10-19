@@ -178,9 +178,11 @@ def parse_args():
     )
     parser.add_argument(
         "--init-from",
-        type=Path,
+        type=str,
         default=None,
-        help="Load network weights only (e.g. bc_trot.pt) and start PPO from iteration 0. "
+        help="Warm-start actor/critic and start PPO at iteration 0. "
+        "File path, or alias: bc / dagger / valuedice / gail / latest. "
+        "For hard walk, aliases also search the sibling *_walk_easy folder. "
         "Ignored when --resume finds a checkpoint in --log-dir.",
     )
     parser.add_argument(
@@ -386,6 +388,64 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     start_iteration = int(blob.get("iteration", 0))
     print(f"resumed {ckpt_path} at iteration {start_iteration}", flush=True)
     return start_iteration, str(ckpt_path)
+
+
+def _init_search_dirs(log_dir: Path) -> list[Path]:
+    """Folders to look in for imitation warm-start weights.
+
+    Hard walk (``…_curriculum_walk``) also checks the easy sibling so a BC/DAgger
+    trained under ``*_walk_easy`` can seed production walk without copying files.
+    """
+    log_dir = Path(log_dir)
+    dirs = [log_dir]
+    name = log_dir.name
+    if name.endswith("curriculum_walk") and not name.endswith("curriculum_walk_easy"):
+        easy = log_dir.parent / f"{name}_easy"
+        if easy.is_dir() and easy.resolve() != log_dir.resolve():
+            dirs.append(easy)
+    return dirs
+
+
+def resolve_init_from(init_from: str | Path | None, log_dir: Path) -> Path | None:
+    """Resolve ``--init-from`` path or alias (``bc``, ``dagger``, ``latest``, …)."""
+    if init_from is None:
+        return None
+    text = str(init_from).strip()
+    if not text:
+        return None
+    aliases = {
+        "bc": ("bc_trot.pt",),
+        "bc_trot": ("bc_trot.pt",),
+        "dagger": ("dagger_trot.pt",),
+        "dagger_trot": ("dagger_trot.pt",),
+        "valuedice": ("valuedice_trot.pt",),
+        "valuedice_trot": ("valuedice_trot.pt",),
+        "gail": ("gail_trot.pt", "valuedice_trot.pt"),
+        "gail_trot": ("gail_trot.pt", "valuedice_trot.pt"),
+        "latest": ("dagger_trot.pt", "bc_trot.pt", "valuedice_trot.pt", "gail_trot.pt"),
+    }
+    key = text.lower().replace("-", "_")
+    names = aliases.get(key)
+    if names is not None:
+        for folder in _init_search_dirs(log_dir):
+            for name in names:
+                path = folder / name
+                if path.is_file():
+                    return path
+        searched = ", ".join(str(d) for d in _init_search_dirs(log_dir))
+        raise SystemExit(f"--init-from {text} が見つかりません（探した場所: {searched}）")
+    path = Path(text)
+    if not path.is_file():
+        # Relative to log_dir (e.g. bc_trot.pt typed without a folder).
+        alt = Path(log_dir) / text
+        if alt.is_file():
+            return alt
+        for folder in _init_search_dirs(log_dir):
+            alt = folder / text
+            if alt.is_file():
+                return alt
+        raise SystemExit(f"--init-from not found: {path}")
+    return path
 
 
 def load_init_weights(path: Path, env, cfg, agent) -> str | None:
@@ -738,6 +798,9 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         row["kl"] = float(metrics["kl"])
         row["lr"] = float(metrics["lr"])
         row["entropy"] = float(metrics["entropy"])
+        if float(metrics.get("aborted", 0.0)) > 0.0:
+            pieces.append("update_aborted")
+            row["aborted"] = 1
         append_metrics(args.log_dir / "metrics.jsonl", row)
         tracker.log_row(row)
         if cfg.curriculum in LOCOMOTION_STAGES:
@@ -823,27 +886,24 @@ def main() -> None:
     obs = env.reset()
     env.save_fleet_snapshot()
     start_iteration, resumed_from = resume_agent(args, env, cfg, agent, optimizer)
-    init_from = getattr(args, "init_from", None)
+    init_spec = getattr(args, "init_from", None)
+    init_from = None
     if resumed_from is None:
         # Auto-pick imitation warm-start in the easy-walk folder when no PPO checkpoint exists.
         # Prefer DAgger / BC for walk (env PPO), then ValueDICE / legacy GAIL.
         # Skip when the launcher explicitly asked for a true zero start (--no-auto-init-from).
         if (
-            init_from is None
+            init_spec is None
             and getattr(args, "easy_walk", False)
             and not getattr(args, "no_auto_init_from", False)
         ):
-            log_dir = Path(args.log_dir)
-            for name in ("dagger_trot.pt", "bc_trot.pt", "valuedice_trot.pt", "gail_trot.pt"):
-                candidate = log_dir / name
-                if candidate.is_file():
-                    init_from = candidate
-                    break
-        if init_from is not None:
+            init_spec = "latest"
+        if init_spec is not None:
+            init_from = resolve_init_from(init_spec, Path(args.log_dir))
             resumed_from = load_init_weights(init_from, env, cfg, agent)
             start_iteration = 0
-    elif init_from is not None:
-        print(f"--init-from {init_from} ignored because --resume loaded {resumed_from}", flush=True)
+    elif init_spec is not None:
+        print(f"--init-from {init_spec} ignored because --resume loaded {resumed_from}", flush=True)
     gpu = ""
     if device.type == "cuda" and torch.cuda.is_available():
         free, total = torch.cuda.mem_get_info(device)

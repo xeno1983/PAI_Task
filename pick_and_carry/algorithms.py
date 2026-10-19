@@ -164,8 +164,12 @@ def augment_symmetric(
     mirrored_act = mirror_action(actions)
     if agent is not None:
         with torch.no_grad():
-            mask = getattr(agent, "action_mask", None)
+            # Use device-matched mask (``action_mask`` alone stays on the construction device).
+            mask = agent._mask_on(mirrored_obs) if hasattr(agent, "_mask_on") else getattr(agent, "action_mask", None)
             mirrored_logp, _ = agent.actor.log_prob(mirrored_obs, mirrored_act, mask)
+            if not torch.isfinite(mirrored_logp).all():
+                # Fall back to original log-probs rather than poisoning the PPO ratio.
+                mirrored_logp = old_log_prob
     else:
         mirrored_logp = old_log_prob
     parts = [
