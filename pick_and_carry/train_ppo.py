@@ -182,7 +182,7 @@ def parse_args():
         default=None,
         help="Warm-start actor/critic and start PPO at iteration 0. "
         "File path, or alias: bc / dagger / valuedice / gail / latest. "
-        "Aliases search <log-dir>/imitation/ (and easy-walk sibling). "
+        "Aliases search logs/imitation/ (and legacy walk folders). "
         "Ignored when --resume finds a checkpoint in --log-dir.",
     )
     parser.add_argument(
@@ -393,8 +393,7 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
 def resolve_init_from(init_from: str | Path | None, log_dir: Path) -> Path | None:
     """Resolve ``--init-from`` path or alias (``bc``, ``dagger``, ``latest``, …).
 
-    Aliases search ``<log-dir>/imitation/`` first, then the legacy flat folder, then
-    the easy-walk sibling (so hard walk can warm-start from easy BC/DAgger).
+    Aliases search ``logs/imitation/`` first, then legacy nested/flat walk folders.
     """
     from pick_and_carry.curriculum import imitation_weight_dirs
 

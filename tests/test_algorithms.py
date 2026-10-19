@@ -49,12 +49,15 @@ class ActionMaskTests(unittest.TestCase):
         self.assertTrue(str(stage_log_dir("walk", easy=True)).endswith("curriculum_walk_easy"))
         self.assertTrue(str(stage_log_dir("walk", easy=False)).endswith("curriculum_walk"))
 
-    def test_imitation_log_dir_is_subfolder(self):
+    def test_imitation_log_dir_is_sibling_of_walk(self):
+        from pathlib import Path
+
         from pick_and_carry.curriculum import imitation_log_dir, nest_imitation_log_dir
 
-        self.assertTrue(str(imitation_log_dir()).replace("\\", "/").endswith("curriculum_walk_easy/imitation"))
+        self.assertEqual(str(imitation_log_dir()).replace("\\", "/"), "logs/imitation")
         rl = stage_log_dir("walk", easy=True)
-        self.assertEqual(nest_imitation_log_dir(rl), rl / "imitation")
+        self.assertEqual(nest_imitation_log_dir(rl), rl.parent / "imitation")
+        self.assertEqual(rl.parent / "imitation", Path("logs") / "imitation")
 
 
 class GroupRelativeTests(unittest.TestCase):
@@ -161,17 +164,26 @@ class PpoInitFromTests(unittest.TestCase):
         from pick_and_carry.train_ppo import resolve_init_from
 
         root = Path(tempfile.mkdtemp())
-        hard = root / "ppo_curriculum_walk"
-        easy = root / "ppo_curriculum_walk_easy"
-        imit = easy / "imitation"
-        hard.mkdir()
+        logs = root / "logs"
+        hard = logs / "ppo_curriculum_walk"
+        easy = logs / "ppo_curriculum_walk_easy"
+        imit = logs / "imitation"
+        hard.mkdir(parents=True)
         easy.mkdir()
         imit.mkdir()
         bc = imit / "bc_trot.pt"
         bc.write_bytes(b"stub")
-        self.assertEqual(resolve_init_from("bc", hard), bc)
-        self.assertEqual(resolve_init_from("latest", hard), bc)
-        self.assertEqual(resolve_init_from(str(bc), hard), bc)
+        # Chdir so imitation_log_dir() resolves relative logs/imitation under root.
+        import os
+
+        prev = os.getcwd()
+        try:
+            os.chdir(root)
+            self.assertEqual(resolve_init_from("bc", hard).resolve(), bc.resolve())
+            self.assertEqual(resolve_init_from("latest", hard).resolve(), bc.resolve())
+            self.assertEqual(Path(resolve_init_from(str(bc), hard)).resolve(), bc.resolve())
+        finally:
+            os.chdir(prev)
 
 
 if __name__ == "__main__":

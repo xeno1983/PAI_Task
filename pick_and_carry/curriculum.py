@@ -119,9 +119,9 @@ def retreat_choice(
     return current, 0, 0
 
 
-# BC / DAgger / ValueDICE checkpoints live under this subfolder of the walk RL log dir
-# so they are not confused with ``ppo_*.pt`` in the same tree.
-IMITATION_SUBDIR = "imitation"
+# BC / DAgger / ValueDICE live in ``logs/imitation/``, sibling of
+# ``logs/ppo_curriculum_walk_easy/`` (not nested under the PPO folder).
+IMITATION_DIRNAME = "imitation"
 
 
 def stage_log_dir(
@@ -167,22 +167,25 @@ def imitation_log_dir(
     easy: bool = True,
     root: Path | None = None,
 ) -> Path:
-    """``logs/<algo>_curriculum_walk_easy/imitation`` (or hard-walk sibling)."""
-    return stage_log_dir("walk", algo=algo, easy=easy, root=root) / IMITATION_SUBDIR
+    """``logs/imitation`` — sibling of ``logs/<algo>_curriculum_walk_easy``."""
+    del algo, easy  # shared across RL algos; kept for call-site compatibility
+    base = Path(root) if root is not None else Path()
+    return base / "logs" / IMITATION_DIRNAME
 
 
 def nest_imitation_log_dir(log_dir: Path | str) -> Path:
-    """Map an RL walk log folder to its ``imitation/`` subfolder.
+    """Map an RL walk log folder (or any path) to the shared ``logs/imitation`` dir.
 
-    Paths that already end with ``imitation`` (or are unrelated custom dirs) are unchanged.
-    When nesting, any legacy flat ``bc_trot.pt`` / ``dagger_trot.pt`` / … next to ``ppo_*.pt``
-    are moved into ``imitation/`` once (so old runs are not left looking like RL weights).
+    If ``log_dir`` is already ``…/imitation``, it is returned as-is. When redirecting
+    from a walk RL folder, legacy weights next to ``ppo_*.pt`` (or under the old
+    nested ``walk_easy/imitation/``) are moved into ``logs/imitation/`` once.
     """
     path = Path(log_dir)
-    if path.name == IMITATION_SUBDIR:
+    if path.name == IMITATION_DIRNAME:
         return path
     if "curriculum_walk" in path.name:
-        imit = path / IMITATION_SUBDIR
+        # logs/ppo_curriculum_walk_easy → logs/imitation (sibling, not nested).
+        imit = path.parent / IMITATION_DIRNAME if path.parent.name == "logs" else Path("logs") / IMITATION_DIRNAME
         migrate_legacy_imitation_weights(path, imit)
         return imit
     return path
@@ -197,49 +200,84 @@ _LEGACY_IMITATION_NAMES = (
 
 
 def migrate_legacy_imitation_weights(rl_dir: Path, imit_dir: Path | None = None) -> list[Path]:
-    """Move flat imitation checkpoints from an RL walk folder into ``imitation/``."""
+    """Move legacy imitation checkpoints into ``logs/imitation/``.
+
+    Sources: flat files in the RL walk folder, and the previous nested
+    ``<walk>/imitation/`` layout.
+    """
     rl_dir = Path(rl_dir)
-    dest = Path(imit_dir) if imit_dir is not None else rl_dir / IMITATION_SUBDIR
+    dest = Path(imit_dir) if imit_dir is not None else imitation_log_dir()
     moved: list[Path] = []
-    if not rl_dir.is_dir():
-        return moved
+    sources: list[Path] = []
+    if rl_dir.is_dir():
+        sources.append(rl_dir)
+        nested = rl_dir / IMITATION_DIRNAME
+        if nested.is_dir() and nested.resolve() != dest.resolve():
+            sources.append(nested)
     dest.mkdir(parents=True, exist_ok=True)
-    for name in _LEGACY_IMITATION_NAMES:
-        src = rl_dir / name
-        dst = dest / name
-        if src.is_file() and not dst.is_file():
-            src.replace(dst)
-            moved.append(dst)
-            print(f"模倣重みを移動: {src} → {dst}", flush=True)
+    for folder in sources:
+        for name in _LEGACY_IMITATION_NAMES:
+            src = folder / name
+            dst = dest / name
+            if not src.is_file():
+                continue
+            try:
+                if src.resolve() == dest.resolve() or src.resolve() == dst.resolve():
+                    continue
+            except OSError:
+                pass
+            if not dst.is_file():
+                src.replace(dst)
+                moved.append(dst)
+                print(f"模倣重みを移動: {src} → {dst}", flush=True)
+            else:
+                # Destination already has the weight; drop the leftover legacy copy.
+                src.unlink()
+                print(f"旧配置の重複を削除: {src}（残す先: {dst}）", flush=True)
+    # Remove empty legacy nested imitation/ under the RL folder.
+    nested = rl_dir / IMITATION_DIRNAME
+    if nested.is_dir():
+        try:
+            if nested.resolve() != dest.resolve() and not any(nested.iterdir()):
+                nested.rmdir()
+        except OSError:
+            pass
     return moved
 
 
-def imitation_weight_dirs(rl_log_dir: Path | str) -> list[Path]:
+def imitation_weight_dirs(rl_log_dir: Path | str | None = None) -> list[Path]:
     """Folders to search for ``bc_trot.pt`` / ``dagger_trot.pt`` / ``valuedice_trot.pt``.
 
-    Order: ``imitation/`` under the RL dir, legacy flat RL dir, then the easy-walk
-    sibling's ``imitation/`` and flat root (so hard walk can warm-start from easy BC).
+    Order: shared ``logs/imitation/``, then legacy nested/flat walk folders.
     """
-    rl = Path(rl_log_dir)
-    if rl.name == IMITATION_SUBDIR:
-        rl = rl.parent
     ordered: list[Path] = []
     seen: set[Path] = set()
 
     def add(folder: Path) -> None:
-        key = folder.resolve() if folder.exists() else folder
+        try:
+            key = folder.resolve()
+        except OSError:
+            key = folder
         if key in seen:
             return
         seen.add(key)
         ordered.append(folder)
 
-    add(rl / IMITATION_SUBDIR)
+    add(imitation_log_dir())
+    if rl_log_dir is None:
+        return ordered
+    rl = Path(rl_log_dir)
+    if rl.name == IMITATION_DIRNAME:
+        return ordered
+    add(rl / IMITATION_DIRNAME)  # old nested layout
     add(rl)
     name = rl.name
     if name.endswith("curriculum_walk") and not name.endswith("curriculum_walk_easy"):
         easy = rl.parent / f"{name}_easy"
-        add(easy / IMITATION_SUBDIR)
+        add(easy / IMITATION_DIRNAME)
         add(easy)
+    elif "curriculum_walk" in name and rl.parent.name == "logs":
+        add(rl.parent / IMITATION_DIRNAME)
     return ordered
 
 

@@ -1,6 +1,6 @@
 """Behavioral cloning of a diagonal-trot teacher, then save a PPO-compatible checkpoint.
 
-Typical use (writes under ``logs/<algo>_curriculum_walk_easy/imitation/``):
+Typical use (writes under ``logs/imitation/``, sibling of the PPO walk folder):
 
     python -m pick_and_carry.train_bc --easy-walk --seconds 90 --epochs 3000
 

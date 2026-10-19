@@ -20,7 +20,7 @@ Write-Host ""
 Write-Host " この画面はログです。閉じずに待ってください。"
 Write-Host ""
 Write-Host "   1  模倣学習（トロット教師 → BC / DAgger / ValueDICE）。デモ保存の有無を選べます"
-Write-Host "      保存先: logs\<手法>_curriculum_walk_easy\imitation\ （BC/DAgger/ValueDICE。PPO とは別）"
+Write-Host "      保存先: logs\imitation\ （BC/DAgger/ValueDICE。PPO の walk フォルダとは並列）"
 Write-Host "   2  学習。段階を選んでから回数を入れる"
 Write-Host "      歩行、到達、歩きながら持つ、箱運び、キャッチ。到達と持ち歩きは歩行から、キャッチは到達から続ける。"
 Write-Host "      歩行は平地から始めて地形へ広げ、腕を動かしながら歩く。腕は Z1。観測 81、行動 17（CPG+腕）。"
@@ -234,22 +234,15 @@ function Select-Curriculum {
 }
 
 function Get-ImitationFolder {
-    param([string]$RlLogDirRel = $script:logDir)
-    # Imitation weights live under <walk_log>/imitation/. Hard walk prefers the easy sibling.
-    $rel = $RlLogDirRel
-    if ($rel -match 'curriculum_walk$' -and $rel -notmatch 'curriculum_walk_easy$') {
-        $easyRel = $rel + "_easy"
-        $easy = Join-Path (Get-Location) ($easyRel -replace "/", "\")
-        if (Test-Path $easy) { $rel = $easyRel }
-    }
-    $rl = Join-Path (Get-Location) ($rel -replace "/", "\")
-    return (Join-Path $rl "imitation")
+    # Shared imitation dir, sibling of ppo_curriculum_walk_easy under logs/.
+    return (Join-Path (Get-Location) "logs\imitation")
 }
 
 function Find-ImitationWeight {
     param([string]$Name)
-    # imitation/ first, then legacy flat RL folder; hard walk also checks easy sibling.
+    # logs/imitation first, then legacy nested/flat walk folders.
     $folders = @()
+    $folders += (Join-Path (Get-Location) "logs\imitation")
     $rl = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
     $folders += (Join-Path $rl "imitation")
     $folders += $rl
@@ -257,6 +250,8 @@ function Find-ImitationWeight {
         $easy = Join-Path (Get-Location) (($script:logDir + "_easy") -replace "/", "\")
         $folders += (Join-Path $easy "imitation")
         $folders += $easy
+    } elseif ($script:logDir -match 'curriculum_walk_easy$') {
+        $folders += (Join-Path $rl "imitation")
     }
     foreach ($dir in $folders) {
         $path = Join-Path $dir $Name
@@ -512,14 +507,17 @@ function Ask-ValueDiceWarmStart {
     # Sets script:vdExtraArgs (flat) / vdBcEpochs for train_gail / train_valuedice.
     $script:vdExtraArgs = @()
     $script:vdBcEpochs = 3000
-    $imit = Join-Path (Get-Location) (($LogDirRel -replace "/", "\") + "\imitation")
+    $imit = Join-Path (Get-Location) "logs\imitation"
+    $legacyNested = Join-Path (Get-Location) (($LogDirRel -replace "/", "\") + "\imitation")
     $legacy = Join-Path (Get-Location) ($LogDirRel -replace "/", "\")
-    $folder = if (Test-Path $imit) { $imit } else { $legacy }
+    $folder = if (Test-Path $imit) { $imit } elseif (Test-Path $legacyNested) { $legacyNested } else { $legacy }
     $valuedice = Join-Path $folder "valuedice_trot.pt"
+    if (-not (Test-Path $valuedice)) { $valuedice = Join-Path $legacyNested "valuedice_trot.pt" }
     if (-not (Test-Path $valuedice)) { $valuedice = Join-Path $legacy "valuedice_trot.pt" }
     if (-not (Test-Path $valuedice)) { $valuedice = Join-Path $folder "gail_trot.pt" }
     if (-not (Test-Path $valuedice)) { $valuedice = Join-Path $legacy "gail_trot.pt" }
     $bc = Join-Path $folder "bc_trot.pt"
+    if (-not (Test-Path $bc)) { $bc = Join-Path $legacyNested "bc_trot.pt" }
     if (-not (Test-Path $bc)) { $bc = Join-Path $legacy "bc_trot.pt" }
     $hasVd = Test-Path $valuedice
     $hasBc = Test-Path $bc
@@ -587,9 +585,14 @@ function Copy-VideoTree {
 
 function Open-BcDemos {
     param([string]$LogDirRel)
-    $imit = Join-Path (Get-Location) (($LogDirRel -replace "/", "\") + "\imitation")
+    $imit = Join-Path (Get-Location) "logs\imitation"
+    $legacyNested = Join-Path (Get-Location) (($LogDirRel -replace "/", "\") + "\imitation")
     $legacy = Join-Path (Get-Location) ($LogDirRel -replace "/", "\")
-    $folder = if (Test-Path (Join-Path $imit "videos")) { $imit } elseif (Test-Path $imit) { $imit } else { $legacy }
+    if (Test-Path (Join-Path $imit "videos")) { $folder = $imit }
+    elseif (Test-Path (Join-Path $legacyNested "videos")) { $folder = $legacyNested }
+    elseif (Test-Path $imit) { $folder = $imit }
+    elseif (Test-Path $legacyNested) { $folder = $legacyNested }
+    else { $folder = $legacy }
     $videosRoot = Join-Path $folder "videos"
     $reels = @("trot_teacher_demo.mp4", "bc_trot_demo.mp4", "dagger_trot_demo.mp4", "valuedice_trot_demo.mp4", "gail_trot_demo.mp4")
     $opened = 0
@@ -812,7 +815,7 @@ switch ($choice) {
     "1" {
         Write-Host ""
         Write-Host "模倣学習（トロット教師 → BC / DAgger / ValueDICE）。"
-        Write-Host "保存先は logs\<手法>_curriculum_walk_easy\imitation\ です（PPO の ppo_*.pt とは別）。"
+        Write-Host "保存先は logs\imitation\ です（logs\*_curriculum_walk_easy と並列。PPO とは別）。"
         Select-Algo
         $script:stage = "walk"
         $script:easyWalk = $true
