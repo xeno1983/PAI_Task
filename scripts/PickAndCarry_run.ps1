@@ -24,7 +24,7 @@ Write-Host "      保存先: logs\<手法>_curriculum_walk_easy\ （bc_trot.pt /
 Write-Host "   2  学習。段階を選んでから回数を入れる"
 Write-Host "      歩行、到達、歩きながら持つ、箱運び、キャッチ。到達と持ち歩きは歩行から、キャッチは到達から続ける。"
 Write-Host "      歩行は平地から始めて地形へ広げ、腕を動かしながら歩く。腕は Z1。観測 81、行動 17（CPG+腕）。"
-Write-Host "      歩行→簡単を選ぶと、トロット模倣学習してから PPO も選べます（単独は 1）。"
+Write-Host "      歩行→簡単の推奨は 保存BC→PPO（無ければ BC→PPO）。ValueDICE は任意。模倣だけは 1。"
 Write-Host "      Enter だけなら 1000 回、並列 64 体。同じ段階をもう一度選ぶと続きから学習する。"
 Write-Host "   3  推論。段階を選んで、その保存した重みを再生する"
 Write-Host "      箱運びだけ、クリックで物資と運び先を決める。簡単歩行では BC 重みの再生も選べます。"
@@ -217,6 +217,7 @@ function Select-Curriculum {
             $script:curriculumArgs += @("--easy-walk")
             Write-Host "簡単歩行です。平坦で腕は固定、押しと摩擦ばらつきはオフです。"
             Write-Host "政策の腕アクションは学習から外します。段差の選択はスキップします。"
+            Write-Host "推奨の初期化は 保存BC→PPO（歩行改善向き）。ValueDICE は任意です。"
         }
     }
     Set-LogDirFromStage
@@ -233,39 +234,42 @@ function Ask-BcWarmStart {
     $script:runBcFirst = $false
     $script:runGailFirst = $false
     $script:initFromArgs = @()
-    Write-Host "   1  トロット教師を BC してから PPO（推奨・初回。PPO は iteration 0 から）"
-    Write-Host "   2  トロット教師を ValueDICE してから PPO（PPO は iteration 0 から）"
-    Write-Host "   3  既存の bc_trot.pt / valuedice_trot.pt / PPO 重みから PPO のみ"
+    $folder = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
+    $valuedice = Join-Path $folder "valuedice_trot.pt"
+    $gail = Join-Path $folder "gail_trot.pt"
+    $bc = Join-Path $folder "bc_trot.pt"
+    $hasBc = Test-Path $bc
+    Write-Host "簡単歩行の初期化（推奨は BC → PPO。ValueDICE は任意）:"
+    if ($hasBc) {
+        Write-Host "   1  保存 BC から PPO（推奨。BC 再学習なし・iteration 0）"
+    } else {
+        Write-Host "   1  BC してから PPO（推奨・初回。保存 BC がまだ無い）"
+    }
+    Write-Host "   2  既存の模倣 / PPO 重みから PPO（優先: BC → ValueDICE → PPO 続き）"
+    Write-Host "   3  ValueDICE してから PPO（任意・上級。PPO は iteration 0）"
     Write-Host "   4  ゼロから PPO のみ"
     Write-Host "   （模倣学習だけ・デモ再生だけはメニュー 1）"
-    Write-Host "   （続き学習は 3。1/2 を選ぶと BC/ValueDICE のあと PPO を iteration 0 からやり直します）"
     $answer = Read-Host "初期化 [1]"
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = "1" }
     if ($answer -eq "2") {
-        $script:runGailFirst = $true
-        Write-Host "先にトロット教師のデモを集めて ValueDICE し、デモ動画のあと PPO を始めます（既存 ppo_*.pt は使いません）。"
-    } elseif ($answer -eq "3") {
-        $folder = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
-        $valuedice = Join-Path $folder "valuedice_trot.pt"
-        $gail = Join-Path $folder "gail_trot.pt"
-        $bc = Join-Path $folder "bc_trot.pt"
         $hasPpo = @(Get-ChildItem -Path $folder -Filter "ppo_*.pt" -File -ErrorAction SilentlyContinue).Count -gt 0
+        # Prefer BC for walk warm-start (env PPO improves more from BC than ValueDICE).
         $imit = $null
         $kind = ""
-        if (Test-Path $valuedice) {
+        if (Test-Path $bc) {
+            $imit = $bc
+            $kind = "BC"
+        } elseif (Test-Path $valuedice) {
             $imit = $valuedice
             $kind = "ValueDICE"
         } elseif (Test-Path $gail) {
             $imit = $gail
             $kind = "GAIL"
-        } elseif (Test-Path $bc) {
-            $imit = $bc
-            $kind = "BC"
         }
         if ($hasPpo -and $null -ne $imit) {
             Write-Host "PPO チェックポイントと $kind 重みの両方があります。"
             Write-Host "   1  PPO の続きから（進捗維持・推奨）"
-            Write-Host "   2  $kind から暖気し直し（iteration 0。重みは $kind、乱数ゼロ開始ではない）"
+            Write-Host "   2  $kind から暖気し直し（iteration 0。重みは $kind）"
             $pick = Read-Host "既存重み [1]"
             if ($pick -eq "2") {
                 $script:initFromArgs = @("--init-from", $imit)
@@ -279,13 +283,22 @@ function Ask-BcWarmStart {
         } elseif ($hasPpo) {
             Write-Host "既存の PPO を続行します。"
         } else {
-            Write-Host "valuedice_trot.pt / gail_trot.pt / bc_trot.pt / ppo_*.pt が無いので、ゼロからになります。"
+            Write-Host "bc_trot.pt / valuedice_trot.pt / gail_trot.pt / ppo_*.pt が無いので、ゼロからになります。"
         }
+    } elseif ($answer -eq "3") {
+        $script:runGailFirst = $true
+        Write-Host "先にトロット教師のデモを集めて ValueDICE し、そのあと PPO を始めます（既存 ppo_*.pt は使いません）。"
     } elseif ($answer -eq "4") {
         Write-Host "模倣学習なしで PPO します（既存 ppo があれば --resume latest で続きます）。"
     } else {
-        $script:runBcFirst = $true
-        Write-Host "先にトロット教師のデモを集めて BC し、デモ動画のあと PPO を始めます（既存 ppo_*.pt は使いません）。"
+        # Default [1]: reuse saved BC when present; otherwise train BC then PPO.
+        if ($hasBc) {
+            $script:initFromArgs = @("--init-from", $bc)
+            Write-Host "保存 BC から PPO を iteration 0 で始めます（BC 再学習なし）: $bc"
+        } else {
+            $script:runBcFirst = $true
+            Write-Host "保存 BC が無いので、先に BC してから PPO を始めます（既存 ppo_*.pt は使いません）。"
+        }
     }
 }
 
@@ -706,7 +719,7 @@ switch ($choice) {
             if ($code -eq 0) {
                 Open-Mlflow
                 if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
-                Write-Host "続けてメニュー 2 → 歩行 → 簡単 →「既存の重みから PPO」を選ぶと valuedice_trot.pt を使えます。"
+                Write-Host "続けてメニュー 2 → 歩行 → 簡単 → 初期化 2（既存重み）で PPO できます。歩行改善なら BC→PPO（初期化 1）推奨。"
             }
         } elseif ($bcPick -eq "3") {
             $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
@@ -745,13 +758,14 @@ switch ($choice) {
             if ($code -eq 0) {
                 Open-Mlflow
                 if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
-                Write-Host "続けてメニュー 2 → 歩行 → 簡単 →「既存の重みから PPO」を選ぶと、続けて PPO できます。"
+                Write-Host "続けてメニュー 2 → 歩行 → 簡単 → 初期化 1（保存BC→PPO）で続けられます。"
             }
         }
     }
     "2" {
         Write-Host ""
         Write-Host "段階と学習手法を選んで学習を始めます。終わると MLflow、学習曲線、再生動画を開きます。"
+        Write-Host "簡単歩行なら推奨は 保存BC→PPO（メニューで初期化 1）。"
         Select-Algo
         Select-Curriculum
         $trainIters = 0
