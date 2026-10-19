@@ -1,10 +1,23 @@
 # 全タスク報酬一覧
 
-Source: `pick_and_carry/config.py` (`RewardScales`, `LocomotionScales`),
-`curriculum.py` (`locomotion_reward`, `manipulation_reward`),
-`reward.py` / `helpers.py` (`task_reward`).
+**版:** 2026-10-19b  
+**Source:** `pick_and_carry/config.py`（`RewardScales`, `LocomotionScales`）、
+`curriculum.py`（`locomotion_reward`, `manipulation_reward`）、
+`reward.py` / `helpers.py`（`task_reward`）、`train_ppo.py`（BC 模倣）。
 
-Default `dt = 0.02`. Updated 2026-10-19 (clamp = positives only; standstill_vel; BC imit on PPO).
+Default `dt = 0.02`。
+
+### 改版メモ（対 2026-10-19 初版）
+
+| 変更 | 内容 |
+|---|---|
+| walk clamp | 正スケール項のみ ≥0。罰は常に加算（joint-sum clamp 廃止） |
+| walk 係数 | `tracking_lin_vel` 2.5、`walk_score` 1.5、`standstill` −2.0 |
+| walk 新項 | `standstill_vel`（指令中 ‖v‖&lt;0.08 で −1.0×dt） |
+| gait | `max(hard_trot, soft_trot)`（不完全対角も部分点） |
+| PPO | warm-start 後 `−0.1·MSE(a,a_BC)`（`--bc-imit-coef`） |
+
+---
 
 ## タスク → 報酬関数
 
@@ -16,22 +29,29 @@ Default `dt = 0.02`. Updated 2026-10-19 (clamp = positives only; standstill_vel;
 | **haul** | `manipulation_reward`（haul） | ハードコード | 箱を持って速度追従 |
 | **carry** | `task_reward` → `compute_stage_reward` | `RewardScales` + phase gate | phase 0→3 で項を切替 |
 
-**walk の clamp:** `only_positive_rewards=True` のとき、**正スケールの基底項だけ**を合計して `min 0` に clamp。罰スケール（`lin_vel_z`, `action_rate` 等）は常に加算。その後 `walk_progress` / `gait` / `standstill` / `standstill_vel` / `termination` を加算。
-
-**PPO + BC warm-start:** `--init-from`（または easy-walk 自動）後、既定で `r += −0.1 · MSE(a, a_BC(s))`（`--bc-imit-coef` で変更、`0` で無効）。
-
 ---
 
 ## walk（`LOCOMOTION_STAGES`）
+
+### 合計の組み立て
+
+```
+positive = clamp(Σ 正スケール基底, min=0)   # only_positive_rewards
+penalties = Σ 罰スケール基底                 # 常に加算
+shaping   = walk_progress + gait + standstill + standstill_vel + termination
+reward    = positive + penalties + shaping
+```
+
+`moving` = `‖cmd_xy‖ > 0.1`（**指令**ベース。実速度ではない）。
 
 ### 正スケール基底項（clamp 対象）
 
 | 項 | 係数 | 信号 | 適用 | 備考 |
 |---|---|---|---|---|
-| tracking_lin_vel | 2.5 × dt | `exp(−‖v_xy − cmd_xy‖² / σ)`, σ=0.25 | 毎ステップ | |
+| tracking_lin_vel | **2.5** × dt | `exp(−‖v_xy − cmd_xy‖² / σ)`, σ=0.25 | 毎ステップ | |
 | tracking_ang_vel | 0.5 × dt | `exp(−(ω_z − cmd_yaw)² / σ)` | 毎ステップ | |
 | orientation | 0.0 × dt | `g_xy²` | — | 係数 0（無効） |
-| feet_air_time | 1.5 × dt | 着地時 `Σ(t_air − 0.5)`; ‖cmd_xy‖>0.1 のみ | 着地瞬間 | target=0.5 s |
+| feet_air_time | 1.5 × dt | 着地時 `Σ(t_air − 0.5)`; ‖cmd_xy‖>0.1 のみ | 着地瞬間 | target=0.5 s。短ステップは負にもなり得る |
 
 ### 罰スケール基底項（常に加算）
 
@@ -45,17 +65,28 @@ Default `dt = 0.02`. Updated 2026-10-19 (clamp = positives only; standstill_vel;
 | action_rate | −0.002 × dt | `Σ (a − a_prev)²` | 毎ステップ | |
 | collision | −1.0 × dt | 腿・脛の接触数 | 毎ステップ | |
 
-### 基底のあと（常に加算）
+### 後段 shaping（常に加算・clamp の外）
 
 | 項 | 係数 | 信号 | 適用 | 備考 |
 |---|---|---|---|---|
-| walk_progress | 1.5 × dt | `walk_score ∈ [0,1]`（指令速度の達成率） | 後段 | always on |
-| gait | 1.5 × dt | `max(hard_trot, soft_trot) × moving` | 後段 | 対角 / 反相同期 |
-| standstill | −2.0 × dt | `(1 − walk_score) × moving` | 後段 | `moving`=指令 |
-| standstill_vel | −1.0 × dt | `1(‖v_xy‖ < 0.08) × moving` | 後段 | 指令中のほぼ停止 |
-| termination | −5.0 | 倒れた / 胴体接地 | 後段・1 回 | ×dt なし |
+| walk_progress | **1.5** × dt | `walk_score ∈ [0,1]` | 毎ステップ | 指令速度の達成率 |
+| gait | **1.5** × dt | `max(hard_trot, soft_trot) × moving` | 移動指令時 | 下記 |
+| standstill | **−2.0** × dt | `(1 − walk_score) × moving` | 移動指令時 | ソフト罰 |
+| standstill_vel | **−1.0** × dt | `1(‖v_xy‖ < 0.08) × moving` | 移動指令時 | ほぼ停止のフラット罰 |
+| termination | −5.0 | 倒れた / 胴体接地 | 1 回 | ×dt なし |
+
+**gait**
+
+- `hard_trot`: FL+RR 接地かつ FR+RL 遊脚（またはその入れ替え）
+- `soft_trot`: 対角同期 × 左右反相（`[0,1]`）
 
 **ログのみ（報酬に入らない）:** `tracking`, `walk_score`, `steady`, `gait_score`, `jerk`
+
+### PPO 追加（warm-start 時）
+
+| 項 | 係数 | 信号 | 備考 |
+|---|---|---|---|
+| bc_imit | **−0.1**（既定） | `MSE(a, a_BC(s))`（action mask 適用） | `--init-from` / easy-walk 自動 warm-start 後。`--bc-imit-coef 0` で無効 |
 
 ---
 
@@ -102,30 +133,35 @@ catch のエピソード成功は `hold_steps >= catch_hold_steps`（環境側�
 | 2 | ゴールへ歩行 | `transport`, `progress_goal`, `forward` |
 | 3 | リリース | `release`（開握）, `place` |
 
-### 項
+### 項（`RewardScales` + `reward.py` 定数）
 
 | 項 | 係数 | 信号 | 適用 | 備考 |
 |---|---|---|---|---|
-| approach_ee | 1.5 × dt | `exp(−d_ee / 0.25) × free` | phase1 pickup | σ=`approach_sigma` |
-| approach_base | 0.4 × dt | `exp(−d_base / 0.60) × free` | phase0 →物体 | σ=`base_sigma` |
+| approach_ee | 1.5 × dt | `exp(−d_ee / 0.25) × free` | phase1 | σ=`approach_sigma` |
+| approach_base | 0.4 × dt | `exp(−d_base / 0.60) × free` | phase0 | σ=`base_sigma` |
 | grasp_shape | 6.0 × dt | `close_frac × near_ee × free` | phase1 | |
 | grasp_bonus | 5.0 | newly_grasped | イベント | スパース |
-| transport | 2.0 × dt | `exp(−d_goal / 0.40) × held` | phase2 →ゴール | σ=`transport_sigma` |
-| place | 10.0 | newly_placed | イベント | スパース |
+| transport | 2.0 × dt | `exp(−d_goal / 0.40) × held` | phase2 | σ=`transport_sigma` |
+| place | 10.0 | newly_placed | イベント | スパース（`place_bonus`） |
 | progress_ee | 8.0 | `clamp(Δd_ee, ±0.05) × pickup` | phase1 | ×dt なし |
 | progress_goal | 8.0 | `clamp(Δd_goal, ±0.05) × walk_goal` | phase2 | |
 | progress_base | 8.0 | `clamp(Δd_base, ±0.05) × walk_object` | phase0 | |
-| forward | 4.0 × dt（split） | `exp(−((vx−0.4)/0.3)²) − 0.4·slip`; slip=`vy²+(0.5 ω_z)²` | 歩行 phase | `control_split=walk` は **6.0 × dt** |
+| forward | **4.0** × dt（split） / **6.0** × dt（walk） | `exp(−((vx−0.4)/0.3)²) − 0.4·slip` | 歩行 phase | `RewardScales.forward` は未使用。係数は `reward.py` 定数 |
 | release | 4.0 × dt | `open_frac × release` | phase3 | |
 | fall | −5.0 | fallen | 1 回 | |
 | energy | −0.02 × dt | `Σ a²` | 毎ステップ | |
 | alive | 0.3 × dt | 定数 | 毎ステップ | |
 
-`control_split=walk` のときは操作系項をゼロにし、`forward` 係数だけ 6.0×dt。通常の carry は `split`。`ee_dist` はログのみ。
+`control_split=walk` のときは操作系項をゼロにし、`forward` だけ 6.0×dt。通常の carry は `split`。`ee_dist` はログのみ。
 
 ---
 
-## 補足
+## 学習アルゴリズム側の混合（環境報酬の外）
 
-- 正 = 接近・追従・歩容・イベントボーナス。負 = 罰（転倒・トルク・静止・エネルギー）。
-- ValueDICE 学習時は環境報酬に加え `imit_coef × centered ν + env_coef × env` を混合（デフォルト `env_coef=10`, imit≈2）。上表は環境報酬そのもの。
+| アルゴリズム | 混合 |
+|---|---|
+| PPO（通常） | 環境報酬のみ |
+| PPO（BC warm-start） | 環境 + `bc_imit`（上表） |
+| ValueDICE | `imit_coef × centered ν + env_coef × env`（既定 imit=2, env=10） |
+
+上表の各タスク節は **環境報酬** を示す。
