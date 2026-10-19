@@ -281,7 +281,7 @@ class EnvConfig:
     push_interval_s: float = 15.0
     push_max_vel: float = 0.5
     randomize_friction: bool = False
-    # Walk only: the arm moves to random poses so the legs learn to balance a moving 5 kg arm.
+    # Walk only (opt-in): randomly wander the held arm. Default off — policy does not drive the arm.
     arm_disturb: bool = False
     # Fraction of each joint's range from the reset pose that a random target may use.
     arm_disturb_scale: float = 0.5

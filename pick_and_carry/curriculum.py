@@ -1,9 +1,9 @@
 """Staged tasks on the Unitree Z1. Every stage is observation 81 and CPG+arm actions.
 
-Walk learns to stand, walk and turn on bumpy ground while the environment moves the arm
-at random. Reach follows: the hand goes to a point in front of the body. Haul and carry
-(the box task) and catch (a ball that rolls or flies) build on reach. Channels a stage does
-not use stay zero.
+Walk learns to stand, walk and turn on bumpy ground with the arm held at the reset pose
+(optional ``arm_disturb`` can wander it). Reach follows: the hand goes to a point in front
+of the body. Haul and carry (the box task) and catch (a ball that rolls or flies) build on
+reach. Channels a stage does not use stay zero.
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def stage_log_dir(
 ) -> Path:
     """Folder used by the launcher for this stage and learning algorithm.
 
-    ``easy`` only applies to walk: flat ground, no arm wander / pushes, separate folder
+    ``easy`` only applies to walk: flat ground, no pushes, separate folder
     so a hard run is not overwritten. Imitation weights use ``imitation_log_dir`` instead.
     """
     if arm != "z1":

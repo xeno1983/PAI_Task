@@ -2,7 +2,8 @@
 
 ``ppo`` – clipped PPO with GAE (the default).
 ``grpo`` – Group Relative Policy Optimization: critic-free Monte Carlo returns,
-normalized within groups of parallel environments at each time step.
+normalized within groups of parallel environments at each time step (returns
+winsorized and advantages clipped to limit fall-driven collapses).
 ``sym_ppo`` – PPO with left–right (sagittal) augmentation on moving-command samples.
 """
 
@@ -63,6 +64,41 @@ def group_relative_advantages(returns: torch.Tensor, group_size: int) -> torch.T
         tail = flat[usable:]
         out[usable:] = (tail - flat.mean()) / (flat.std(unbiased=False) + 1e-8)
     return out
+
+
+def winsorize_returns(returns: torch.Tensor, quantile: float = 0.02) -> torch.Tensor:
+    """Clamp extreme Monte Carlo returns (e.g. fall terminations) before grouping.
+
+    ``quantile`` in ``(0, 0.5)`` sets both tails. ``0`` leaves returns unchanged.
+    """
+    flat = returns.reshape(-1)
+    q = float(quantile)
+    if q <= 0.0 or flat.numel() < 4:
+        return returns
+    q = min(q, 0.49)
+    lo = torch.quantile(flat.float(), q)
+    hi = torch.quantile(flat.float(), 1.0 - q)
+    return returns.clamp(lo.to(dtype=returns.dtype), hi.to(dtype=returns.dtype))
+
+
+def stabilize_grpo_advantages(
+    returns: torch.Tensor,
+    group_size: int,
+    *,
+    return_quantile: float = 0.02,
+    adv_clip: float = 5.0,
+) -> torch.Tensor:
+    """Group-relative advantages with return winsorization and advantage clipping.
+
+    Hard-walk collapses were driven by rare −5 terminations dominating MC returns,
+    then group-std normalizing them into huge advantages. Soften both ends.
+    """
+    softened = winsorize_returns(returns, return_quantile)
+    adv = group_relative_advantages(softened, group_size)
+    clip = float(adv_clip)
+    if clip > 0.0:
+        adv = adv.clamp(-clip, clip)
+    return adv
 
 
 def _swap_leg_blocks(tensor: torch.Tensor, start: int) -> None:

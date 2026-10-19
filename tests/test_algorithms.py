@@ -76,6 +76,17 @@ class GroupRelativeTests(unittest.TestCase):
         # Env 1 never ends in the window: 3, 2, 1
         self.assertEqual([float(x) for x in returns[:, 1]], [3.0, 2.0, 1.0])
 
+    def test_stabilize_clips_extreme_advantages(self):
+        from pick_and_carry.algorithms import stabilize_grpo_advantages, winsorize_returns
+
+        # One catastrophic return among otherwise similar ones.
+        returns = torch.tensor([-50.0, -0.02, -0.01, 0.0, 0.01, 0.02, -0.015, -0.005])
+        soft = winsorize_returns(returns, quantile=0.25)
+        self.assertGreater(float(soft.min()), -50.0)
+        adv = stabilize_grpo_advantages(returns, group_size=4, return_quantile=0.25, adv_clip=2.0)
+        self.assertLessEqual(float(adv.max()), 2.0 + 1e-5)
+        self.assertGreaterEqual(float(adv.min()), -2.0 - 1e-5)
+
 
 class MirrorTests(unittest.TestCase):
     def test_mirror_twice_is_identity(self):

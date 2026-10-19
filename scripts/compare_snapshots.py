@@ -276,7 +276,7 @@ def main() -> None:
         arm=args.arm,
         wrist_camera=args.wrist_camera,
         curriculum=args.curriculum,
-        arm_disturb=False if easy else True,
+        arm_disturb=False,
         push_robots=False,
         randomize_friction=False if easy else True,
     )

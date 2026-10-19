@@ -21,9 +21,9 @@ from pick_and_carry.algorithms import (
     ALGORITHMS,
     ALGO_LABELS,
     augment_symmetric,
-    group_relative_advantages,
     monte_carlo_returns,
     normalize_algo,
+    stabilize_grpo_advantages,
 )
 from pick_and_carry.checkpoints import (
     archive_incompatible_logs,
@@ -100,6 +100,24 @@ def parse_args():
         default=0,
         help="GRPO group size. 0 uses --num-envs.",
     )
+    parser.add_argument(
+        "--grpo-adv-clip",
+        type=float,
+        default=5.0,
+        help="GRPO: clamp group-relative advantages to ±this (0 disables).",
+    )
+    parser.add_argument(
+        "--grpo-return-quantile",
+        type=float,
+        default=0.02,
+        help="GRPO: winsorize MC returns at [q, 1-q] before grouping (0 disables).",
+    )
+    parser.add_argument(
+        "--grpo-entropy-coef",
+        type=float,
+        default=0.002,
+        help="GRPO entropy bonus (default 0.002; PPO still uses --entropy-coef).",
+    )
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--iterations", type=int, default=60)
     parser.add_argument("--num-steps", type=int, default=128)
@@ -156,12 +174,17 @@ def parse_args():
     parser.add_argument(
         "--easy-walk",
         action="store_true",
-        help="Walk only: flat ground, no arm wander / pushes / friction noise. Saves under *_walk_easy.",
+        help="Walk only: flat ground, no pushes / friction noise. Saves under *_walk_easy.",
+    )
+    parser.add_argument(
+        "--arm-disturb",
+        action="store_true",
+        help="Walk only: randomly wander the held arm (off by default; opt-in robustness).",
     )
     parser.add_argument(
         "--no-arm-disturb",
         action="store_true",
-        help="Walk only: keep the arm at the reset pose (no random wander).",
+        help="Walk only: keep the arm at the reset pose (default; kept for older scripts).",
     )
     parser.add_argument(
         "--catch-level",
@@ -323,8 +346,10 @@ def make_config(args) -> EnvConfig:
     if cfg.curriculum in LOCOMOTION_STAGES:
         # Walk is the one stage on bumpy ground. The bumps start flat and grow with the score.
         cfg.terrain = not easy_walk
-        # The arm moves at random so the legs learn to balance it (off in easy mode).
-        cfg.arm_disturb = not (easy_walk or getattr(args, "no_arm_disturb", False))
+        # Arm stays at reset pose unless --arm-disturb (held pose; policy does not drive it).
+        cfg.arm_disturb = bool(getattr(args, "arm_disturb", False)) and not bool(
+            getattr(args, "no_arm_disturb", False)
+        )
         if easy_walk:
             cfg.terrain_steps = False
             cfg.terrain_amplitude = 0.0
@@ -772,11 +797,19 @@ def run_training(
         flat_values = flat(val_buf)
         value_coef = args.value_coef
         normalize_advantages = True
+        entropy_coef = float(args.entropy_coef)
         if algo == "grpo":
             group = int(args.group_size) if int(args.group_size) > 0 else int(args.num_envs)
-            flat_advantages = group_relative_advantages(flat_returns, group)
+            flat_advantages = stabilize_grpo_advantages(
+                flat_returns,
+                group,
+                return_quantile=float(args.grpo_return_quantile),
+                adv_clip=float(args.grpo_adv_clip),
+            )
             value_coef = 0.0
             normalize_advantages = False
+            # Critic-free updates amplify exploration noise; keep entropy cooler than PPO.
+            entropy_coef = float(args.grpo_entropy_coef)
         if algo == "sym_ppo":
             # Walk: mirror only samples with a move/turn command (still-stand excluded).
             # Catch stores a predicted [x, y, z] in the command slot → full mirror.
@@ -802,7 +835,7 @@ def run_training(
             clip=args.clip,
             epochs=args.epochs,
             minibatch_size=minibatch_size_for(args, flat_obs.shape[0]),
-            entropy_coef=args.entropy_coef,
+            entropy_coef=entropy_coef,
             value_coef=value_coef,
             max_grad_norm=args.max_grad_norm,
             old_values=None if algo == "grpo" else flat_values,

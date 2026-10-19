@@ -208,7 +208,7 @@ function Select-Curriculum {
         }
         Write-Host "歩行です。"
         Write-Host "   1  簡単。平坦・腕固定・押しなし（推奨のやり直し）。保存先 *_walk_easy"
-        Write-Host "   2  本番。地形・腕外乱・押し・摩擦ばらつきあり"
+        Write-Host "   2  本番。地形・押し・摩擦ばらつきあり（腕は固定）"
         $walkMode = Read-Host "歩行モード [1]"
         if ([string]::IsNullOrWhiteSpace($walkMode)) { $walkMode = "1" }
         if ($walkMode -eq "2") {
