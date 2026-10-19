@@ -74,7 +74,7 @@ function Format-Iter {
 function Show-StageProgress {
     Write-Host " 腕は Unitree Z1（約 5.2 kg、関節 6）。観測 81、行動 17（CPG+腕）。"
     Write-Host " 学習済み iteration（最新の ppo_XXXX.pt）"
-    Write-Host ("   {0,-14} {1,8} {2,8} {3,10}" -f "段階", "PPO", "GRPO", "Sym PPO")
+    Write-Host ("   {0,-14} {1,8} {2,8} {3,8} {4,10}" -f "段階", "PPO", "GRPO", "DrGRPO", "Sym PPO")
     $rows = @(
         @{ Label = "歩行"; Stage = "walk"; Level = "static"; Easy = $false },
         @{ Label = "歩行(簡単)"; Stage = "walk"; Level = "static"; Easy = $true },
@@ -93,9 +93,11 @@ function Show-StageProgress {
         $ppo = Get-LatestIteration ((Get-StageFolder @folderArgs) -replace "/", "\")
         $folderArgs.Algo = "grpo"
         $grpo = Get-LatestIteration ((Get-StageFolder @folderArgs) -replace "/", "\")
+        $folderArgs.Algo = "dr_grpo"
+        $dr = Get-LatestIteration ((Get-StageFolder @folderArgs) -replace "/", "\")
         $folderArgs.Algo = "sym_ppo"
         $sym = Get-LatestIteration ((Get-StageFolder @folderArgs) -replace "/", "\")
-        Write-Host ("   {0,-14} {1,8} {2,8} {3,10}" -f $row.Label, (Format-Iter $ppo), (Format-Iter $grpo), (Format-Iter $sym))
+        Write-Host ("   {0,-14} {1,8} {2,8} {3,8} {4,10}" -f $row.Label, (Format-Iter $ppo), (Format-Iter $grpo), (Format-Iter $dr), (Format-Iter $sym))
     }
 }
 
@@ -103,8 +105,9 @@ function Select-Algo {
     Write-Host ""
     Write-Host " 学習手法"
     Write-Host "   1  PPO（既定。価値関数つきの clipped PPO）"
-    Write-Host "   2  GRPO（並列環境の相対報酬。批評家は更新しない）"
-    Write-Host "   3  Symmetric PPO（左右反転のデータを足して学習）"
+    Write-Host "   2  GRPO（群内 mean/std 相対。批評家なし）"
+    Write-Host "   3  Dr. GRPO（群内 mean のみ。/std なし・COLM 2025）"
+    Write-Host "   4  Symmetric PPO（左右反転のデータを足して学習）"
     $picked = Read-Host "手法 [1]"
     if ([string]::IsNullOrWhiteSpace($picked)) { $picked = "1" }
     switch ($picked) {
@@ -113,6 +116,10 @@ function Select-Algo {
             Write-Host "GRPO で学習します。保存先は logs\grpo_* です。"
         }
         "3" {
+            $script:algo = "dr_grpo"
+            Write-Host "Dr. GRPO で学習します。保存先は logs\dr_grpo_* です。"
+        }
+        "4" {
             $script:algo = "sym_ppo"
             Write-Host "Symmetric PPO で学習します。保存先は logs\sym_ppo_* です。"
         }
@@ -1168,13 +1175,13 @@ switch ($choice) {
     }
     "8" {
         Write-Host ""
-        Write-Host "同じ段階について、PPO / GRPO / Symmetric PPO の曲線を重ねます。"
+        Write-Host "同じ段階について、PPO / GRPO / Dr.GRPO / Symmetric PPO の曲線を重ねます。"
         $script:algo = "ppo"
         $script:algoArgs = @("--algo", "ppo")
         Select-Curriculum -ForPlay
         $dirs = @()
         $labels = @()
-        foreach ($name in @("ppo", "grpo", "sym_ppo")) {
+        foreach ($name in @("ppo", "grpo", "dr_grpo", "sym_ppo")) {
             $folder = Get-StageFolder $name $script:stage $(if ($script:catchLevel) { $script:catchLevel } else { "static" }) -Easy:([bool]$script:easyWalk)
             $metrics = Join-Path (Get-Location) (($folder -replace "/", "\") + "\metrics.jsonl")
             $hasPt = (Get-LatestIteration ($folder -replace "/", "\")) -gt 0

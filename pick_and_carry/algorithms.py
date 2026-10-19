@@ -2,8 +2,9 @@
 
 ``ppo`` – clipped PPO with GAE (the default).
 ``grpo`` – Group Relative Policy Optimization: critic-free Monte Carlo returns,
-normalized within groups of parallel environments at each time step (returns
-winsorized and advantages clipped to limit fall-driven collapses).
+mean/std-normalized within groups (returns winsorized and advantages clipped).
+``dr_grpo`` – Dr. GRPO (Liu et al., COLM 2025): same as GRPO but advantages are
+mean-centered only (no division by group std), removing difficulty bias.
 ``sym_ppo`` – PPO with left–right (sagittal) augmentation on moving-command samples.
 """
 
@@ -11,12 +12,14 @@ from __future__ import annotations
 
 import torch
 
-ALGORITHMS = ("ppo", "grpo", "sym_ppo")
+ALGORITHMS = ("ppo", "grpo", "dr_grpo", "sym_ppo")
 ALGO_LABELS = {
     "ppo": "PPO",
     "grpo": "GRPO",
+    "dr_grpo": "Dr. GRPO",
     "sym_ppo": "Symmetric PPO",
 }
+CRITIC_FREE_ALGOS = frozenset({"grpo", "dr_grpo"})
 
 # Z1 revolute axes that flip under a sagittal (left–right) reflection: yaw and roll.
 _ARM_SIGN_FLIP = (0, 4, 5)  # joint1 (z), joint5 (z), joint6 (x)
@@ -24,11 +27,26 @@ _ARM_SIGN_FLIP = (0, 4, 5)  # joint1 (z), joint5 (z), joint6 (x)
 
 def normalize_algo(name: str) -> str:
     key = str(name).strip().lower().replace("-", "_")
-    aliases = {"symmetric_ppo": "sym_ppo", "symmetric": "sym_ppo", "symm_ppo": "sym_ppo"}
+    aliases = {
+        "symmetric_ppo": "sym_ppo",
+        "symmetric": "sym_ppo",
+        "symm_ppo": "sym_ppo",
+        "drgrpo": "dr_grpo",
+        "doctor_grpo": "dr_grpo",
+    }
     key = aliases.get(key, key)
     if key not in ALGORITHMS:
         raise ValueError(f"unknown algorithm {name!r}; choose one of {ALGORITHMS}")
     return key
+
+
+def is_critic_free_algo(name: str) -> bool:
+    return normalize_algo(name) in CRITIC_FREE_ALGOS
+
+
+def grpo_advantage_scale(name: str) -> str:
+    """``std`` for vanilla GRPO, ``mean`` for Dr. GRPO."""
+    return "mean" if normalize_algo(name) == "dr_grpo" else "std"
 
 
 def monte_carlo_returns(rewards: torch.Tensor, dones: torch.Tensor, gamma: float) -> torch.Tensor:
@@ -42,27 +60,47 @@ def monte_carlo_returns(rewards: torch.Tensor, dones: torch.Tensor, gamma: float
     return out
 
 
-def group_relative_advantages(returns: torch.Tensor, group_size: int) -> torch.Tensor:
-    """DeepSeek-style group relative advantages on a flat return vector.
+def group_relative_advantages(
+    returns: torch.Tensor,
+    group_size: int,
+    *,
+    scale: str = "std",
+) -> torch.Tensor:
+    """Group relative advantages on a flat return vector.
 
     ``returns`` is shaped ``(N,)``. Rows are split into groups of ``group_size``
-    (the last incomplete group uses the batch mean). Each group is mean/std normalized.
+    (the last incomplete group uses the batch mean).
+
+    ``scale="std"`` (vanilla GRPO): mean/std normalize within each group.
+    ``scale="mean"`` (Dr. GRPO): subtract the group mean only — no /std.
     """
+    mode = str(scale).strip().lower()
+    if mode not in ("std", "mean"):
+        raise ValueError(f"unknown advantage scale {scale!r}; choose 'std' or 'mean'")
     flat = returns.reshape(-1)
     n = flat.numel()
     size = max(1, int(group_size))
+
+    def _normalize(values: torch.Tensor, mean: torch.Tensor, std: torch.Tensor | None) -> torch.Tensor:
+        centered = values - mean
+        if mode == "mean" or std is None:
+            return centered
+        return centered / std
+
     if n < size:
-        return (flat - flat.mean()) / (flat.std(unbiased=False) + 1e-8)
+        batch_std = None if mode == "mean" else (flat.std(unbiased=False) + 1e-8)
+        return _normalize(flat, flat.mean(), batch_std)
     usable = (n // size) * size
     head = flat[:usable].view(-1, size)
     mean = head.mean(dim=-1, keepdim=True)
-    std = head.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-8)
-    normed = (head - mean) / std
+    std = None if mode == "mean" else head.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-8)
     out = flat.clone()
-    out[:usable] = normed.reshape(-1)
+    out[:usable] = _normalize(head, mean, std).reshape(-1)
     if usable < n:
-        tail = flat[usable:]
-        out[usable:] = (tail - flat.mean()) / (flat.std(unbiased=False) + 1e-8)
+        # Incomplete tail: use full-batch stats (not the tiny leftover set alone).
+        batch_mean = flat.mean()
+        batch_std = None if mode == "mean" else (flat.std(unbiased=False) + 1e-8)
+        out[usable:] = _normalize(flat[usable:], batch_mean, batch_std)
     return out
 
 
@@ -87,14 +125,15 @@ def stabilize_grpo_advantages(
     *,
     return_quantile: float = 0.02,
     adv_clip: float = 5.0,
+    scale: str = "std",
 ) -> torch.Tensor:
     """Group-relative advantages with return winsorization and advantage clipping.
 
-    Hard-walk collapses were driven by rare −5 terminations dominating MC returns,
-    then group-std normalizing them into huge advantages. Soften both ends.
+    ``scale`` selects vanilla GRPO (``std``) or Dr. GRPO (``mean``). Winsorize + clip
+    still damp fall-driven spikes in either mode.
     """
     softened = winsorize_returns(returns, return_quantile)
-    adv = group_relative_advantages(softened, group_size)
+    adv = group_relative_advantages(softened, group_size, scale=scale)
     clip = float(adv_clip)
     if clip > 0.0:
         adv = adv.clamp(-clip, clip)

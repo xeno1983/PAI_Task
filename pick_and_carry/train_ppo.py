@@ -21,6 +21,8 @@ from pick_and_carry.algorithms import (
     ALGORITHMS,
     ALGO_LABELS,
     augment_symmetric,
+    grpo_advantage_scale,
+    is_critic_free_algo,
     monte_carlo_returns,
     normalize_algo,
     stabilize_grpo_advantages,
@@ -93,7 +95,8 @@ def parse_args():
         "--algo",
         choices=ALGORITHMS,
         default="ppo",
-        help="ppo: clipped PPO. grpo: group-relative advantages without critic. "
+        help="ppo: clipped PPO. grpo: group-relative (mean/std) without critic. "
+        "dr_grpo: Dr. GRPO (mean-center only, no /std). "
         "sym_ppo: PPO with left-right observation/action augmentation.",
     )
     parser.add_argument(
@@ -779,7 +782,7 @@ def run_training(
                     )
                     reward = reward + imit
                     bc_imit_sum += float(imit.mean())
-                if algo == "grpo":
+                if is_critic_free_algo(algo):
                     # Critic-free: no value bootstrap into the reward or the return.
                     bootstrap = torch.zeros_like(reward)
                 else:
@@ -820,7 +823,7 @@ def run_training(
         rewards = torch.stack(rew_buf)
         values = torch.stack(val_buf)
         dones = torch.stack(done_buf)
-        if algo == "grpo":
+        if is_critic_free_algo(algo):
             returns = monte_carlo_returns(rewards, dones, args.gamma)
             advantages = returns
         else:
@@ -845,13 +848,14 @@ def run_training(
         value_coef = args.value_coef
         normalize_advantages = True
         entropy_coef = float(args.entropy_coef)
-        if algo == "grpo":
+        if is_critic_free_algo(algo):
             group = int(args.group_size) if int(args.group_size) > 0 else int(args.num_envs)
             flat_advantages = stabilize_grpo_advantages(
                 flat_returns,
                 group,
                 return_quantile=float(args.grpo_return_quantile),
                 adv_clip=float(args.grpo_adv_clip),
+                scale=grpo_advantage_scale(algo),
             )
             value_coef = 0.0
             normalize_advantages = False
@@ -885,7 +889,7 @@ def run_training(
             entropy_coef=entropy_coef,
             value_coef=value_coef,
             max_grad_norm=args.max_grad_norm,
-            old_values=None if algo == "grpo" else flat_values,
+            old_values=None if is_critic_free_algo(algo) else flat_values,
             desired_kl=args.desired_kl if args.desired_kl > 0 else None,
             normalize_advantages=normalize_advantages,
         )

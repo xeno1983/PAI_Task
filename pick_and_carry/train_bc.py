@@ -58,7 +58,7 @@ def parse_args():
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--arm", choices=("z1",), default="z1")
-    parser.add_argument("--algo", choices=("ppo", "grpo", "sym_ppo"), default="ppo")
+    parser.add_argument("--algo", choices=("ppo", "grpo", "dr_grpo", "sym_ppo"), default="ppo")
     parser.add_argument("--easy-walk", action="store_true", default=True)
     parser.add_argument("--no-easy-walk", action="store_true", help="Collect on the hard walk setup.")
     parser.add_argument("--log-dir", type=Path, default=None)

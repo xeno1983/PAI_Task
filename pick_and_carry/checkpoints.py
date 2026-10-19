@@ -58,7 +58,7 @@ def is_rl_training_checkpoint(blob: dict) -> bool:
     if "iteration" not in blob:
         return False
     algo = str(blob.get("algo", "") or "").lower().replace("-", "_")
-    return algo in ("ppo", "grpo", "sym_ppo", "symmetric_ppo", "")
+    return algo in ("ppo", "grpo", "dr_grpo", "sym_ppo", "symmetric_ppo", "")
 
 
 def iter_sorted_checkpoints(log_dir: Path) -> list[Path]:
@@ -118,7 +118,7 @@ def latest_matching(
 
 def level_from_path(path: Path) -> str:
     name = path.parent.name
-    for algo in ("ppo", "grpo", "sym_ppo"):
+    for algo in ("ppo", "grpo", "dr_grpo", "sym_ppo"):
         prefix = f"{algo}_curriculum_catch_"
         if name.startswith(prefix) and name[len(prefix) :] in CATCH_LEVELS:
             return name[len(prefix) :]

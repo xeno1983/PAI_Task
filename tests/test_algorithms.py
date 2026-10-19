@@ -22,7 +22,8 @@ from pick_and_carry.curriculum import stage_log_dir
 class AlgoNameTests(unittest.TestCase):
     def test_aliases(self):
         self.assertEqual(normalize_algo("symmetric-ppo"), "sym_ppo")
-        self.assertEqual(tuple(ALGORITHMS), ("ppo", "grpo", "sym_ppo"))
+        self.assertEqual(normalize_algo("dr-grpo"), "dr_grpo")
+        self.assertEqual(tuple(ALGORITHMS), ("ppo", "grpo", "dr_grpo", "sym_ppo"))
 
 
 class ActionMaskTests(unittest.TestCase):
@@ -66,6 +67,30 @@ class GroupRelativeTests(unittest.TestCase):
         adv = group_relative_advantages(returns, group_size=2)
         self.assertAlmostEqual(float(adv[0] + adv[1]), 0.0, places=5)
         self.assertAlmostEqual(float(adv[2] + adv[3]), 0.0, places=5)
+
+    def test_dr_grpo_mean_scale_no_std(self):
+        from pick_and_carry.algorithms import grpo_advantage_scale, is_critic_free_algo
+
+        self.assertTrue(is_critic_free_algo("dr_grpo"))
+        self.assertEqual(grpo_advantage_scale("dr_grpo"), "mean")
+        self.assertEqual(grpo_advantage_scale("grpo"), "std")
+        # Same mean offset, different spread: std-scale equalizes; mean-scale keeps magnitude.
+        tight = torch.tensor([0.0, 2.0])
+        wide = torch.tensor([0.0, 20.0])
+        a_std = group_relative_advantages(torch.cat([tight, wide]), group_size=2, scale="std")
+        a_mean = group_relative_advantages(torch.cat([tight, wide]), group_size=2, scale="mean")
+        self.assertAlmostEqual(float(a_std[1]), -float(a_std[0]), places=5)
+        self.assertAlmostEqual(float(a_mean[1]), 1.0, places=5)
+        self.assertAlmostEqual(float(a_mean[3]), 10.0, places=5)
+        self.assertGreater(abs(float(a_mean[3])), abs(float(a_std[3])))
+
+    def test_incomplete_tail_uses_batch_stats(self):
+        # group_size=3 → one leftover; must not zero itself via leftover-only mean.
+        returns = torch.tensor([1.0, 2.0, 3.0, 10.0])
+        adv = group_relative_advantages(returns, group_size=3, scale="mean")
+        batch_mean = float(returns.mean())
+        self.assertAlmostEqual(float(adv[3]), 10.0 - batch_mean, places=5)
+        self.assertNotAlmostEqual(float(adv[3]), 0.0, places=5)
 
     def test_monte_carlo_stops_at_done(self):
         rewards = torch.tensor([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]])
@@ -206,6 +231,7 @@ class StageLogDirAlgoTests(unittest.TestCase):
     def test_algo_changes_folder(self):
         self.assertEqual(stage_log_dir("walk", algo="ppo").as_posix(), "logs/ppo_curriculum_walk")
         self.assertEqual(stage_log_dir("walk", algo="grpo").as_posix(), "logs/grpo_curriculum_walk")
+        self.assertEqual(stage_log_dir("walk", algo="dr_grpo").as_posix(), "logs/dr_grpo_curriculum_walk")
         self.assertEqual(stage_log_dir("carry", algo="sym_ppo").as_posix(), "logs/sym_ppo_z1")
 
 
