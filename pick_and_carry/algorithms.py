@@ -3,7 +3,7 @@
 ``ppo`` – clipped PPO with GAE (the default).
 ``grpo`` – Group Relative Policy Optimization: critic-free Monte Carlo returns,
 normalized within groups of parallel environments at each time step.
-``sym_ppo`` – PPO with left–right (sagittal) data augmentation for the Go2 + Z1.
+``sym_ppo`` – PPO with left–right (sagittal) augmentation on moving-command samples.
 """
 
 from __future__ import annotations
@@ -144,6 +144,25 @@ def mirror_action(action: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def moving_command_mask(obs: torch.Tensor, *, command_has_yaw: bool = True) -> torch.Tensor:
+    """True where the observation command asks to move (walk) or always True (non-walk slots).
+
+    Walk commands are ``[vx, vy, yaw]``. Still-stand samples are excluded from Sym
+    mirroring so left–right augmentation does not invent fake symmetries while stopped
+    (and under asymmetric arm disturb). Catch stores a predicted ball pose in the same
+    slot — those batches keep full mirroring.
+    """
+    from pick_and_carry.config import OBS_LAYOUT, layout_slices
+    from pick_and_carry.curriculum import MOVE_LIN, MOVE_YAW
+
+    if not command_has_yaw:
+        return torch.ones(obs.shape[0], dtype=torch.bool, device=obs.device)
+    cmd = obs[:, layout_slices(OBS_LAYOUT)["command"]]
+    lin = cmd[:, :2].norm(dim=-1) > float(MOVE_LIN)
+    yaw = cmd[:, 2].abs() > float(MOVE_YAW)
+    return lin | yaw
+
+
 def augment_symmetric(
     obs: torch.Tensor,
     actions: torch.Tensor,
@@ -155,13 +174,25 @@ def augment_symmetric(
     agent=None,
     command_has_yaw: bool = True,
 ) -> tuple[torch.Tensor, ...]:
-    """Double a PPO batch with the left–right mirror of every sample.
+    """Augment a PPO batch with left–right mirrors of *moving-command* samples.
 
-    When ``agent`` is given, ``old_log_prob`` for the mirrored half is recomputed as
-    ``log π(g·a | g·s)`` under the behavior policy, so the PPO ratio stays valid.
+    Still-stand walk commands are left unaugmented. When ``agent`` is given,
+    ``old_log_prob`` for the mirrored half is recomputed as ``log π(g·a | g·s)``
+    under the behavior policy, so the PPO ratio stays valid.
     """
-    mirrored_obs = mirror_observation(obs, command_has_yaw=command_has_yaw)
-    mirrored_act = mirror_action(actions)
+    move = moving_command_mask(obs, command_has_yaw=command_has_yaw)
+    if not bool(move.any()):
+        parts = [obs, actions, old_log_prob, returns, advantages]
+        parts.append(old_values)
+        return tuple(parts)
+
+    src_obs = obs[move]
+    src_act = actions[move]
+    src_logp = old_log_prob[move]
+    src_ret = returns[move]
+    src_adv = advantages[move]
+    mirrored_obs = mirror_observation(src_obs, command_has_yaw=command_has_yaw)
+    mirrored_act = mirror_action(src_act)
     if agent is not None:
         with torch.no_grad():
             # Use device-matched mask (``action_mask`` alone stays on the construction device).
@@ -169,18 +200,18 @@ def augment_symmetric(
             mirrored_logp, _ = agent.actor.log_prob(mirrored_obs, mirrored_act, mask)
             if not torch.isfinite(mirrored_logp).all():
                 # Fall back to original log-probs rather than poisoning the PPO ratio.
-                mirrored_logp = old_log_prob
+                mirrored_logp = src_logp
     else:
-        mirrored_logp = old_log_prob
+        mirrored_logp = src_logp
     parts = [
         torch.cat((obs, mirrored_obs), dim=0),
         torch.cat((actions, mirrored_act), dim=0),
         torch.cat((old_log_prob, mirrored_logp), dim=0),
-        torch.cat((returns, returns), dim=0),
-        torch.cat((advantages, advantages), dim=0),
+        torch.cat((returns, src_ret), dim=0),
+        torch.cat((advantages, src_adv), dim=0),
     ]
     if old_values is not None:
-        parts.append(torch.cat((old_values, old_values), dim=0))
+        parts.append(torch.cat((old_values, old_values[move]), dim=0))
     else:
         parts.append(None)
     return tuple(parts)

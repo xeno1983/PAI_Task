@@ -778,7 +778,8 @@ def run_training(
             value_coef = 0.0
             normalize_advantages = False
         if algo == "sym_ppo":
-            # Walk stores [vx, vy, yaw] in the command slot; catch stores a predicted [x, y, z].
+            # Walk: mirror only samples with a move/turn command (still-stand excluded).
+            # Catch stores a predicted [x, y, z] in the command slot → full mirror.
             command_has_yaw = cfg.curriculum in LOCOMOTION_STAGES
             flat_obs, flat_act, flat_logp, flat_returns, flat_advantages, flat_values = augment_symmetric(
                 flat_obs,

@@ -129,10 +129,13 @@ class MirrorTests(unittest.TestCase):
         self.assertAlmostEqual(float(walk[0, 68]), -0.5, places=5)
 
     def test_augment_recomputes_mirrored_log_prob(self):
-        from pick_and_carry.config import NUM_ACTIONS
+        from pick_and_carry.config import NUM_ACTIONS, OBS_LAYOUT, layout_slices
 
         agent = ActorCritic(81, NUM_ACTIONS, hidden=(32, 32))
         obs = torch.randn(3, 81)
+        # All three ask to move so the batch still doubles.
+        cmd = layout_slices(OBS_LAYOUT)["command"]
+        obs[:, cmd] = torch.tensor([[0.4, 0.0, 0.0], [0.0, 0.3, 0.0], [0.0, 0.0, 0.5]])
         actions = torch.randn(3, NUM_ACTIONS)
         with torch.no_grad():
             old_logp, _ = agent.actor.log_prob(obs, actions)
@@ -147,6 +150,45 @@ class MirrorTests(unittest.TestCase):
             expected, _ = agent.actor.log_prob(out[0][3:], out[1][3:])
         self.assertTrue(torch.allclose(out[2][3:], expected, atol=1e-5))
         self.assertFalse(torch.allclose(out[2][3:], old_logp, atol=1e-3))
+
+    def test_augment_mirrors_only_moving_commands(self):
+        from pick_and_carry.algorithms import moving_command_mask
+        from pick_and_carry.config import NUM_ACTIONS, OBS_LAYOUT, layout_slices
+
+        obs = torch.zeros(4, 81)
+        cmd = layout_slices(OBS_LAYOUT)["command"]
+        obs[0, cmd] = torch.tensor([0.5, 0.0, 0.0])  # move
+        obs[1, cmd] = torch.tensor([0.0, 0.0, 0.0])  # still
+        obs[2, cmd] = torch.tensor([0.0, 0.0, 0.5])  # yaw turn
+        obs[3, cmd] = torch.tensor([0.05, 0.0, 0.0])  # below MOVE_LIN
+        mask = moving_command_mask(obs, command_has_yaw=True)
+        self.assertEqual([bool(x) for x in mask], [True, False, True, False])
+
+        actions = torch.randn(4, NUM_ACTIONS)
+        old_logp = torch.randn(4)
+        returns = torch.arange(4, dtype=torch.float32)
+        advantages = torch.arange(4, dtype=torch.float32) * 0.1
+        values = torch.arange(4, dtype=torch.float32) * 0.01
+        out = augment_symmetric(
+            obs, actions, old_logp, returns, advantages, values, agent=None, command_has_yaw=True
+        )
+        # Original 4 + mirrors of indices 0 and 2 → 6.
+        self.assertEqual(tuple(out[0].shape), (6, 81))
+        self.assertTrue(torch.allclose(out[3][:4], returns))
+        self.assertTrue(torch.allclose(out[3][4:], returns[mask]))
+
+        still_only = obs[1:2]
+        out_still = augment_symmetric(
+            still_only,
+            actions[1:2],
+            old_logp[1:2],
+            returns[1:2],
+            advantages[1:2],
+            values[1:2],
+            agent=None,
+            command_has_yaw=True,
+        )
+        self.assertEqual(tuple(out_still[0].shape), (1, 81))
 
 
 class StageLogDirAlgoTests(unittest.TestCase):
