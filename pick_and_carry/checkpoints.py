@@ -37,6 +37,30 @@ def checkpoint_iteration(path: Path) -> int:
     return -1
 
 
+_IMITATION_FLAGS = ("bc_trot", "dagger_trot", "valuedice_trot", "gail_trot")
+
+
+def is_imitation_checkpoint(blob: dict) -> bool:
+    """True for BC / DAgger / ValueDICE / GAIL warm-start files."""
+    return any(bool(blob.get(flag)) for flag in _IMITATION_FLAGS)
+
+
+def is_rl_training_checkpoint(blob: dict) -> bool:
+    """True for on-policy RL snapshots (PPO / GRPO / Sym) that carry training progress.
+
+    Distinguishes them from imitation warm-starts so ``--init-from`` can continue
+    iteration instead of silently resetting to 0.
+    """
+    if is_imitation_checkpoint(blob) or "model" not in blob:
+        return False
+    if "optimizer" in blob:
+        return True
+    if "iteration" not in blob:
+        return False
+    algo = str(blob.get("algo", "") or "").lower().replace("-", "_")
+    return algo in ("ppo", "grpo", "sym_ppo", "symmetric_ppo", "")
+
+
 def iter_sorted_checkpoints(log_dir: Path) -> list[Path]:
     """Checkpoints ordered by iteration number (not lexicographic name).
 

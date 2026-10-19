@@ -27,6 +27,8 @@ from pick_and_carry.algorithms import (
 )
 from pick_and_carry.checkpoints import (
     archive_incompatible_logs,
+    is_imitation_checkpoint,
+    is_rl_training_checkpoint,
     level_from_path,
     missing_play_checkpoint,
     resolve_checkpoint,
@@ -210,9 +212,9 @@ def parse_args():
         "--init-from",
         type=str,
         default=None,
-        help="Warm-start actor/critic and start PPO at iteration 0. "
-        "File path, or alias: bc / dagger / valuedice / gail / latest. "
-        "Aliases search logs/imitation/ (and legacy walk folders). "
+        help="Warm-start actor/critic. Imitation (bc/dagger/…) starts at iteration 0. "
+        "An RL ppo_*.pt in the same --log-dir continues that iteration (resume semantics). "
+        "Aliases: bc / dagger / valuedice / gail / latest (logs/imitation + walk folders). "
         "Ignored when --resume finds a checkpoint in --log-dir.",
     )
     parser.add_argument(
@@ -470,6 +472,52 @@ def resolve_init_from(init_from: str | Path | None, log_dir: Path) -> Path | Non
     return path
 
 
+def _checkpoint_matches_env(blob: dict, env, cfg) -> None:
+    obs_dim = int(blob.get("obs_dim", -1))
+    act_dim = int(blob.get("act_dim", -1))
+    saved_arm = str(blob["arm"]) if "arm" in blob else ""
+    if obs_dim != env.num_obs or act_dim != env.num_actions or saved_arm != cfg.arm:
+        raise SystemExit(
+            f"checkpoint is arm {saved_arm or '?'} obs {obs_dim} act {act_dim}, "
+            f"need arm {cfg.arm} obs {env.num_obs} act {env.num_actions}."
+        )
+
+
+def load_rl_checkpoint_via_init_from(
+    path: Path,
+    env,
+    cfg,
+    agent,
+    optimizer,
+    log_dir: Path,
+) -> tuple[int, str]:
+    """Load a PPO/GRPO checkpoint passed through ``--init-from``.
+
+    Same log folder → continue iteration and optimizer (resume semantics).
+    Other folder → weights only, iteration 0 (stage transfer), no imitation flag.
+    """
+    ckpt = Path(path)
+    blob = torch_load(ckpt, env.device)
+    _checkpoint_matches_env(blob, env, cfg)
+    agent.load_state_dict(blob["model"])
+    same_folder = ckpt.parent.resolve() == Path(log_dir).resolve()
+    if same_folder:
+        if "optimizer" in blob:
+            optimizer.load_state_dict(blob["optimizer"])
+        start_iteration = int(blob.get("iteration", 0))
+        print(
+            f"--init-from RL checkpoint treated as resume: {ckpt} at iteration {start_iteration}",
+            flush=True,
+        )
+        return start_iteration, str(ckpt)
+    print(
+        f"--init-from RL checkpoint from another folder: {ckpt} "
+        f"(weights only, iteration 0 — like stage transfer)",
+        flush=True,
+    )
+    return 0, str(ckpt)
+
+
 def load_init_weights(
     path: Path,
     env,
@@ -482,6 +530,7 @@ def load_init_weights(
 
     ``reset_log_std`` refreshes the exploration noise after load (keeps BC means).
     Imitation checkpoints often carry a tight ``log_std`` that otherwise freezes PPO.
+    Do not use this for RL ``ppo_*.pt`` files — see ``load_rl_checkpoint_via_init_from``.
     """
     if path is None:
         return None
@@ -489,13 +538,11 @@ def load_init_weights(
     if not ckpt.is_file():
         raise SystemExit(f"--init-from not found: {ckpt}")
     blob = torch_load(ckpt, env.device)
-    obs_dim = int(blob.get("obs_dim", -1))
-    act_dim = int(blob.get("act_dim", -1))
-    saved_arm = str(blob["arm"]) if "arm" in blob else ""
-    if obs_dim != env.num_obs or act_dim != env.num_actions or saved_arm != cfg.arm:
+    _checkpoint_matches_env(blob, env, cfg)
+    if is_rl_training_checkpoint(blob):
         raise SystemExit(
-            f"--init-from {ckpt} is arm {saved_arm or '?'} obs {obs_dim} act {act_dim}, "
-            f"need arm {cfg.arm} obs {env.num_obs} act {env.num_actions}."
+            f"--init-from {ckpt} looks like an RL training checkpoint; "
+            "internal routing should have used resume semantics."
         )
     agent.load_state_dict(blob["model"])
     if reset_log_std is not None:
@@ -1025,15 +1072,31 @@ def main() -> None:
             init_spec = "latest"
         if init_spec is not None:
             init_from = resolve_init_from(init_spec, Path(args.log_dir))
-            resumed_from = load_init_weights(
-                init_from,
-                env,
-                cfg,
-                agent,
-                reset_log_std=init_std,
-            )
-            start_iteration = 0
-            warmed_from_imitation = True
+            peek = torch_load(init_from, env.device)
+            # Footgun fix: picking a ppo_*.pt via --init-from used to wipe iteration to 0
+            # and set warmed_from_imitation, overwriting earlier checkpoints.
+            if is_rl_training_checkpoint(peek) or (
+                init_from.name.startswith("ppo_") and not is_imitation_checkpoint(peek)
+            ):
+                start_iteration, resumed_from = load_rl_checkpoint_via_init_from(
+                    init_from,
+                    env,
+                    cfg,
+                    agent,
+                    optimizer,
+                    Path(args.log_dir),
+                )
+                warmed_from_imitation = False
+            else:
+                resumed_from = load_init_weights(
+                    init_from,
+                    env,
+                    cfg,
+                    agent,
+                    reset_log_std=init_std,
+                )
+                start_iteration = 0
+                warmed_from_imitation = True
     elif init_spec is not None:
         print(f"--init-from {init_spec} ignored because --resume loaded {resumed_from}", flush=True)
     bc_imit_coef = resolve_bc_imit_coef(args, warmed_from_imitation=warmed_from_imitation)

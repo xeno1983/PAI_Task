@@ -325,7 +325,7 @@ function Ask-BcWarmStart {
     Write-Host "   3  DAgger してから PPO（対話的模倣・推奨の次点）"
     Write-Host "   4  ValueDICE してから PPO（任意・上級。PPO は iteration 0）"
     Write-Host "   5  ゼロから PPO のみ"
-    Write-Host "   6  重みファイルを選ぶ（ファイル選択ウィンドウ / --init-from・iteration 0）"
+    Write-Host "   6  重みファイルを選ぶ（--init-from。模倣は iter 0、同フォルダの ppo_*.pt は続き）"
     Write-Host "   （模倣学習だけ・デモ再生だけはメニュー 1）"
     $answer = Read-Host "初期化 [1]"
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = "1" }
@@ -379,7 +379,7 @@ function Ask-BcWarmStart {
         $picked = Select-InitWeightFile
         if (-not [string]::IsNullOrWhiteSpace($picked)) {
             $script:initFromArgs = @("--init-from", $picked)
-            Write-Host "指定重みで PPO を iteration 0 から始めます: $picked"
+            Write-Host "指定重みを --init-from します（模倣→iter 0、同フォルダ ppo_*.pt→続き）: $picked"
         } else {
             Write-Host "キャンセルされました。手入力する場合はパスまたは別名（bc / dagger / latest）を入れてください。"
             $raw = Read-Host "初期重みパスまたは別名（空=ゼロから）"
@@ -388,7 +388,7 @@ function Ask-BcWarmStart {
                 $script:noAutoInit = $true
             } else {
                 $script:initFromArgs = @("--init-from", $raw.Trim().Trim('"'))
-                Write-Host "指定重みで PPO を iteration 0 から始めます: $($script:initFromArgs[1])"
+                Write-Host "指定重みを --init-from します（模倣→iter 0、同フォルダ ppo_*.pt→続き）: $($script:initFromArgs[1])"
             }
         }
     } else {

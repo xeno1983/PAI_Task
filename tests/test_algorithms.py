@@ -209,6 +209,20 @@ class StageLogDirAlgoTests(unittest.TestCase):
         self.assertEqual(stage_log_dir("carry", algo="sym_ppo").as_posix(), "logs/sym_ppo_z1")
 
 
+class CheckpointKindTests(unittest.TestCase):
+    def test_rl_vs_imitation_blob(self):
+        from pick_and_carry.checkpoints import is_imitation_checkpoint, is_rl_training_checkpoint
+
+        bc = {"model": {}, "bc_trot": True, "iteration": 0}
+        self.assertTrue(is_imitation_checkpoint(bc))
+        self.assertFalse(is_rl_training_checkpoint(bc))
+        ppo = {"model": {}, "optimizer": {}, "iteration": 1000, "algo": "ppo"}
+        self.assertFalse(is_imitation_checkpoint(ppo))
+        self.assertTrue(is_rl_training_checkpoint(ppo))
+        legacy = {"model": {}, "iteration": 500}
+        self.assertTrue(is_rl_training_checkpoint(legacy))
+
+
 class PpoInitFromTests(unittest.TestCase):
     def test_resolve_init_from_searches_imitation_and_easy_sibling(self):
         import tempfile
