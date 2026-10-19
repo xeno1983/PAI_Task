@@ -247,5 +247,6 @@ legged_gym の標準の項目に置き換えた。重みは `config.py` の `Loc
 
 ### 9.3 動画
 
-- `logs/.../videos/<タスク>/<種別>_ep####_iter######_<時刻>/`（上書きしない）。
+- RL 再生: `logs/.../videos/<タスク>/<種別>_ep####_iter######_<時刻>/`（上書きしない）。
+- 模倣デモ: `logs/imitation/videos/imitation/<タスク>/<種別>_…/`（PPO の videos とは分離）。
 - 起動スクリプトは同木を起動フォルダの `videos/` へコピーする。

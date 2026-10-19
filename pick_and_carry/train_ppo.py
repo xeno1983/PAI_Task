@@ -255,22 +255,19 @@ def _latest_checkpoint_iteration(log_dir: Path, resume: str | None) -> int:
 
 
 def prepare_record_path(args) -> None:
-    """Nest ``--record`` under ``log_dir/videos/{task}/{algo}_iter…_stamp/``."""
+    """Nest ``--record`` under ``log_dir/videos/[imitation/]{task}/{kind}_iter…_stamp/``."""
     if not args.record:
         return
-    from pick_and_carry.video_paths import make_video_run_dir, video_task_name, videos_root
+    from pick_and_carry.video_paths import is_under_videos_tree, make_video_run_dir, video_task_name
 
     log_dir = Path(args.log_dir).resolve()
     args.log_dir = log_dir
     requested = Path(args.record)
     # Already nested under this log_dir's videos/ tree — keep as-is (ensure parent exists).
-    try:
-        requested.resolve().relative_to(videos_root(log_dir).resolve())
+    if is_under_videos_tree(requested, log_dir):
         requested.parent.mkdir(parents=True, exist_ok=True)
         args.record = str(requested.resolve())
         return
-    except ValueError:
-        pass
     easy = bool(getattr(args, "easy_walk", False) or "walk_easy" in log_dir.name)
     task = video_task_name(
         getattr(args, "curriculum", "carry"),

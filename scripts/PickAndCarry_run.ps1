@@ -594,11 +594,13 @@ function Open-BcDemos {
     elseif (Test-Path $legacyNested) { $folder = $legacyNested }
     else { $folder = $legacy }
     $videosRoot = Join-Path $folder "videos"
+    $imitVideos = Join-Path $videosRoot "imitation"
+    $scanRoot = if (Test-Path $imitVideos) { $imitVideos } else { $videosRoot }
     $reels = @("trot_teacher_demo.mp4", "bc_trot_demo.mp4", "dagger_trot_demo.mp4", "valuedice_trot_demo.mp4", "gail_trot_demo.mp4")
     $opened = 0
-    # Prefer new layout: videos/<task>/<kind>_ep####_iter######_stamp/*.mp4
-    if (Test-Path $videosRoot) {
-        $runs = @(Get-ChildItem -Path $videosRoot -Directory -Recurse -ErrorAction SilentlyContinue |
+    # Prefer: videos/imitation/<task>/<kind>_ep####_iter######_stamp/*.mp4
+    if (Test-Path $scanRoot) {
+        $runs = @(Get-ChildItem -Path $scanRoot -Directory -Recurse -ErrorAction SilentlyContinue |
             Where-Object { Get-ChildItem -Path $_.FullName -Filter "*.mp4" -File -ErrorAction SilentlyContinue } |
             Sort-Object LastWriteTime -Descending)
         foreach ($run in $runs) {
@@ -613,7 +615,9 @@ function Open-BcDemos {
                 }
             }
         }
-        $copied = Copy-VideoTree $LogDirRel
+        # Copy imitation video tree (shared logs/imitation), not the RL walk folder.
+        $imitRel = if ($folder -eq $imit) { "logs/imitation" } elseif ($folder -eq $legacyNested) { "$LogDirRel/imitation" } else { $LogDirRel }
+        $copied = Copy-VideoTree $imitRel
         if ($copied -gt 0) {
             Write-Host "起動フォルダへコピー: $(Join-Path $out 'videos') （$copied 本）"
         }
@@ -631,9 +635,9 @@ function Open-BcDemos {
         }
     }
     if ($opened -eq 0) {
-        Write-Host "デモ mp4 が見つかりません: $videosRoot"
+        Write-Host "デモ mp4 が見つかりません: $scanRoot"
     } else {
-        Write-Host "デモ $opened 本を開きました（videos/<タスク>/<学習回>/ 以下）。"
+        Write-Host "デモ $opened 本を開きました（videos/imitation/<タスク>/<学習回>/ 以下）。"
     }
 }
 
@@ -1077,7 +1081,8 @@ switch ($choice) {
             if (-not (Test-Path $gailPath)) { $gailPath = Get-ImitationWeightPath "gail_trot.pt" }
             Write-Host "   1  PPO の最新重みを再生（iteration $script:activeIter）"
             Write-Host "   2  模倣の dagger / bc / valuedice 重みを再生"
-            Write-Host "   3  箱運びの途中経過を並べた比較動画（追加学習なし）"
+            Write-Host "   3  教師トロットのデモを録画して開く"
+            Write-Host "   4  歩行 PPO の途中経過を並べた比較動画（追加学習なし）"
             $playPick = Read-Host "手法 [1]"
             if ([string]::IsNullOrWhiteSpace($playPick)) { $playPick = "1" }
             if ($playPick -eq "2") {
@@ -1098,6 +1103,13 @@ switch ($choice) {
                 & $python -u -m pick_and_carry.train_bc --easy-walk --demo-only teacher --save-demos teacher --log-dir $logDir @algoArgs @armArgs
                 $code = $LASTEXITCODE
                 Open-BcDemos $logDir
+            } elseif ($playPick -eq "4") {
+                Write-Host "歩行の途中チェックポイントを等間隔に並べます。対象: $logDir （最新 iteration $script:activeIter）"
+                $compareName = "PickAndCarry_$($script:algo)_walk_easy_compare.mp4"
+                $video = Join-Path $out $compareName
+                & $python -u scripts\compare_snapshots.py --log-dir $logDir --output $video --seconds 16 --panels 4 --curriculum walk --easy-walk @algoArgs @armArgs @terrainArgs
+                $code = $LASTEXITCODE
+                if ($code -eq 0) { Open-LatestPlayVideo $logDir $compareName }
             } else {
                 Write-Host "推論します。使う重み: iteration $script:activeIter （$logDir）"
                 & $python -u -m pick_and_carry.train_ppo --play --resume latest --num-envs 1 --record $video --seconds 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @curriculumArgs

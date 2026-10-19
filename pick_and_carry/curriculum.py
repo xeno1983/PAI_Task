@@ -180,18 +180,80 @@ def nest_imitation_log_dir(log_dir: Path | str) -> Path:
     """Map an RL walk log folder (or any path) to the shared ``logs/imitation`` dir.
 
     If ``log_dir`` is already ``…/imitation``, it is returned as-is. When redirecting
-    from a walk RL folder, legacy weights next to ``ppo_*.pt`` (or under the old
-    nested ``walk_easy/imitation/``) are moved into ``logs/imitation/`` once.
+    from a walk RL folder, legacy weights and imitation demo videos are moved into
+    ``logs/imitation/`` once.
     """
+    from pick_and_carry.video_paths import migrate_legacy_imitation_videos
+
     path = Path(log_dir)
     if path.name == IMITATION_DIRNAME:
+        migrate_legacy_imitation_videos(path)
         return path
     if "curriculum_walk" in path.name:
         # logs/ppo_curriculum_walk_easy → logs/imitation (sibling, not nested).
         imit = path.parent / IMITATION_DIRNAME if path.parent.name == "logs" else Path("logs") / IMITATION_DIRNAME
         migrate_legacy_imitation_weights(path, imit)
+        migrate_imitation_videos_into(path, imit)
+        migrate_legacy_imitation_videos(imit)
         return imit
     return path
+
+
+def migrate_imitation_videos_into(rl_dir: Path | str, imit_dir: Path | str) -> list[Path]:
+    """Move imitation demo runs from an RL walk ``videos/`` tree into ``logs/imitation``.
+
+    Handles both the flat ``videos/<task>/<kind>_…`` layout and ``videos/imitation/``.
+    """
+    import shutil
+
+    from pick_and_carry.video_paths import (
+        IMITATION_VIDEO_FAMILY,
+        migrate_legacy_imitation_videos,
+        video_family_for_kind,
+        videos_root,
+    )
+
+    rl_dir = Path(rl_dir)
+    imit_dir = Path(imit_dir)
+    migrate_legacy_imitation_videos(rl_dir)
+    moved: list[Path] = []
+    src_root = videos_root(rl_dir, family=IMITATION_VIDEO_FAMILY)
+    if not src_root.is_dir():
+        return moved
+    dest_root = videos_root(imit_dir, family=IMITATION_VIDEO_FAMILY)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    for task_dir in list(src_root.iterdir()):
+        if not task_dir.is_dir():
+            continue
+        dest_task = dest_root / task_dir.name
+        dest_task.mkdir(parents=True, exist_ok=True)
+        for run_dir in list(task_dir.iterdir()):
+            if not run_dir.is_dir():
+                continue
+            if video_family_for_kind(run_dir.name.split("_", 1)[0]) != IMITATION_VIDEO_FAMILY:
+                continue
+            dest = dest_task / run_dir.name
+            if dest.exists():
+                shutil.rmtree(run_dir, ignore_errors=True)
+                print(f"旧デモ配置の重複を削除: {run_dir}", flush=True)
+                continue
+            run_dir.replace(dest)
+            moved.append(dest)
+            print(f"デモ動画を移動: {run_dir} → {dest}", flush=True)
+        try:
+            if task_dir.is_dir() and not any(task_dir.iterdir()):
+                task_dir.rmdir()
+        except OSError:
+            pass
+    try:
+        if src_root.is_dir() and not any(src_root.iterdir()):
+            src_root.rmdir()
+            videos = rl_dir / "videos"
+            if videos.is_dir() and not any(videos.iterdir()):
+                videos.rmdir()
+    except OSError:
+        pass
+    return moved
 
 
 _LEGACY_IMITATION_NAMES = (

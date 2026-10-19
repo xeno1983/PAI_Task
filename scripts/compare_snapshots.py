@@ -54,6 +54,17 @@ def parse_args():
     parser.add_argument("--arm", choices=("z1",), default="z1")
     parser.add_argument("--control-split", choices=("split", "walk", "both"), default="split")
     parser.add_argument("--wrist-camera", action="store_true")
+    parser.add_argument(
+        "--curriculum",
+        choices=("walk", "reach", "haul", "carry", "catch"),
+        default="carry",
+        help="Stage used when replaying snapshots (must match the log folder).",
+    )
+    parser.add_argument(
+        "--easy-walk",
+        action="store_true",
+        help="Flat easy-walk settings when --curriculum walk.",
+    )
     return parser.parse_args()
 
 
@@ -218,14 +229,16 @@ def main() -> None:
     records, skipped = load_snapshots(args.log_dir, arm.num_obs, arm.num_actions, arm.name)
     # Nest under log_dir/videos/{task}/compare_iter…/ even when --output is a flat desktop path.
     requested = Path(output)
+    easy = bool(args.easy_walk) and args.curriculum == "walk"
+    task = video_task_name(args.curriculum, easy=easy)
     if "videos" not in requested.parts:
         last_iter = int(records[-1]["iteration"]) if records else 0
         run_dir = make_video_run_dir(
             args.log_dir,
-            task=video_task_name("carry"),
+            task=task,
             kind="compare",
             iteration=last_iter,
-            extra={"panels": args.panels},
+            extra={"panels": args.panels, "curriculum": args.curriculum},
         )
         output = run_dir / requested.name
         print(f"compare → {output}", flush=True)
@@ -243,6 +256,9 @@ def main() -> None:
     print(f"比較する重み: {names}", flush=True)
     print("左上から、学習の早い順に並びます。物体と目標の位置は全パネルで同じです。", flush=True)
 
+    control_split = "walk" if args.curriculum == "walk" else args.control_split
+    terrain = False if easy else True
+    amplitude = 0.0 if easy else (0.035 if args.terrain_amplitude is None else args.terrain_amplitude)
     cfg = EnvConfig(
         num_envs=1,
         backend=args.backend,
@@ -253,11 +269,16 @@ def main() -> None:
         camera_lookat=COMPARE_CAMERA_LOOKAT,
         camera_fov=COMPARE_CAMERA_FOV,
         seed=args.seed,
-        terrain_steps=args.terrain_steps,
-        terrain_amplitude=0.035 if args.terrain_amplitude is None else args.terrain_amplitude,
-        control_split=args.control_split,
+        terrain=terrain,
+        terrain_steps=False if easy else args.terrain_steps,
+        terrain_amplitude=amplitude,
+        control_split=control_split,
         arm=args.arm,
         wrist_camera=args.wrist_camera,
+        curriculum=args.curriculum,
+        arm_disturb=False if easy else True,
+        push_robots=False,
+        randomize_friction=False if easy else True,
     )
     env = PickAndCarryEnv(cfg=cfg)
     agent = ActorCritic(env.num_obs, env.num_actions).to(env.device)

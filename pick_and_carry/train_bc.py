@@ -11,7 +11,7 @@ Demos only (teacher / BC policy):
     python -m pick_and_carry.train_bc --demo-only all
 
 Teacher demos write one mp4 per skill under
-``--log-dir/videos/<task>/<kind>_ep…_iter…_<stamp>/``:
+``--log-dir/videos/imitation/<task>/<kind>_ep…_iter…_<stamp>/``:
 stand / sit / jump / forward / backward / turn_left / turn_right / stop.
 
 Then warm-start PPO:
@@ -443,15 +443,16 @@ def record_demos(
     video_dir: Path | None = None,
 ) -> list[Path]:
     """Record a skill reel plus one mp4 per skill under ``video_dir`` (or ``log_dir``)."""
-    from pick_and_carry.video_paths import make_video_run_dir, video_task_name
+    from pick_and_carry.video_paths import make_video_run_dir, migrate_legacy_imitation_videos, video_task_name
 
     log_dir = Path(log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_imitation_videos(log_dir)
     lengths = _skill_seconds(seconds)
     paths: list[Path] = []
     easy = bool(getattr(cfg, "easy_walk", False) or "walk_easy" in log_dir.name)
     task = video_task_name(getattr(cfg, "curriculum", "walk"), easy=easy)
-    print(f"demo videos root: {log_dir / 'videos'}  task={task}", flush=True)
+    print(f"demo videos root: {log_dir / 'videos' / 'imitation'}  task={task}", flush=True)
 
     def _out(kind: str, epochs: int | None = None) -> Path:
         if video_dir is not None:

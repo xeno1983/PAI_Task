@@ -70,7 +70,7 @@ Colab のファイルパネルから、この zip をアップロードして展
 - 箱運び GRPO → `logs/grpo_z1`
 - キャッチ Symmetric PPO（静止）→ `logs/sym_ppo_curriculum_catch_static`
 
-デモ・再生 mp4 は `logs/.../videos/<タスク>/<学習回>/` に分かれます。
+デモ mp4 は `logs/imitation/videos/imitation/<タスク>/<学習回>/`、再生 mp4 は `logs/.../videos/<タスク>/<学習回>/` に分かれます。
 
 ## 6. 学習
 
