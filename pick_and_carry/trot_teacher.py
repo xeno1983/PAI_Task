@@ -173,8 +173,18 @@ class TrotTeacher:
                 out[mask] = skill_command(name, device=self.device, n=1).expand(int(mask.sum()), -1)
         return out
 
-    def act(self, command: torch.Tensor, skill: str | None = None) -> torch.Tensor:
-        """``command`` is (N, 3). Returns (N, NUM_ACTIONS) with CPG params in the cpg slice."""
+    def act(
+        self,
+        command: torch.Tensor,
+        skill: str | None = None,
+        *,
+        advance: bool = True,
+    ) -> torch.Tensor:
+        """``command`` is (N, 3). Returns (N, NUM_ACTIONS) with CPG params in the cpg slice.
+
+        ``advance=False`` peeks the action without updating blend / phase / jump timers
+        (needed for DAgger when the env may apply the student action instead).
+        """
         n = command.shape[0]
         if skill is not None:
             self.set_skill(skill)
@@ -185,7 +195,7 @@ class TrotTeacher:
             mask = self.skill_id == i
             if not bool(mask.any()):
                 continue
-            params[mask] = self._params_for_skill(name, command, mask)
+            params[mask] = self._params_for_skill(name, command, mask, advance=advance)
 
         if bool(free.any()):
             params[free] = command_to_cpg_params(
@@ -197,18 +207,46 @@ class TrotTeacher:
                 hip_amp=self.hip_amp,
             )
 
-        self._blend = (self._blend + self.dt / 0.35).clamp(0.0, 1.0)
-        alpha = self._blend.unsqueeze(-1)
+        blend_next = (self._blend + self.dt / 0.35).clamp(0.0, 1.0)
+        alpha = blend_next.unsqueeze(-1)
         params = alpha * params + (1.0 - alpha) * self._prev_params[:n]
         if self.smooth > 0.0:
             params = (1.0 - self.smooth) * self._prev_params[:n] + self.smooth * params
-        self._prev_params[:n] = params
+        if advance:
+            self._blend = blend_next
+            self._prev_params[:n] = params
 
         action = torch.zeros((n, NUM_ACTIONS), dtype=torch.float32, device=self.device)
         action[:, self._cpg_slice] = params.clamp(-4.0, 4.0)
         return action
 
-    def _params_for_skill(self, skill: str, command: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def snapshot_state(self) -> dict[str, torch.Tensor]:
+        return {
+            "blend": self._blend.clone(),
+            "prev_params": self._prev_params.clone(),
+            "jump_t": self.jump_t.clone(),
+        }
+
+    def restore_state(self, snap: dict[str, torch.Tensor], env_mask: torch.Tensor | None = None) -> None:
+        """Restore CPG phase state. If ``env_mask`` is set, only those envs are restored."""
+        if env_mask is None:
+            self._blend.copy_(snap["blend"])
+            self._prev_params.copy_(snap["prev_params"])
+            self.jump_t.copy_(snap["jump_t"])
+            return
+        sel = env_mask.to(dtype=torch.bool, device=self.device)
+        self._blend = torch.where(sel, snap["blend"], self._blend)
+        self._prev_params = torch.where(sel.unsqueeze(-1), snap["prev_params"], self._prev_params)
+        self.jump_t = torch.where(sel, snap["jump_t"], self.jump_t)
+
+    def _params_for_skill(
+        self,
+        skill: str,
+        command: torch.Tensor,
+        mask: torch.Tensor,
+        *,
+        advance: bool = True,
+    ) -> torch.Tensor:
         idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
         n = idx.numel()
         if skill in ("stand", "stop"):
@@ -222,7 +260,7 @@ class TrotTeacher:
                 device=self.device,
             )
         if skill == "jump":
-            return self._jump_params(idx)
+            return self._jump_params(idx, advance=advance)
         return command_to_cpg_params(
             command[idx],
             base_freq=self.base_freq,
@@ -232,9 +270,10 @@ class TrotTeacher:
             hip_amp=self.hip_amp,
         )
 
-    def _jump_params(self, idx: torch.Tensor) -> torch.Tensor:
-        self.jump_t[idx] = self.jump_t[idx] + self.dt
-        t = self.jump_t[idx]
+    def _jump_params(self, idx: torch.Tensor, *, advance: bool = True) -> torch.Tensor:
+        if advance:
+            self.jump_t[idx] = self.jump_t[idx] + self.dt
+        t = self.jump_t[idx] + (0.0 if advance else self.dt)
         n = idx.numel()
         bias_th = torch.zeros(n, device=self.device)
         bias_cf = torch.zeros(n, device=self.device)

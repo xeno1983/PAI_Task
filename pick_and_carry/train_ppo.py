@@ -183,6 +183,11 @@ def parse_args():
         help="Load network weights only (e.g. bc_trot.pt) and start PPO from iteration 0. "
         "Ignored when --resume finds a checkpoint in --log-dir.",
     )
+    parser.add_argument(
+        "--no-auto-init-from",
+        action="store_true",
+        help="Do not auto-load dagger/bc/valuedice/gail weights when --easy-walk and no --init-from.",
+    )
     parser.add_argument("--play", action="store_true", help="Run the loaded policy and skip learning.")
     parser.add_argument("--seconds", type=float, default=20.0, help="Length of a --play recording, in simulation seconds.")
     parser.add_argument("--object-xy", type=str, default=None, help="Inference supply position, 'x,y' in meters.")
@@ -227,7 +232,7 @@ def _latest_checkpoint_iteration(log_dir: Path, resume: str | None) -> int:
         match = re.search(r"(\d+)", path.stem)
         if match:
             best = max(best, int(match.group(1)))
-    for name in ("bc_trot.pt", "gail_trot.pt", "valuedice_trot.pt"):
+    for name in ("dagger_trot.pt", "bc_trot.pt", "valuedice_trot.pt", "gail_trot.pt"):
         if (log_dir / name).is_file() and best == 0 and resume in (None, "latest", name, str(log_dir / name)):
             return 0
     return best
@@ -261,6 +266,8 @@ def prepare_record_path(args) -> None:
     resume = str(getattr(args, "resume", "") or "")
     if "bc_trot" in resume:
         kind = "bc"
+    elif "dagger_trot" in resume:
+        kind = "dagger"
     elif "valuedice_trot" in resume:
         kind = "valuedice"
     elif "gail_trot" in resume:
@@ -398,7 +405,9 @@ def load_init_weights(path: Path, env, cfg, agent) -> str | None:
             f"need arm {cfg.arm} obs {env.num_obs} act {env.num_actions}."
         )
     agent.load_state_dict(blob["model"])
-    if blob.get("valuedice_trot"):
+    if blob.get("dagger_trot"):
+        kind = "DAgger"
+    elif blob.get("valuedice_trot"):
         kind = "ValueDICE"
     elif blob.get("gail_trot"):
         kind = "GAIL"
@@ -817,10 +826,15 @@ def main() -> None:
     init_from = getattr(args, "init_from", None)
     if resumed_from is None:
         # Auto-pick imitation warm-start in the easy-walk folder when no PPO checkpoint exists.
-        # Prefer ValueDICE, then legacy GAIL, then BC (same order as the launcher).
-        if init_from is None and getattr(args, "easy_walk", False):
+        # Prefer DAgger / BC for walk (env PPO), then ValueDICE / legacy GAIL.
+        # Skip when the launcher explicitly asked for a true zero start (--no-auto-init-from).
+        if (
+            init_from is None
+            and getattr(args, "easy_walk", False)
+            and not getattr(args, "no_auto_init_from", False)
+        ):
             log_dir = Path(args.log_dir)
-            for name in ("valuedice_trot.pt", "gail_trot.pt", "bc_trot.pt"):
+            for name in ("dagger_trot.pt", "bc_trot.pt", "valuedice_trot.pt", "gail_trot.pt"):
                 candidate = log_dir / name
                 if candidate.is_file():
                     init_from = candidate
