@@ -49,6 +49,13 @@ class ActionMaskTests(unittest.TestCase):
         self.assertTrue(str(stage_log_dir("walk", easy=True)).endswith("curriculum_walk_easy"))
         self.assertTrue(str(stage_log_dir("walk", easy=False)).endswith("curriculum_walk"))
 
+    def test_imitation_log_dir_is_subfolder(self):
+        from pick_and_carry.curriculum import imitation_log_dir, nest_imitation_log_dir
+
+        self.assertTrue(str(imitation_log_dir()).replace("\\", "/").endswith("curriculum_walk_easy/imitation"))
+        rl = stage_log_dir("walk", easy=True)
+        self.assertEqual(nest_imitation_log_dir(rl), rl / "imitation")
+
 
 class GroupRelativeTests(unittest.TestCase):
     def test_group_mean_is_zero(self):
@@ -147,7 +154,7 @@ class StageLogDirAlgoTests(unittest.TestCase):
 
 
 class PpoInitFromTests(unittest.TestCase):
-    def test_resolve_init_from_searches_easy_sibling(self):
+    def test_resolve_init_from_searches_imitation_and_easy_sibling(self):
         import tempfile
         from pathlib import Path
 
@@ -156,9 +163,11 @@ class PpoInitFromTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp())
         hard = root / "ppo_curriculum_walk"
         easy = root / "ppo_curriculum_walk_easy"
+        imit = easy / "imitation"
         hard.mkdir()
         easy.mkdir()
-        bc = easy / "bc_trot.pt"
+        imit.mkdir()
+        bc = imit / "bc_trot.pt"
         bc.write_bytes(b"stub")
         self.assertEqual(resolve_init_from("bc", hard), bc)
         self.assertEqual(resolve_init_from("latest", hard), bc)

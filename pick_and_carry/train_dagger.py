@@ -119,23 +119,29 @@ def parse_args(argv: list[str] | None = None):
 
 
 def _resolve_init_from(init_from: str | None, log_dir: Path) -> Path | None:
+    from pick_and_carry.curriculum import imitation_weight_dirs
+
     if not init_from:
         return None
     if init_from in ("latest", "dagger", "dagger_trot"):
-        for name in ("dagger_trot.pt", "bc_trot.pt"):
-            path = log_dir / name
-            if path.is_file():
-                return path
-        raise SystemExit(f"--init-from latest ですが DAgger/BC 重みがありません: {log_dir}")
-    if init_from in ("bc", "bc_trot"):
-        path = log_dir / "bc_trot.pt"
+        names = ("dagger_trot.pt", "bc_trot.pt")
+    elif init_from in ("bc", "bc_trot"):
+        names = ("bc_trot.pt",)
+    else:
+        path = Path(init_from)
         if path.is_file():
             return path
-        raise SystemExit(f"--init-from bc ですが BC 重みがありません: {path}")
-    path = Path(init_from)
-    if not path.is_file():
+        for folder in imitation_weight_dirs(log_dir):
+            alt = folder / init_from
+            if alt.is_file():
+                return alt
         raise SystemExit(f"--init-from のファイルがありません: {path}")
-    return path
+    for folder in imitation_weight_dirs(log_dir):
+        for name in names:
+            path = folder / name
+            if path.is_file():
+                return path
+    raise SystemExit(f"--init-from {init_from} ですが DAgger/BC 重みがありません: {log_dir}")
 
 
 def _save_dagger_checkpoint(

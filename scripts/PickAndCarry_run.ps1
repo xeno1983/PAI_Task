@@ -20,7 +20,7 @@ Write-Host ""
 Write-Host " この画面はログです。閉じずに待ってください。"
 Write-Host ""
 Write-Host "   1  模倣学習（トロット教師 → BC / DAgger / ValueDICE）。デモ保存の有無を選べます"
-Write-Host "      保存先: logs\<手法>_curriculum_walk_easy\ （bc_trot.pt / dagger_trot.pt / valuedice_trot.pt）"
+Write-Host "      保存先: logs\<手法>_curriculum_walk_easy\imitation\ （BC/DAgger/ValueDICE。PPO とは別）"
 Write-Host "   2  学習。段階を選んでから回数を入れる"
 Write-Host "      歩行、到達、歩きながら持つ、箱運び、キャッチ。到達と持ち歩きは歩行から、キャッチは到達から続ける。"
 Write-Host "      歩行は平地から始めて地形へ広げ、腕を動かしながら歩く。腕は Z1。観測 81、行動 17（CPG+腕）。"
@@ -233,20 +233,71 @@ function Select-Curriculum {
     }
 }
 
+function Get-ImitationFolder {
+    param([string]$RlLogDirRel = $script:logDir)
+    # Imitation weights live under <walk_log>/imitation/. Hard walk prefers the easy sibling.
+    $rel = $RlLogDirRel
+    if ($rel -match 'curriculum_walk$' -and $rel -notmatch 'curriculum_walk_easy$') {
+        $easyRel = $rel + "_easy"
+        $easy = Join-Path (Get-Location) ($easyRel -replace "/", "\")
+        if (Test-Path $easy) { $rel = $easyRel }
+    }
+    $rl = Join-Path (Get-Location) ($rel -replace "/", "\")
+    return (Join-Path $rl "imitation")
+}
+
 function Find-ImitationWeight {
     param([string]$Name)
-    # Current log folder first, then easy-walk sibling (for hard walk warm-start from BC/DAgger).
+    # imitation/ first, then legacy flat RL folder; hard walk also checks easy sibling.
     $folders = @()
-    $folder = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
-    $folders += $folder
+    $rl = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
+    $folders += (Join-Path $rl "imitation")
+    $folders += $rl
     if ($script:logDir -match 'curriculum_walk$' -and $script:logDir -notmatch 'curriculum_walk_easy$') {
-        $easyRel = $script:logDir + "_easy"
-        $easy = Join-Path (Get-Location) ($easyRel -replace "/", "\")
-        if (Test-Path $easy) { $folders += $easy }
+        $easy = Join-Path (Get-Location) (($script:logDir + "_easy") -replace "/", "\")
+        $folders += (Join-Path $easy "imitation")
+        $folders += $easy
     }
     foreach ($dir in $folders) {
         $path = Join-Path $dir $Name
         if (Test-Path $path) { return $path }
+    }
+    return $null
+}
+
+function Get-ImitationWeightPath {
+    param([string]$Name)
+    $found = Find-ImitationWeight $Name
+    if ($null -ne $found) { return $found }
+    return (Join-Path (Get-ImitationFolder) $Name)
+}
+
+function Select-InitWeightFile {
+    $startDir = Get-ImitationFolder
+    if (-not (Test-Path $startDir)) {
+        $startDir = Join-Path (Get-Location) ($script:logDir -replace "/", "\")
+    }
+    if (-not (Test-Path $startDir)) {
+        $startDir = Join-Path (Get-Location) "logs"
+    }
+    if (-not (Test-Path $startDir)) {
+        $startDir = (Get-Location).Path
+    }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $dialog = New-Object System.Windows.Forms.OpenFileDialog
+        $dialog.Title = "PPO 初期重みを選択（bc_trot / dagger_trot / valuedice など）"
+        $dialog.Filter = "PyTorch weights (*.pt)|*.pt|All files (*.*)|*.*"
+        $dialog.FilterIndex = 1
+        $dialog.InitialDirectory = $startDir
+        $dialog.Multiselect = $false
+        $dialog.CheckFileExists = $true
+        $result = $dialog.ShowDialog()
+        if ($result -eq [System.Windows.Forms.DialogResult]::OK -and -not [string]::IsNullOrWhiteSpace($dialog.FileName)) {
+            return $dialog.FileName
+        }
+    } catch {
+        Write-Host "ファイル選択ウィンドウを開けませんでした: $($_.Exception.Message)"
     }
     return $null
 }
@@ -279,7 +330,7 @@ function Ask-BcWarmStart {
     Write-Host "   3  DAgger してから PPO（対話的模倣・推奨の次点）"
     Write-Host "   4  ValueDICE してから PPO（任意・上級。PPO は iteration 0）"
     Write-Host "   5  ゼロから PPO のみ"
-    Write-Host "   6  重みファイルのパスを指定（--init-from。iteration 0）"
+    Write-Host "   6  重みファイルを選ぶ（ファイル選択ウィンドウ / --init-from・iteration 0）"
     Write-Host "   （模倣学習だけ・デモ再生だけはメニュー 1）"
     $answer = Read-Host "初期化 [1]"
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = "1" }
@@ -329,14 +380,21 @@ function Ask-BcWarmStart {
         $script:noAutoInit = $true
         Write-Host "模倣学習なしで PPO します（既存 ppo があれば --resume latest。無い場合は本当にゼロから・模倣重みは使いません）。"
     } elseif ($answer -eq "6") {
-        Write-Host "例: logs\ppo_curriculum_walk_easy\bc_trot.pt  /  bc  /  dagger  /  latest"
-        $raw = Read-Host "初期重みパスまたは別名"
-        if ([string]::IsNullOrWhiteSpace($raw)) {
-            Write-Host "未入力なのでゼロから PPO します。"
-            $script:noAutoInit = $true
+        Write-Host "ファイル選択ウィンドウを開きます（キャンセル後はパスや別名を手入力できます）。"
+        $picked = Select-InitWeightFile
+        if (-not [string]::IsNullOrWhiteSpace($picked)) {
+            $script:initFromArgs = @("--init-from", $picked)
+            Write-Host "指定重みで PPO を iteration 0 から始めます: $picked"
         } else {
-            $script:initFromArgs = @("--init-from", $raw.Trim().Trim('"'))
-            Write-Host "指定重みで PPO を iteration 0 から始めます: $($script:initFromArgs[1])"
+            Write-Host "キャンセルされました。手入力する場合はパスまたは別名（bc / dagger / latest）を入れてください。"
+            $raw = Read-Host "初期重みパスまたは別名（空=ゼロから）"
+            if ([string]::IsNullOrWhiteSpace($raw)) {
+                Write-Host "未入力なのでゼロから PPO します。"
+                $script:noAutoInit = $true
+            } else {
+                $script:initFromArgs = @("--init-from", $raw.Trim().Trim('"'))
+                Write-Host "指定重みで PPO を iteration 0 から始めます: $($script:initFromArgs[1])"
+            }
         }
     } else {
         if ($hasDagger) {
@@ -454,10 +512,15 @@ function Ask-ValueDiceWarmStart {
     # Sets script:vdExtraArgs (flat) / vdBcEpochs for train_gail / train_valuedice.
     $script:vdExtraArgs = @()
     $script:vdBcEpochs = 3000
-    $folder = Join-Path (Get-Location) ($LogDirRel -replace "/", "\")
+    $imit = Join-Path (Get-Location) (($LogDirRel -replace "/", "\") + "\imitation")
+    $legacy = Join-Path (Get-Location) ($LogDirRel -replace "/", "\")
+    $folder = if (Test-Path $imit) { $imit } else { $legacy }
     $valuedice = Join-Path $folder "valuedice_trot.pt"
+    if (-not (Test-Path $valuedice)) { $valuedice = Join-Path $legacy "valuedice_trot.pt" }
     if (-not (Test-Path $valuedice)) { $valuedice = Join-Path $folder "gail_trot.pt" }
+    if (-not (Test-Path $valuedice)) { $valuedice = Join-Path $legacy "gail_trot.pt" }
     $bc = Join-Path $folder "bc_trot.pt"
+    if (-not (Test-Path $bc)) { $bc = Join-Path $legacy "bc_trot.pt" }
     $hasVd = Test-Path $valuedice
     $hasBc = Test-Path $bc
     if ($hasVd -and $hasBc) {
@@ -524,7 +587,9 @@ function Copy-VideoTree {
 
 function Open-BcDemos {
     param([string]$LogDirRel)
-    $folder = Join-Path (Get-Location) ($LogDirRel -replace "/", "\")
+    $imit = Join-Path (Get-Location) (($LogDirRel -replace "/", "\") + "\imitation")
+    $legacy = Join-Path (Get-Location) ($LogDirRel -replace "/", "\")
+    $folder = if (Test-Path (Join-Path $imit "videos")) { $imit } elseif (Test-Path $imit) { $imit } else { $legacy }
     $videosRoot = Join-Path $folder "videos"
     $reels = @("trot_teacher_demo.mp4", "bc_trot_demo.mp4", "dagger_trot_demo.mp4", "valuedice_trot_demo.mp4", "gail_trot_demo.mp4")
     $opened = 0
@@ -746,14 +811,16 @@ $code = 0
 switch ($choice) {
     "1" {
         Write-Host ""
-        Write-Host "模倣学習（トロット教師 → BC / DAgger / ValueDICE）。保存先は logs\<手法>_curriculum_walk_easy です。"
+        Write-Host "模倣学習（トロット教師 → BC / DAgger / ValueDICE）。"
+        Write-Host "保存先は logs\<手法>_curriculum_walk_easy\imitation\ です（PPO の ppo_*.pt とは別）。"
         Select-Algo
         $script:stage = "walk"
         $script:easyWalk = $true
         $script:catchLevel = "static"
         $script:curriculumArgs = @("--curriculum", "walk", "--easy-walk")
         Set-LogDirFromStage
-        Write-Host "保存先: $($script:logDir -replace '/', '\')"
+        Write-Host "模倣保存先: $((Get-ImitationFolder).Replace((Get-Location).Path + '\', ''))"
+        Write-Host "（PPO 保存先: $($script:logDir -replace '/', '\')）"
         Write-Host "   1  BC を実行（推奨・初回。デモの有無を選べます）"
         Write-Host "   2  DAgger を実行（対話的模倣。classic / gated）"
         Write-Host "   3  ValueDICE を実行（ν＋PPO。必要なら BC で温める）"
@@ -768,7 +835,7 @@ switch ($choice) {
             $mode = Ask-DaggerMode
             $rounds = Ask-DaggerRounds -Default 8
             $initArgs = @()
-            $bcPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\bc_trot.pt")
+            $bcPath = (Get-ImitationWeightPath "bc_trot.pt")
             if (Test-Path $bcPath) {
                 Write-Host "既存 bc_trot.pt があります。DAgger の初期方策に使いますか？"
                 Write-Host "   1  使う（推奨）"
@@ -820,10 +887,10 @@ switch ($choice) {
                 Write-Host "続けてメニュー 2 → 歩行 → 簡単 → 初期化 2（既存重み）で PPO できます。歩行改善なら BC→PPO（初期化 1）推奨。"
             }
         } elseif ($bcPick -eq "4") {
-            $daggerPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\dagger_trot.pt")
-            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
+            $daggerPath = (Get-ImitationWeightPath "dagger_trot.pt")
+            $gailPath = (Get-ImitationWeightPath "valuedice_trot.pt")
             if (-not (Test-Path $gailPath)) {
-                $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+                $gailPath = (Get-ImitationWeightPath "gail_trot.pt")
             }
             if (Test-Path $daggerPath) {
                 & $python -u -m pick_and_carry.train_dagger --easy-walk --demo-only bc --log-dir $logDir @algoArgs @armArgs
@@ -839,10 +906,10 @@ switch ($choice) {
             $code = $LASTEXITCODE
             if ($code -eq 0) { Open-BcDemos $logDir }
         } elseif ($bcPick -eq "6") {
-            $daggerPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\dagger_trot.pt")
-            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
+            $daggerPath = (Get-ImitationWeightPath "dagger_trot.pt")
+            $gailPath = (Get-ImitationWeightPath "valuedice_trot.pt")
             if (-not (Test-Path $gailPath)) {
-                $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\gail_trot.pt")
+                $gailPath = (Get-ImitationWeightPath "gail_trot.pt")
             }
             if (Test-Path $daggerPath) {
                 & $python -u -m pick_and_carry.train_dagger --easy-walk --demo-only all --save-demos all --log-dir $logDir @algoArgs @armArgs
@@ -910,7 +977,7 @@ switch ($choice) {
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
             if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
-            $bcPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\bc_trot.pt")
+            $bcPath = (Get-ImitationWeightPath "bc_trot.pt")
             Write-Host "BC 完了。PPO は $bcPath から iteration 0 で開始します（既存の ppo_*.pt は使いません）。"
             & $python -u -m pick_and_carry.train_ppo --init-from $bcPath --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
         } elseif ($script:runDaggerFirst) {
@@ -920,7 +987,7 @@ switch ($choice) {
             $rounds = Ask-DaggerRounds -Default 8
             $daggerEnvs = [Math]::Min(32, $numEnvs)
             $initArgs = @()
-            $bcPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\bc_trot.pt")
+            $bcPath = (Get-ImitationWeightPath "bc_trot.pt")
             if (Test-Path $bcPath) {
                 $initArgs = @("--init-from", $bcPath)
                 Write-Host "既存 BC を DAgger 初期方策に使います: $bcPath"
@@ -929,7 +996,7 @@ switch ($choice) {
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
             if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
-            $daggerPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\dagger_trot.pt")
+            $daggerPath = (Get-ImitationWeightPath "dagger_trot.pt")
             Write-Host "DAgger 完了。PPO は $daggerPath から iteration 0 で開始します（既存の ppo_*.pt は使いません）。"
             & $python -u -m pick_and_carry.train_ppo --init-from $daggerPath --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
         } elseif ($script:runGailFirst) {
@@ -963,7 +1030,7 @@ switch ($choice) {
             $code = $LASTEXITCODE
             if ($code -ne 0) { break }
             if ($demoArgs -notcontains "none") { Open-BcDemos $logDir }
-            $gailPath = Join-Path (Get-Location) (($logDir -replace "/", "\") + "\valuedice_trot.pt")
+            $gailPath = (Get-ImitationWeightPath "valuedice_trot.pt")
             Write-Host "ValueDICE 完了。PPO は $gailPath から iteration 0 で開始します（既存の ppo_*.pt は使いません）。"
             & $python -u -m pick_and_carry.train_ppo --init-from $gailPath --num-envs $numEnvs --iterations $trainIters --num-steps 128 --save-interval 20 --log-dir $logDir @algoArgs @armArgs @terrainArgs @controlArgs @visionArgs @curriculumArgs
         } else {
@@ -1001,11 +1068,10 @@ switch ($choice) {
             $code = $LASTEXITCODE
             if ($code -eq 0) { Open-LatestPlayVideo $logDir $videoName }
         } elseif ($script:easyWalk) {
-            $folder = Join-Path (Get-Location) ($logDir -replace "/", "\")
-            $bcPath = Join-Path $folder "bc_trot.pt"
-            $daggerPath = Join-Path $folder "dagger_trot.pt"
-            $gailPath = Join-Path $folder "valuedice_trot.pt"
-            if (-not (Test-Path $gailPath)) { $gailPath = Join-Path $folder "gail_trot.pt" }
+            $bcPath = Get-ImitationWeightPath "bc_trot.pt"
+            $daggerPath = Get-ImitationWeightPath "dagger_trot.pt"
+            $gailPath = Get-ImitationWeightPath "valuedice_trot.pt"
+            if (-not (Test-Path $gailPath)) { $gailPath = Get-ImitationWeightPath "gail_trot.pt" }
             Write-Host "   1  PPO の最新重みを再生（iteration $script:activeIter）"
             Write-Host "   2  模倣の dagger / bc / valuedice 重みを再生"
             Write-Host "   3  箱運びの途中経過を並べた比較動画（追加学習なし）"

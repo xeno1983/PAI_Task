@@ -119,6 +119,11 @@ def retreat_choice(
     return current, 0, 0
 
 
+# BC / DAgger / ValueDICE checkpoints live under this subfolder of the walk RL log dir
+# so they are not confused with ``ppo_*.pt`` in the same tree.
+IMITATION_SUBDIR = "imitation"
+
+
 def stage_log_dir(
     stage: str,
     catch_level: str = "static",
@@ -131,7 +136,7 @@ def stage_log_dir(
     """Folder used by the launcher for this stage and learning algorithm.
 
     ``easy`` only applies to walk: flat ground, no arm wander / pushes, separate folder
-    so a hard run is not overwritten.
+    so a hard run is not overwritten. Imitation weights use ``imitation_log_dir`` instead.
     """
     if arm != "z1":
         raise ValueError(f"the arm is z1, got {arm}.")
@@ -154,6 +159,88 @@ def stage_log_dir(
         raise ValueError(f"unknown curriculum stage {stage}")
     base = Path(root) if root is not None else Path()
     return base / relative
+
+
+def imitation_log_dir(
+    algo: str = "ppo",
+    *,
+    easy: bool = True,
+    root: Path | None = None,
+) -> Path:
+    """``logs/<algo>_curriculum_walk_easy/imitation`` (or hard-walk sibling)."""
+    return stage_log_dir("walk", algo=algo, easy=easy, root=root) / IMITATION_SUBDIR
+
+
+def nest_imitation_log_dir(log_dir: Path | str) -> Path:
+    """Map an RL walk log folder to its ``imitation/`` subfolder.
+
+    Paths that already end with ``imitation`` (or are unrelated custom dirs) are unchanged.
+    When nesting, any legacy flat ``bc_trot.pt`` / ``dagger_trot.pt`` / … next to ``ppo_*.pt``
+    are moved into ``imitation/`` once (so old runs are not left looking like RL weights).
+    """
+    path = Path(log_dir)
+    if path.name == IMITATION_SUBDIR:
+        return path
+    if "curriculum_walk" in path.name:
+        imit = path / IMITATION_SUBDIR
+        migrate_legacy_imitation_weights(path, imit)
+        return imit
+    return path
+
+
+_LEGACY_IMITATION_NAMES = (
+    "bc_trot.pt",
+    "dagger_trot.pt",
+    "valuedice_trot.pt",
+    "gail_trot.pt",
+)
+
+
+def migrate_legacy_imitation_weights(rl_dir: Path, imit_dir: Path | None = None) -> list[Path]:
+    """Move flat imitation checkpoints from an RL walk folder into ``imitation/``."""
+    rl_dir = Path(rl_dir)
+    dest = Path(imit_dir) if imit_dir is not None else rl_dir / IMITATION_SUBDIR
+    moved: list[Path] = []
+    if not rl_dir.is_dir():
+        return moved
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in _LEGACY_IMITATION_NAMES:
+        src = rl_dir / name
+        dst = dest / name
+        if src.is_file() and not dst.is_file():
+            src.replace(dst)
+            moved.append(dst)
+            print(f"模倣重みを移動: {src} → {dst}", flush=True)
+    return moved
+
+
+def imitation_weight_dirs(rl_log_dir: Path | str) -> list[Path]:
+    """Folders to search for ``bc_trot.pt`` / ``dagger_trot.pt`` / ``valuedice_trot.pt``.
+
+    Order: ``imitation/`` under the RL dir, legacy flat RL dir, then the easy-walk
+    sibling's ``imitation/`` and flat root (so hard walk can warm-start from easy BC).
+    """
+    rl = Path(rl_log_dir)
+    if rl.name == IMITATION_SUBDIR:
+        rl = rl.parent
+    ordered: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(folder: Path) -> None:
+        key = folder.resolve() if folder.exists() else folder
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(folder)
+
+    add(rl / IMITATION_SUBDIR)
+    add(rl)
+    name = rl.name
+    if name.endswith("curriculum_walk") and not name.endswith("curriculum_walk_easy"):
+        easy = rl.parent / f"{name}_easy"
+        add(easy / IMITATION_SUBDIR)
+        add(easy)
+    return ordered
 
 
 def locomotion_action_mask(act_dim: int, device: torch.device | None = None) -> torch.Tensor:

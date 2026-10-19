@@ -208,17 +208,24 @@ def _resolve_resume_path(resume: str | None, log_dir: Path, output: Path) -> Pat
 
 def _resolve_init_from(init_from: str | None, log_dir: Path) -> Path | None:
     """Resolve ``--init-from`` to a policy checkpoint (typically ``bc_trot.pt``)."""
+    from pick_and_carry.curriculum import imitation_weight_dirs
+
     if not init_from:
         return None
     if init_from in ("latest", "bc", "bc_trot"):
-        path = log_dir / "bc_trot.pt"
-        if not path.is_file():
-            raise SystemExit(f"--init-from latest ですが BC 重みがありません: {path}")
-        return path
+        for folder in imitation_weight_dirs(log_dir):
+            path = folder / "bc_trot.pt"
+            if path.is_file():
+                return path
+        raise SystemExit(f"--init-from latest ですが BC 重みがありません: {log_dir}")
     path = Path(init_from)
-    if not path.is_file():
-        raise SystemExit(f"--init-from のファイルがありません: {path}")
-    return path
+    if path.is_file():
+        return path
+    for folder in imitation_weight_dirs(log_dir):
+        alt = folder / init_from
+        if alt.is_file():
+            return alt
+    raise SystemExit(f"--init-from のファイルがありません: {path}")
 
 
 def _valuedice_iteration(blob: dict) -> int:

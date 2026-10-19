@@ -1,6 +1,6 @@
 """Behavioral cloning of a diagonal-trot teacher, then save a PPO-compatible checkpoint.
 
-Typical use (easy walk folder):
+Typical use (writes under ``logs/<algo>_curriculum_walk_easy/imitation/``):
 
     python -m pick_and_carry.train_bc --easy-walk --seconds 90 --epochs 3000
 
@@ -16,8 +16,7 @@ stand / sit / jump / forward / backward / turn_left / turn_right / stop.
 
 Then warm-start PPO:
 
-    python -m pick_and_carry.train_ppo --curriculum walk --easy-walk --init-from \\
-        logs/ppo_curriculum_walk_easy/bc_trot.pt --iterations 1000
+    python -m pick_and_carry.train_ppo --curriculum walk --easy-walk --init-from bc --iterations 1000
 """
 
 from __future__ import annotations
@@ -33,7 +32,11 @@ from pick_and_carry.algorithms import normalize_algo
 from pick_and_carry.checkpoints import save_checkpoint, torch_load
 from pick_and_carry.config import ACTION_LAYOUT, OBS_LAYOUT, layout_slices
 from pick_and_carry.cpg import command_is_moving
-from pick_and_carry.curriculum import locomotion_action_mask, stage_log_dir
+from pick_and_carry.curriculum import (
+    imitation_log_dir,
+    locomotion_action_mask,
+    nest_imitation_log_dir,
+)
 from pick_and_carry.console import format_metric
 from pick_and_carry.mlflow_log import LocalTracker
 from pick_and_carry.train_ppo import initial_action_std, make_config
@@ -112,7 +115,10 @@ def _build_walk_args(bc_args):
     algo = normalize_algo(bc_args.algo)
     log_dir = bc_args.log_dir
     if log_dir is None:
-        log_dir = stage_log_dir("walk", algo=algo, easy=easy)
+        log_dir = imitation_log_dir(algo=algo, easy=easy)
+    else:
+        # Launcher may pass the RL walk folder; nest under imitation/.
+        log_dir = nest_imitation_log_dir(log_dir)
     ns = argparse.Namespace(
         num_envs=bc_args.num_envs,
         backend=bc_args.backend,

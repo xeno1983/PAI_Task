@@ -182,7 +182,7 @@ def parse_args():
         default=None,
         help="Warm-start actor/critic and start PPO at iteration 0. "
         "File path, or alias: bc / dagger / valuedice / gail / latest. "
-        "For hard walk, aliases also search the sibling *_walk_easy folder. "
+        "Aliases search <log-dir>/imitation/ (and easy-walk sibling). "
         "Ignored when --resume finds a checkpoint in --log-dir.",
     )
     parser.add_argument(
@@ -390,24 +390,14 @@ def resume_agent(args, env, cfg, agent, optimizer) -> tuple[int, str | None]:
     return start_iteration, str(ckpt_path)
 
 
-def _init_search_dirs(log_dir: Path) -> list[Path]:
-    """Folders to look in for imitation warm-start weights.
-
-    Hard walk (``…_curriculum_walk``) also checks the easy sibling so a BC/DAgger
-    trained under ``*_walk_easy`` can seed production walk without copying files.
-    """
-    log_dir = Path(log_dir)
-    dirs = [log_dir]
-    name = log_dir.name
-    if name.endswith("curriculum_walk") and not name.endswith("curriculum_walk_easy"):
-        easy = log_dir.parent / f"{name}_easy"
-        if easy.is_dir() and easy.resolve() != log_dir.resolve():
-            dirs.append(easy)
-    return dirs
-
-
 def resolve_init_from(init_from: str | Path | None, log_dir: Path) -> Path | None:
-    """Resolve ``--init-from`` path or alias (``bc``, ``dagger``, ``latest``, …)."""
+    """Resolve ``--init-from`` path or alias (``bc``, ``dagger``, ``latest``, …).
+
+    Aliases search ``<log-dir>/imitation/`` first, then the legacy flat folder, then
+    the easy-walk sibling (so hard walk can warm-start from easy BC/DAgger).
+    """
+    from pick_and_carry.curriculum import imitation_weight_dirs
+
     if init_from is None:
         return None
     text = str(init_from).strip()
@@ -426,21 +416,18 @@ def resolve_init_from(init_from: str | Path | None, log_dir: Path) -> Path | Non
     }
     key = text.lower().replace("-", "_")
     names = aliases.get(key)
+    search = imitation_weight_dirs(log_dir)
     if names is not None:
-        for folder in _init_search_dirs(log_dir):
+        for folder in search:
             for name in names:
                 path = folder / name
                 if path.is_file():
                     return path
-        searched = ", ".join(str(d) for d in _init_search_dirs(log_dir))
+        searched = ", ".join(str(d) for d in search)
         raise SystemExit(f"--init-from {text} が見つかりません（探した場所: {searched}）")
     path = Path(text)
     if not path.is_file():
-        # Relative to log_dir (e.g. bc_trot.pt typed without a folder).
-        alt = Path(log_dir) / text
-        if alt.is_file():
-            return alt
-        for folder in _init_search_dirs(log_dir):
+        for folder in search:
             alt = folder / text
             if alt.is_file():
                 return alt
