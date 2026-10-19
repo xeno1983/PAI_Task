@@ -185,6 +185,25 @@ class PpoInitFromTests(unittest.TestCase):
         finally:
             os.chdir(prev)
 
+    def test_bc_imitation_reward_penalizes_drift_from_teacher(self):
+        from pick_and_carry.config import NUM_ACTIONS
+        from pick_and_carry.train_ppo import bc_imitation_reward, freeze_actor_as_bc_teacher, resolve_bc_imit_coef
+
+        agent = ActorCritic(81, NUM_ACTIONS, hidden=(32, 32))
+        teacher = freeze_actor_as_bc_teacher(agent.actor)
+        obs = torch.zeros(4, 81)
+        match = teacher.mean_action(obs)
+        drifted = match + 1.0
+        close = bc_imitation_reward(teacher, obs, match, None, 0.1)
+        far = bc_imitation_reward(teacher, obs, drifted, None, 0.1)
+        self.assertTrue(torch.allclose(close, torch.zeros_like(close), atol=1e-5))
+        self.assertTrue((far < close).all())
+        args = type("A", (), {"bc_imit_coef": None})()
+        self.assertEqual(resolve_bc_imit_coef(args, warmed_from_imitation=True), 0.1)
+        self.assertEqual(resolve_bc_imit_coef(args, warmed_from_imitation=False), 0.0)
+        args.bc_imit_coef = 0.0
+        self.assertEqual(resolve_bc_imit_coef(args, warmed_from_imitation=True), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

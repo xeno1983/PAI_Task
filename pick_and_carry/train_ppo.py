@@ -8,6 +8,7 @@ placements bootstrap with zero.
 from __future__ import annotations
 
 import argparse
+import copy
 import time
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from pick_and_carry.agents import ActorCritic, compute_gae, ppo_update
+from pick_and_carry.agents import ActorCritic, GaussianActor, compute_gae, ppo_update
 from pick_and_carry.algorithms import (
     ALGORITHMS,
     ALGO_LABELS,
@@ -195,6 +196,13 @@ def parse_args():
         "--no-auto-init-from",
         action="store_true",
         help="Do not auto-load dagger/bc/valuedice/gail weights when --easy-walk and no --init-from.",
+    )
+    parser.add_argument(
+        "--bc-imit-coef",
+        type=float,
+        default=None,
+        help="Add −coef·MSE(a, a_BC(s)) to the env reward (masked dims ignored). "
+        "Default: 0.1 after --init-from / easy-walk auto warm-start, else 0. Pass 0 to disable.",
     )
     parser.add_argument("--play", action="store_true", help="Run the loaded policy and skip learning.")
     parser.add_argument("--seconds", type=float, default=20.0, help="Length of a --play recording, in simulation seconds.")
@@ -492,6 +500,49 @@ def load_init_weights(
     return str(ckpt)
 
 
+def freeze_actor_as_bc_teacher(actor: GaussianActor) -> GaussianActor:
+    """Frozen copy of the warm-start actor; only ``mean_action`` is used for imitation reward."""
+    teacher = copy.deepcopy(actor)
+    teacher.eval()
+    for param in teacher.parameters():
+        param.requires_grad_(False)
+    return teacher
+
+
+def bc_imitation_reward(
+    teacher: GaussianActor,
+    obs: torch.Tensor,
+    action: torch.Tensor,
+    action_mask: torch.Tensor | None,
+    coef: float,
+) -> torch.Tensor:
+    """−coef · mean squared error vs frozen BC mean (masked dims excluded from the mean)."""
+    if coef <= 0.0:
+        return torch.zeros(action.shape[0], device=action.device, dtype=action.dtype)
+    with torch.no_grad():
+        target = teacher.mean_action(obs)
+    diff = action - target
+    if action_mask is not None:
+        mask = action_mask.to(dtype=diff.dtype, device=diff.device)
+        if mask.ndim == 1:
+            mask = mask.unsqueeze(0)
+        mask = mask.expand_as(diff)
+        diff = diff * mask
+        denom = mask.sum(dim=-1).clamp(min=1.0)
+        mse = diff.square().sum(dim=-1) / denom
+    else:
+        mse = diff.square().mean(dim=-1)
+    return (-float(coef)) * mse
+
+
+def resolve_bc_imit_coef(args, *, warmed_from_imitation: bool) -> float:
+    """Explicit ``--bc-imit-coef`` wins; else 0.1 after imitation warm-start, else 0."""
+    explicit = getattr(args, "bc_imit_coef", None)
+    if explicit is not None:
+        return float(explicit)
+    return 0.1 if warmed_from_imitation else 0.0
+
+
 _live_window_ready = False
 
 
@@ -586,7 +637,20 @@ def play_policy(args, cfg, env, agent, obs) -> None:
             bridge.close()
 
 
-def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration: int, tracker: LocalTracker) -> None:
+def run_training(
+    args,
+    cfg,
+    env,
+    agent,
+    optimizer,
+    writer,
+    obs,
+    start_iteration: int,
+    tracker: LocalTracker,
+    *,
+    bc_teacher: GaussianActor | None = None,
+    bc_imit_coef: float = 0.0,
+) -> None:
     if start_iteration == 0:
         first = args.log_dir / "ppo_000000.pt"
         save_checkpoint(
@@ -602,6 +666,8 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         )
         tracker.log_checkpoint(first)
     last_iteration = start_iteration + args.iterations
+    if bc_teacher is not None and bc_imit_coef > 0.0:
+        print(f"BC imitation reward coef={bc_imit_coef:.3f} (frozen warm-start mean)", flush=True)
     print(
         f"学習 {start_iteration}/{last_iteration} から開始します。1回終わるたびに残り時間を出します。",
         flush=True,
@@ -622,6 +688,7 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         grip_sum = 0.0
         success_sum = 0.0
         success_count = 0
+        bc_imit_sum = 0.0
         if cfg.curriculum in (*LOCOMOTION_STAGES, "haul"):
             progress_key = "walk_score"
         elif cfg.curriculum in ("catch", "reach"):
@@ -633,6 +700,16 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
             with torch.no_grad():
                 action, log_prob, value = agent.act(obs)
                 next_obs, reward, done, info = env.step(action)
+                if bc_teacher is not None and bc_imit_coef > 0.0:
+                    imit = bc_imitation_reward(
+                        bc_teacher,
+                        obs,
+                        action,
+                        agent._mask_on(obs),
+                        bc_imit_coef,
+                    )
+                    reward = reward + imit
+                    bc_imit_sum += float(imit.mean())
                 if algo == "grpo":
                     # Critic-free: no value bootstrap into the reward or the return.
                     bootstrap = torch.zeros_like(reward)
@@ -739,6 +816,8 @@ def run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration:
         mean_reward = float(rewards.mean())
         writer.add_scalar("rollout/mean_reward", mean_reward, iteration)
         writer.add_scalar("rollout/fps", fps, iteration)
+        if bc_teacher is not None and bc_imit_coef > 0.0:
+            writer.add_scalar("rollout/bc_imit", bc_imit_sum / args.num_steps, iteration)
         for key, value in metrics.items():
             writer.add_scalar(f"train/{key}", value, iteration)
         if "episode_return" in env.extras:
@@ -901,6 +980,8 @@ def main() -> None:
     start_iteration, resumed_from = resume_agent(args, env, cfg, agent, optimizer)
     init_spec = getattr(args, "init_from", None)
     init_from = None
+    warmed_from_imitation = False
+    bc_teacher = None
     if resumed_from is None:
         # Auto-pick imitation warm-start in the easy-walk folder when no PPO checkpoint exists.
         # Prefer DAgger / BC for walk (env PPO), then ValueDICE / legacy GAIL.
@@ -921,8 +1002,12 @@ def main() -> None:
                 reset_log_std=init_std,
             )
             start_iteration = 0
+            warmed_from_imitation = True
     elif init_spec is not None:
         print(f"--init-from {init_spec} ignored because --resume loaded {resumed_from}", flush=True)
+    bc_imit_coef = resolve_bc_imit_coef(args, warmed_from_imitation=warmed_from_imitation)
+    if warmed_from_imitation and bc_imit_coef > 0.0:
+        bc_teacher = freeze_actor_as_bc_teacher(agent.actor)
     gpu = ""
     if device.type == "cuda" and torch.cuda.is_available():
         free, total = torch.cuda.mem_get_info(device)
@@ -964,6 +1049,8 @@ def main() -> None:
             "wrist_camera": cfg.wrist_camera,
             "curriculum": cfg.curriculum,
             "catch_level": cfg.catch_level,
+            "bc_imit_coef": bc_imit_coef,
+            "warmed_from_imitation": warmed_from_imitation,
         }
         write_run(args.log_dir / "run.json", info)
         tracker.start(args.log_dir, info)
@@ -971,7 +1058,19 @@ def main() -> None:
         if args.play:
             play_policy(args, cfg, env, agent, obs)
         else:
-            run_training(args, cfg, env, agent, optimizer, writer, obs, start_iteration, tracker)
+            run_training(
+                args,
+                cfg,
+                env,
+                agent,
+                optimizer,
+                writer,
+                obs,
+                start_iteration,
+                tracker,
+                bc_teacher=bc_teacher,
+                bc_imit_coef=bc_imit_coef,
+            )
     finally:
         tracker.close()
     writer.close()

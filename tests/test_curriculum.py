@@ -222,8 +222,8 @@ class RewardTests(unittest.TestCase):
         self.assertGreater(held.item(), jumped.item())
         self.assertGreater(jumped_terms["jerk"].item(), held_terms["jerk"].item())
 
-    def test_penalties_cannot_push_a_step_below_zero_before_the_fall_cost(self):
-        # Move command + huge penalties: base terms clamp to 0, then standstill (post-clamp) applies.
+    def test_penalties_remain_after_positive_clamp(self):
+        # Huge collision/torque: positives clamp at 0, but penalties + standstill still apply.
         reward, terms, fallen = _walk_reward(
             command=torch.tensor([[0.5, 0.0, 0.0]]),
             leg_torque=torch.full((1, 12), 20.0),
@@ -231,12 +231,53 @@ class RewardTests(unittest.TestCase):
         )
         self.assertFalse(bool(fallen))
         self.assertEqual(terms["termination"].item(), 0.0)
+        self.assertLess(terms["collision"].item(), 0.0)
         self.assertLess(reward.item(), 0.0)
-        self.assertAlmostEqual(
-            reward.item(),
-            float(terms["walk_progress"] + terms["gait"] + terms["standstill"]),
-            places=5,
+        # Positives are clamped ≥ 0 then penalties + shaping always apply.
+        positive = float(
+            terms["tracking_lin_vel"]
+            + terms["tracking_ang_vel"]
+            + terms["orientation"]
+            + terms["feet_air_time"]
         )
+        penalties = float(
+            terms["lin_vel_z"]
+            + terms["ang_vel_xy"]
+            + terms["base_height"]
+            + terms["torques"]
+            + terms["dof_acc"]
+            + terms["action_rate"]
+            + terms["collision"]
+        )
+        shaping = float(
+            terms["walk_progress"]
+            + terms["gait"]
+            + terms["standstill"]
+            + terms["standstill_vel"]
+        )
+        self.assertAlmostEqual(reward.item(), max(positive, 0.0) + penalties + shaping, places=4)
+
+    def test_action_rate_does_not_erase_tracking_via_clamp(self):
+        # Old joint-sum clamp wiped stepping rewards; positives now survive separately.
+        command = torch.tensor([[0.5, 0.0, 0.0]])
+        walking, walk_terms, _ = _walk_reward(
+            command=command,
+            base_lin_vel=torch.tensor([[0.5, 0.0, 0.0]]),
+            leg_actions=torch.ones(1, 12),
+            prev_leg_actions=torch.zeros(1, 12),
+            foot_contact=torch.tensor([[1.0, 0.0, 0.0, 1.0]]),
+        )
+        standing, stand_terms, _ = _walk_reward(
+            command=command,
+            base_lin_vel=torch.zeros(1, 3),
+            leg_actions=torch.zeros(1, 12),
+            prev_leg_actions=torch.zeros(1, 12),
+            foot_contact=torch.ones(1, 4),
+        )
+        self.assertGreater(walking.item(), standing.item())
+        self.assertGreater(walk_terms["tracking_lin_vel"].item(), 0.0)
+        self.assertLess(walk_terms["action_rate"].item(), 0.0)
+        self.assertLess(stand_terms["standstill_vel"].item(), walk_terms["standstill_vel"].item())
 
     def test_touching_the_ground_with_the_body_ends_the_episode(self):
         reward, terms, fallen = _walk_reward(body_contact=torch.tensor([True]))

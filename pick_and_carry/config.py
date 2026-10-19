@@ -143,11 +143,13 @@ class LocomotionScales:
     """Walking reward weights. Defaults follow legged_gym, with extra walk incentives.
 
     Every term is multiplied by ``dt``. Negative weights are penalties.
-    ``walk_score`` / ``gait`` push against the stand-still local optimum that pure
-    tracking + action-rate penalties otherwise favor after a BC warm-start.
+    When ``only_positive_rewards`` is set, *positive-scale* base terms are summed and
+    clamped at zero; *penalty* terms always apply (so stepping costs cannot erase
+    tracking by dragging the whole sum through clamp). walk/gait/standstill/termination
+    are added after that.
     """
 
-    tracking_lin_vel: float = 1.5
+    tracking_lin_vel: float = 2.5
     tracking_ang_vel: float = 0.5
     tracking_sigma: float = 0.25
     lin_vel_z: float = -2.0
@@ -165,16 +167,18 @@ class LocomotionScales:
     feet_air_time_target: float = 0.5
     # Per thigh or calf touching something.
     collision: float = -1.0
-    # Charged once on a fall, after the positive terms are clipped at zero.
+    # Charged once on a fall, after base shaping.
     termination: float = -5.0
     only_positive_rewards: bool = True
     # Fraction of commanded motion achieved (0 when standing on a move command).
-    walk_score: float = 0.8
-    # Diagonal / anti-phase contact while a linear command is active.
-    # Applied *after* only_positive clamp so gait cannot be wiped by penalties.
+    walk_score: float = 1.5
+    # Diagonal / anti-phase contact while a linear command is active (post base clamp).
     gait: float = 1.5
-    # Extra cost for (1 - walk_score) when the command asks to move (also post-clamp).
-    standstill: float = -1.5
+    # Soft cost for (1 - walk_score) when cmd asks to move (post base clamp).
+    standstill: float = -2.0
+    # Flat cost when cmd asks to move but body speed is below the threshold (post base clamp).
+    standstill_vel: float = -1.0
+    standstill_vel_threshold: float = 0.08
 
 
 @dataclass

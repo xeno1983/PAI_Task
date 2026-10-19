@@ -473,10 +473,11 @@ def locomotion_reward(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]:
     """Velocity tracking with the legged_gym penalties plus walk/gait incentives.
 
-    The weights are in ``LocomotionScales``. Base terms are summed and clipped at zero
-    (``only_positive_rewards``), then walk/gait/standstill and the fall penalty are added
-    *after* that clamp so they cannot be erased by torque/action-rate costs. Only the legs
-    count in the penalties. ``tracking``, ``steady``, and ``jerk`` are logs only.
+    The weights are in ``LocomotionScales``. Positive-scale base terms are summed and
+    optionally clamped at zero (``only_positive_rewards``); penalty-scale terms always
+    apply so action-rate / height costs cannot erase tracking by dragging a joint sum
+    through clamp. walk/gait/standstill/standstill_vel/termination are added after that.
+    Only the legs count in the penalties. ``tracking``, ``steady``, and ``jerk`` are logs only.
     """
     scales = scales or LocomotionScales()
     fallen = fallen_mask(projected_gravity, base_height, max_tilt_deg, min_base_height) | body_contact
@@ -495,28 +496,45 @@ def locomotion_reward(
     trot = torch.maximum(hard_trot, soft_trot)
     moving = (command[:, :2].norm(dim=-1) > 0.1).to(dtype=trot.dtype)
     gait = trot * moving
-    terms = {
+    body_speed = base_lin_vel[:, :2].norm(dim=-1)
+    nearly_stopped = (body_speed < scales.standstill_vel_threshold).to(dtype=trot.dtype)
+    # Positive-scale incentives (may still be negative when feet_air_time undershoots).
+    pos_terms = {
         "tracking_lin_vel": scales.tracking_lin_vel * torch.exp(-lin_error / sigma) * dt,
         "tracking_ang_vel": scales.tracking_ang_vel * torch.exp(-ang_error / sigma) * dt,
+        "orientation": scales.orientation * projected_gravity[:, :2].square().sum(dim=-1) * dt,
+        "feet_air_time": scales.feet_air_time * air_time_reward * dt,
+    }
+    # Penalty-scale costs: never folded into the positive clamp.
+    neg_terms = {
         "lin_vel_z": scales.lin_vel_z * base_lin_vel[:, 2].square() * dt,
         "ang_vel_xy": scales.ang_vel_xy * base_ang_vel[:, :2].square().sum(dim=-1) * dt,
-        "orientation": scales.orientation * projected_gravity[:, :2].square().sum(dim=-1) * dt,
         "base_height": scales.base_height * (base_height - scales.base_height_target).square() * dt,
         "torques": scales.torques * leg_torque.square().sum(dim=-1) * dt,
         "dof_acc": scales.dof_acc * ((prev_leg_vel - leg_vel) / dt).square().sum(dim=-1) * dt,
         "action_rate": scales.action_rate * (prev_leg_actions - leg_actions).square().sum(dim=-1) * dt,
-        "feet_air_time": scales.feet_air_time * air_time_reward * dt,
         "collision": scales.collision * collisions * dt,
     }
-    total = torch.stack(tuple(terms.values()), dim=0).sum(dim=0)
+    terms = {**pos_terms, **neg_terms}
+    positive = torch.stack(tuple(pos_terms.values()), dim=0).sum(dim=0)
+    penalties = torch.stack(tuple(neg_terms.values()), dim=0).sum(dim=0)
     if scales.only_positive_rewards:
-        total = total.clamp(min=0.0)
-    # Post-clamp locomotion shaping: always visible to the policy.
+        positive = positive.clamp(min=0.0)
+    total = positive + penalties
+    # Post-base locomotion shaping: always visible to the policy.
     terms["walk_progress"] = scales.walk_score * ws * dt
     terms["gait"] = scales.gait * gait * dt
     terms["standstill"] = scales.standstill * (1.0 - ws) * moving * dt
+    terms["standstill_vel"] = scales.standstill_vel * nearly_stopped * moving * dt
     terms["termination"] = scales.termination * fallen.to(dtype=total.dtype)
-    reward = total + terms["walk_progress"] + terms["gait"] + terms["standstill"] + terms["termination"]
+    reward = (
+        total
+        + terms["walk_progress"]
+        + terms["gait"]
+        + terms["standstill"]
+        + terms["standstill_vel"]
+        + terms["termination"]
+    )
 
     error = lin_error + ang_error
     terms["tracking"] = torch.exp(-error / sigma).detach()
