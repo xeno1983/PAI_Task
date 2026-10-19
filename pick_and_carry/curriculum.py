@@ -28,7 +28,10 @@ ARM_STAGES = ("reach", "haul", "carry", "catch")
 
 WALK_COMMAND_SECONDS = 4.0
 # Share of walk commands that ask the robot to stand still.
-STAND_STILL_SHARE = 0.20
+# Enough still commands to learn stopping, but mostly moving so BC→PPO does not
+# collapse into a stand-still local optimum.
+STAND_STILL_SHARE = 0.10
+
 CATCH_HOLD_SECONDS = 1.0
 BALL_RADIUS = 0.035
 PROGRESS_CAP = 0.05
@@ -468,21 +471,34 @@ def locomotion_reward(
     dt: float,
     scales: LocomotionScales | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]:
-    """Velocity tracking with the legged_gym penalties.
+    """Velocity tracking with the legged_gym penalties plus walk/gait incentives.
 
-    The weights are in ``LocomotionScales``. The positive terms and penalties are summed and
+    The weights are in ``LocomotionScales``. Positive terms and penalties are summed and
     clipped at zero (``only_positive_rewards``), then the fall penalty is added. Only the
     legs count: the arm is held or driven by the stage, so its action never enters a penalty.
-    ``tracking``, ``walk_score``, ``gait_score``, ``steady``, and ``jerk`` are logs and are not added to the reward.
+    ``tracking``, ``steady``, and ``jerk`` are logs only; ``walk_score`` / ``gait_score`` are
+    logged and also enter the reward via ``scales.walk_score`` / ``scales.gait``.
     """
     scales = scales or LocomotionScales()
     fallen = fallen_mask(projected_gravity, base_height, max_tilt_deg, min_base_height) | body_contact
     sigma = scales.tracking_sigma
     lin_error = (command[:, :2] - base_lin_vel[:, :2]).square().sum(dim=-1)
     ang_error = (command[:, 2] - base_ang_vel[:, 2]).square()
+    ws = walk_score(command, base_lin_vel, base_ang_vel)
+    contact = foot_contact.clamp(0.0, 1.0)
+    front_left = contact[:, 0] * contact[:, 3]
+    front_right = contact[:, 1] * contact[:, 2]
+    rear_swing = (1.0 - contact[:, 0]) * (1.0 - contact[:, 3])
+    front_swing = (1.0 - contact[:, 1]) * (1.0 - contact[:, 2])
+    trot = front_left * front_swing + front_right * rear_swing
+    moving = (command[:, :2].norm(dim=-1) > 0.1).to(dtype=trot.dtype)
+    gait = trot * moving
     terms = {
         "tracking_lin_vel": scales.tracking_lin_vel * torch.exp(-lin_error / sigma) * dt,
         "tracking_ang_vel": scales.tracking_ang_vel * torch.exp(-ang_error / sigma) * dt,
+        "walk_progress": scales.walk_score * ws * dt,
+        "gait": scales.gait * gait * dt,
+        "standstill": scales.standstill * (1.0 - ws) * moving * dt,
         "lin_vel_z": scales.lin_vel_z * base_lin_vel[:, 2].square() * dt,
         "ang_vel_xy": scales.ang_vel_xy * base_ang_vel[:, :2].square().sum(dim=-1) * dt,
         "orientation": scales.orientation * projected_gravity[:, :2].square().sum(dim=-1) * dt,
@@ -501,18 +517,11 @@ def locomotion_reward(
 
     error = lin_error + ang_error
     terms["tracking"] = torch.exp(-error / sigma).detach()
-    terms["walk_score"] = walk_score(command, base_lin_vel, base_ang_vel)
+    terms["walk_score"] = ws
     level = (-projected_gravity[:, 2]).clamp(0.0, 1.0)
     height = torch.exp(-(base_height - scales.base_height_target).square() / 0.008)
     terms["steady"] = (height * level).detach()
-    contact = foot_contact.clamp(0.0, 1.0)
-    front_left = contact[:, 0] * contact[:, 3]
-    front_right = contact[:, 1] * contact[:, 2]
-    rear_swing = (1.0 - contact[:, 0]) * (1.0 - contact[:, 3])
-    front_swing = (1.0 - contact[:, 1]) * (1.0 - contact[:, 2])
-    trot = front_left * front_swing + front_right * rear_swing
-    moving = (command[:, :2].norm(dim=-1) > 0.1).to(dtype=trot.dtype)
-    terms["gait_score"] = (trot * moving).detach()
+    terms["gait_score"] = gait.detach()
     terms["jerk"] = (leg_actions - prev_leg_actions).abs().mean(dim=-1).detach()
     return reward, terms, fallen
 

@@ -140,23 +140,27 @@ class RewardScales:
 
 @dataclass
 class LocomotionScales:
-    """Walking reward weights. Defaults follow legged_gym and its Unitree configs.
+    """Walking reward weights. Defaults follow legged_gym, with extra walk incentives.
 
     Every term is multiplied by ``dt``. Negative weights are penalties.
+    ``walk_score`` / ``gait`` push against the stand-still local optimum that pure
+    tracking + action-rate penalties otherwise favor after a BC warm-start.
     """
 
-    tracking_lin_vel: float = 1.0
+    tracking_lin_vel: float = 1.5
     tracking_ang_vel: float = 0.5
     tracking_sigma: float = 0.25
     lin_vel_z: float = -2.0
     ang_vel_xy: float = -0.05
     orientation: float = 0.0
-    base_height: float = -50.0
+    # Softer than classic -50 so small height error does not wipe all progress terms.
+    base_height: float = -20.0
     base_height_target: float = 0.30
     torques: float = -1e-5
     dof_acc: float = -2.5e-7
-    action_rate: float = -0.01
-    feet_air_time: float = 1.0
+    # Milder than -0.01 so CPG motion is not punished into a freeze.
+    action_rate: float = -0.005
+    feet_air_time: float = 1.25
     # Seconds in the air that earn a positive step. legged_gym uses 0.5.
     feet_air_time_target: float = 0.5
     # Per thigh or calf touching something.
@@ -164,6 +168,12 @@ class LocomotionScales:
     # Charged once on a fall, after the positive terms are clipped at zero.
     termination: float = -5.0
     only_positive_rewards: bool = True
+    # Fraction of commanded motion achieved (0 when standing on a move command).
+    walk_score: float = 0.8
+    # Diagonal trot contact pattern while a linear command is active.
+    gait: float = 0.35
+    # Extra cost for (1 - walk_score) when the command asks to move.
+    standstill: float = -1.0
 
 
 @dataclass

@@ -56,9 +56,9 @@ class LayoutTests(unittest.TestCase):
 class CommandTests(unittest.TestCase):
     def test_walk_commands_include_standing_still(self):
         torch.manual_seed(0)
-        command = sample_command(4000, stand_share=0.2)
+        command = sample_command(4000, stand_share=0.1)
         still = (command.abs().sum(dim=-1) == 0).float().mean().item()
-        self.assertAlmostEqual(still, 0.2, delta=0.03)
+        self.assertAlmostEqual(still, 0.1, delta=0.03)
         self.assertEqual(float(sample_command(500).eq(0).all(dim=-1).float().sum()), 0.0)
 
     def test_reach_targets_stay_in_the_box_in_front_of_the_body(self):
@@ -172,6 +172,24 @@ class RewardTests(unittest.TestCase):
             foot_contact=torch.zeros(1, 4))
         self.assertGreater(matched.item(), missed.item())
         self.assertFalse(bool(fallen))
+
+    def test_standing_on_a_move_command_earns_less_than_matching_it(self):
+        command = torch.tensor([[0.5, 0.0, 0.0]])
+        walking, walk_terms, _ = _walk_reward(
+            command=command,
+            base_lin_vel=torch.tensor([[0.5, 0.0, 0.0]]),
+            foot_contact=torch.tensor([[1.0, 0.0, 0.0, 1.0]]),
+        )
+        standing, stand_terms, _ = _walk_reward(
+            command=command,
+            base_lin_vel=torch.zeros(1, 3),
+            foot_contact=torch.ones(1, 4),
+        )
+        self.assertGreater(walking.item(), standing.item())
+        self.assertGreater(walk_terms["walk_score"].item(), stand_terms["walk_score"].item())
+        self.assertGreater(walk_terms["walk_progress"].item(), stand_terms["walk_progress"].item())
+        # standstill scale is negative: standing (ws≈0) is charged more than matching (ws≈1).
+        self.assertLess(stand_terms["standstill"].item(), walk_terms["standstill"].item())
 
     def test_a_diagonal_step_is_logged_but_a_shuffle_is_not(self):
         command = torch.tensor([[0.5, 0.0, 0.0]])

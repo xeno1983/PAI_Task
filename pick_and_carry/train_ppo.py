@@ -104,16 +104,22 @@ def parse_args():
     parser.add_argument("--num-steps", type=int, default=128)
     # Defaults follow rsl_rl / legged_gym: lr starts at 1e-3 and follows the KL target.
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--desired-kl", type=float, default=0.01, help="Adaptive learning rate target. 0 keeps --lr fixed.")
+    parser.add_argument(
+        "--desired-kl",
+        type=float,
+        default=0.015,
+        help="Adaptive learning rate target. 0 keeps --lr fixed.",
+    )
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--lam", type=float, default=0.95)
     parser.add_argument("--clip", type=float, default=0.2)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--num-mini-batches", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=0, help="Samples per minibatch. 0 uses batch / --num-mini-batches.")
-    parser.add_argument("--entropy-coef", type=float, default=0.001)
+    # Higher than classic 0.001 so a BC warm-start can keep exploring instead of freezing.
+    parser.add_argument("--entropy-coef", type=float, default=0.008)
     parser.add_argument("--value-coef", type=float, default=1.0)
-    parser.add_argument("--leg-init-std", type=float, default=0.3)
+    parser.add_argument("--leg-init-std", type=float, default=0.4)
     parser.add_argument("--arm-init-std", type=float, default=0.4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
@@ -434,8 +440,19 @@ def resolve_init_from(init_from: str | Path | None, log_dir: Path) -> Path | Non
     return path
 
 
-def load_init_weights(path: Path, env, cfg, agent) -> str | None:
-    """Load actor/critic weights without optimizer or iteration (BC warm-start)."""
+def load_init_weights(
+    path: Path,
+    env,
+    cfg,
+    agent,
+    *,
+    reset_log_std: torch.Tensor | float | None = None,
+) -> str | None:
+    """Load actor/critic weights without optimizer or iteration (BC warm-start).
+
+    ``reset_log_std`` refreshes the exploration noise after load (keeps BC means).
+    Imitation checkpoints often carry a tight ``log_std`` that otherwise freezes PPO.
+    """
     if path is None:
         return None
     ckpt = Path(path)
@@ -451,6 +468,16 @@ def load_init_weights(path: Path, env, cfg, agent) -> str | None:
             f"need arm {cfg.arm} obs {env.num_obs} act {env.num_actions}."
         )
     agent.load_state_dict(blob["model"])
+    if reset_log_std is not None:
+        with torch.no_grad():
+            std = torch.as_tensor(reset_log_std, dtype=torch.float32, device=agent.actor.log_std.device)
+            if std.ndim == 0:
+                std = std.expand_as(agent.actor.log_std)
+            agent.actor.log_std.copy_(std.clamp(min=1e-3).log())
+        print(
+            f"reset actor log_std after warm-start (std mean={float(std.mean()):.3f})",
+            flush=True,
+        )
     if blob.get("dagger_trot"):
         kind = "DAgger"
     elif blob.get("valuedice_trot"):
@@ -886,7 +913,13 @@ def main() -> None:
             init_spec = "latest"
         if init_spec is not None:
             init_from = resolve_init_from(init_spec, Path(args.log_dir))
-            resumed_from = load_init_weights(init_from, env, cfg, agent)
+            resumed_from = load_init_weights(
+                init_from,
+                env,
+                cfg,
+                agent,
+                reset_log_std=init_std,
+            )
             start_iteration = 0
     elif init_spec is not None:
         print(f"--init-from {init_spec} ignored because --resume loaded {resumed_from}", flush=True)
