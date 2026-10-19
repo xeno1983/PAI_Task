@@ -158,9 +158,9 @@ class LocomotionScales:
     base_height_target: float = 0.30
     torques: float = -1e-5
     dof_acc: float = -2.5e-7
-    # Milder than -0.01 so CPG motion is not punished into a freeze.
-    action_rate: float = -0.005
-    feet_air_time: float = 1.25
+    # Milder than -0.01 so CPG stepping is not punished into a freeze/shuffle.
+    action_rate: float = -0.002
+    feet_air_time: float = 1.5
     # Seconds in the air that earn a positive step. legged_gym uses 0.5.
     feet_air_time_target: float = 0.5
     # Per thigh or calf touching something.
@@ -170,10 +170,11 @@ class LocomotionScales:
     only_positive_rewards: bool = True
     # Fraction of commanded motion achieved (0 when standing on a move command).
     walk_score: float = 0.8
-    # Diagonal trot contact pattern while a linear command is active.
-    gait: float = 0.35
-    # Extra cost for (1 - walk_score) when the command asks to move.
-    standstill: float = -1.0
+    # Diagonal / anti-phase contact while a linear command is active.
+    # Applied *after* only_positive clamp so gait cannot be wiped by penalties.
+    gait: float = 1.5
+    # Extra cost for (1 - walk_score) when the command asks to move (also post-clamp).
+    standstill: float = -1.5
 
 
 @dataclass

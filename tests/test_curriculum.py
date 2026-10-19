@@ -223,10 +223,20 @@ class RewardTests(unittest.TestCase):
         self.assertGreater(jumped_terms["jerk"].item(), held_terms["jerk"].item())
 
     def test_penalties_cannot_push_a_step_below_zero_before_the_fall_cost(self):
-        reward, terms, fallen = _walk_reward(leg_torque=torch.full((1, 12), 20.0), collisions=torch.tensor([4.0]))
+        # Move command + huge penalties: base terms clamp to 0, then standstill (post-clamp) applies.
+        reward, terms, fallen = _walk_reward(
+            command=torch.tensor([[0.5, 0.0, 0.0]]),
+            leg_torque=torch.full((1, 12), 20.0),
+            collisions=torch.tensor([4.0]),
+        )
         self.assertFalse(bool(fallen))
-        self.assertEqual(reward.item(), 0.0)
         self.assertEqual(terms["termination"].item(), 0.0)
+        self.assertLess(reward.item(), 0.0)
+        self.assertAlmostEqual(
+            reward.item(),
+            float(terms["walk_progress"] + terms["gait"] + terms["standstill"]),
+            places=5,
+        )
 
     def test_touching_the_ground_with_the_body_ends_the_episode(self):
         reward, terms, fallen = _walk_reward(body_contact=torch.tensor([True]))

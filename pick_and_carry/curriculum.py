@@ -473,11 +473,10 @@ def locomotion_reward(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]:
     """Velocity tracking with the legged_gym penalties plus walk/gait incentives.
 
-    The weights are in ``LocomotionScales``. Positive terms and penalties are summed and
-    clipped at zero (``only_positive_rewards``), then the fall penalty is added. Only the
-    legs count: the arm is held or driven by the stage, so its action never enters a penalty.
-    ``tracking``, ``steady``, and ``jerk`` are logs only; ``walk_score`` / ``gait_score`` are
-    logged and also enter the reward via ``scales.walk_score`` / ``scales.gait``.
+    The weights are in ``LocomotionScales``. Base terms are summed and clipped at zero
+    (``only_positive_rewards``), then walk/gait/standstill and the fall penalty are added
+    *after* that clamp so they cannot be erased by torque/action-rate costs. Only the legs
+    count in the penalties. ``tracking``, ``steady``, and ``jerk`` are logs only.
     """
     scales = scales or LocomotionScales()
     fallen = fallen_mask(projected_gravity, base_height, max_tilt_deg, min_base_height) | body_contact
@@ -486,19 +485,19 @@ def locomotion_reward(
     ang_error = (command[:, 2] - base_ang_vel[:, 2]).square()
     ws = walk_score(command, base_lin_vel, base_ang_vel)
     contact = foot_contact.clamp(0.0, 1.0)
-    front_left = contact[:, 0] * contact[:, 3]
-    front_right = contact[:, 1] * contact[:, 2]
-    rear_swing = (1.0 - contact[:, 0]) * (1.0 - contact[:, 3])
-    front_swing = (1.0 - contact[:, 1]) * (1.0 - contact[:, 2])
-    trot = front_left * front_swing + front_right * rear_swing
+    fl, fr, rl, rr = contact[:, 0], contact[:, 1], contact[:, 2], contact[:, 3]
+    # Hard diagonal trot (FL+RR stance / FR+RL swing and the swap).
+    hard_trot = fl * rr * (1.0 - fr) * (1.0 - rl) + fr * rl * (1.0 - fl) * (1.0 - rr)
+    # Softer anti-phase: diagonals synchronized, left-right opposed (in [0, 1]).
+    coord = (1.0 - (fl - rr).abs()) * (1.0 - (fr - rl).abs())
+    oppose = 0.5 * ((fl - fr).abs() + (rr - rl).abs())
+    soft_trot = (coord * oppose).clamp(0.0, 1.0)
+    trot = torch.maximum(hard_trot, soft_trot)
     moving = (command[:, :2].norm(dim=-1) > 0.1).to(dtype=trot.dtype)
     gait = trot * moving
     terms = {
         "tracking_lin_vel": scales.tracking_lin_vel * torch.exp(-lin_error / sigma) * dt,
         "tracking_ang_vel": scales.tracking_ang_vel * torch.exp(-ang_error / sigma) * dt,
-        "walk_progress": scales.walk_score * ws * dt,
-        "gait": scales.gait * gait * dt,
-        "standstill": scales.standstill * (1.0 - ws) * moving * dt,
         "lin_vel_z": scales.lin_vel_z * base_lin_vel[:, 2].square() * dt,
         "ang_vel_xy": scales.ang_vel_xy * base_ang_vel[:, :2].square().sum(dim=-1) * dt,
         "orientation": scales.orientation * projected_gravity[:, :2].square().sum(dim=-1) * dt,
@@ -512,8 +511,12 @@ def locomotion_reward(
     total = torch.stack(tuple(terms.values()), dim=0).sum(dim=0)
     if scales.only_positive_rewards:
         total = total.clamp(min=0.0)
+    # Post-clamp locomotion shaping: always visible to the policy.
+    terms["walk_progress"] = scales.walk_score * ws * dt
+    terms["gait"] = scales.gait * gait * dt
+    terms["standstill"] = scales.standstill * (1.0 - ws) * moving * dt
     terms["termination"] = scales.termination * fallen.to(dtype=total.dtype)
-    reward = total + terms["termination"]
+    reward = total + terms["walk_progress"] + terms["gait"] + terms["standstill"] + terms["termination"]
 
     error = lin_error + ang_error
     terms["tracking"] = torch.exp(-error / sigma).detach()
