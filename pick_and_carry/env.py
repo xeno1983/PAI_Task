@@ -821,9 +821,9 @@ class PickAndCarryEnv:
             q0 = self.q_ik
         q_ik, err = solve_ik(q0, mount, self.arm_lower, self.arm_upper)
         # Fall back to the previous solution when the solve stays far from the target.
+        # Always use torch.where (no bool().any() host sync) — critical for reach FPS.
         bad = err > 0.08
-        if bool(bad.any()):
-            q_ik = torch.where(bad.unsqueeze(-1), self.q_ik, q_ik)
+        q_ik = torch.where(bad.unsqueeze(-1), self.q_ik, q_ik)
         ee_dist = pairwise_distance(self.ee_pos, world)
         ee_near = ee_dist < self.cfg.grasp_distance
         return q_ik, err, ee_near

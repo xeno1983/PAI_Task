@@ -3,11 +3,13 @@
 FK/IK run in the arm-mount frame (``z1_link00``): the fixed joint
 ``arm_mount_joint`` places this frame at ``(-0.05, 0, 0.08)`` in the Go2 base.
 Only TCP position is solved (orientation free). Genesis-independent torch code.
+
+Uses an analytic position Jacobian (one FK pass per iteration) — the previous
+finite-difference Jacobian needed 12 extra FK calls per iter and dominated
+reach/haul/carry step time.
 """
 
 from __future__ import annotations
-
-import math
 
 import torch
 
@@ -31,32 +33,20 @@ CARRY_POINT_IN_BASE = (0.35, 0.0, 0.48)
 PLACE_HEIGHT_OFFSET = 0.12
 GRASP_HEIGHT_OFFSET = 0.02
 
+_NUM_JOINTS = len(_Z1_JOINTS)
+
 
 def _device_dtype(q: torch.Tensor) -> tuple[torch.device, torch.dtype]:
     return q.device, q.dtype
 
 
-def _eye(n: int, batch: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    eye = torch.eye(4, device=device, dtype=dtype)
-    return eye.unsqueeze(0).expand(batch, 4, 4).clone()
-
-
-def _rot_axis(axis: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
-    """Rodrigues rotation matrices ``(N, 3, 3)`` for unit axis ``(3,)`` and angle ``(N,)``."""
-    n = angle.shape[0]
-    device, dtype = angle.device, angle.dtype
-    x, y, z = axis.tolist()
+def _rot_axis_xyz(x: float, y: float, z: float, angle: torch.Tensor) -> torch.Tensor:
+    """Rodrigues ``(N, 3, 3)`` for fixed unit axis ``(x,y,z)`` and angle ``(N,)``."""
     c = torch.cos(angle)
     s = torch.sin(angle)
     one = torch.ones_like(c)
-    zero = torch.zeros_like(c)
-    # K cross-product matrix pieces.
-    kxx = x * x
-    kyy = y * y
-    kzz = z * z
-    kxy = x * y
-    kxz = x * z
-    kyz = y * z
+    kxx, kyy, kzz = x * x, y * y, z * z
+    kxy, kxz, kyz = x * y, x * z, y * z
     r00 = c + kxx * (one - c)
     r01 = kxy * (one - c) - z * s
     r02 = kxz * (one - c) + y * s
@@ -66,42 +56,69 @@ def _rot_axis(axis: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
     r20 = kxz * (one - c) - y * s
     r21 = kyz * (one - c) + x * s
     r22 = c + kzz * (one - c)
-    rows = (
-        torch.stack((r00, r01, r02), dim=-1),
-        torch.stack((r10, r11, r12), dim=-1),
-        torch.stack((r20, r21, r22), dim=-1),
+    return torch.stack(
+        (
+            torch.stack((r00, r01, r02), dim=-1),
+            torch.stack((r10, r11, r12), dim=-1),
+            torch.stack((r20, r21, r22), dim=-1),
+        ),
+        dim=-2,
     )
-    return torch.stack(rows, dim=-2)
 
 
-def _trans(xyz: tuple[float, float, float], batch: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    t = _eye(4, batch, device, dtype)
-    t[:, 0, 3] = xyz[0]
-    t[:, 1, 3] = xyz[1]
-    t[:, 2, 3] = xyz[2]
-    return t
+def _matmul33(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return torch.matmul(a, b)
+
+
+def _apply_rot_trans(
+    rot: torch.Tensor,
+    pos: torch.Tensor,
+    local_xyz: tuple[float, float, float],
+) -> torch.Tensor:
+    """``pos + rot @ local_xyz`` for batched ``rot (N,3,3)``, ``pos (N,3)``."""
+    ox, oy, oz = local_xyz
+    return pos + ox * rot[:, :, 0] + oy * rot[:, :, 1] + oz * rot[:, :, 2]
 
 
 def forward_kinematics(q: torch.Tensor) -> torch.Tensor:
     """TCP position in the arm-mount frame. ``q`` is ``(N, 6)`` joint angles."""
+    pos, _ = forward_kinematics_and_jacobian(q)
+    return pos
+
+
+def forward_kinematics_and_jacobian(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """TCP position ``(N, 3)`` and analytic position Jacobian ``(N, 3, 6)``.
+
+    Column ``j`` is ``ω_j × (p_tcp - o_j)`` with axis/origin expressed in the mount frame
+    before joint ``j`` rotates.
+    """
     if q.ndim == 1:
         q = q.unsqueeze(0)
     n = q.shape[0]
     device, dtype = _device_dtype(q)
-    t = _eye(4, n, device, dtype)
+    # Accumulated rotation / translation of the current link frame.
+    rot = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(n, 3, 3)
+    pos = torch.zeros((n, 3), device=device, dtype=dtype)
+    axes = []
+    origins = []
     for i, (origin, axis) in enumerate(_Z1_JOINTS):
-        ax = torch.tensor(axis, device=device, dtype=dtype)
-        t = t @ _trans(origin, n, device, dtype)
-        r = _rot_axis(ax, q[:, i])
-        rot = _eye(4, n, device, dtype)
-        rot[:, :3, :3] = r
-        t = t @ rot
-    t = t @ _trans(_TCP_FROM_LINK06, n, device, dtype)
-    return t[:, :3, 3]
+        pos = _apply_rot_trans(rot, pos, origin)
+        ax_x, ax_y, ax_z = axis
+        # Joint axis in mount frame (current link orientation).
+        axis_w = ax_x * rot[:, :, 0] + ax_y * rot[:, :, 1] + ax_z * rot[:, :, 2]
+        axes.append(axis_w)
+        origins.append(pos)
+        r_local = _rot_axis_xyz(ax_x, ax_y, ax_z, q[:, i])
+        rot = _matmul33(rot, r_local)
+    pos = _apply_rot_trans(rot, pos, _TCP_FROM_LINK06)
+    jac = torch.zeros((n, 3, _NUM_JOINTS), device=device, dtype=dtype)
+    for j in range(_NUM_JOINTS):
+        jac[:, :, j] = torch.cross(axes[j], pos - origins[j], dim=-1)
+    return pos, jac
 
 
 def numerical_jacobian(q: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
-    """Position Jacobian ``(N, 3, 6)`` via central differences."""
+    """Position Jacobian ``(N, 3, 6)`` via central differences (tests / reference)."""
     if q.ndim == 1:
         q = q.unsqueeze(0)
     n, dof = q.shape
@@ -119,7 +136,7 @@ def solve_ik(
     lower: torch.Tensor,
     upper: torch.Tensor,
     *,
-    iterations: int = 40,
+    iterations: int = 8,
     damping: float = 0.08,
     tol: float = 0.01,
     step: float = 0.6,
@@ -127,27 +144,30 @@ def solve_ik(
     """Damped least-squares position IK.
 
     Returns ``(q_ik, error_norm)`` with shapes ``(N, 6)`` and ``(N,)``.
+
+    Runs a fixed iteration count (no host sync). Early-exit via ``bool(err < tol)``
+    was removed: it stalled reach/haul/catch training (~10 FPS vs ~2000 for walk).
+    ``tol`` is kept for API compatibility and is unused.
     """
+    _ = tol  # unused: host-side early exit would sync the GPU every step
     if q0.ndim == 1:
         q0 = q0.unsqueeze(0)
     if target_xyz.ndim == 1:
         target_xyz = target_xyz.unsqueeze(0)
     q = q0.clone()
     eye = torch.eye(3, device=q.device, dtype=q.dtype)
-    for _ in range(iterations):
-        pos = forward_kinematics(q)
+    pos = q.new_zeros(q.shape[0], 3)
+    for _ in range(max(1, int(iterations))):
+        pos, jac = forward_kinematics_and_jacobian(q)
         err = target_xyz - pos
-        err_norm = err.norm(dim=-1)
-        if bool((err_norm < tol).all()):
-            break
-        jac = numerical_jacobian(q)
         # dq = J^T (J J^T + λ² I)^{-1} err
         jjt = jac @ jac.transpose(-1, -2)
         lam2 = (damping ** 2) * eye
         rhs = torch.linalg.solve(jjt + lam2, err.unsqueeze(-1)).squeeze(-1)
         dq = (jac.transpose(-1, -2) @ rhs.unsqueeze(-1)).squeeze(-1)
         q = (q + step * dq).clamp(lower, upper)
-    err_norm = (target_xyz - forward_kinematics(q)).norm(dim=-1)
+    pos = forward_kinematics(q)
+    err_norm = (target_xyz - pos).norm(dim=-1)
     return q, err_norm
 
 

@@ -8,7 +8,12 @@ import unittest
 import torch
 
 from pick_and_carry.arms import get_arm
-from pick_and_carry.ik import forward_kinematics, solve_ik
+from pick_and_carry.ik import (
+    forward_kinematics,
+    forward_kinematics_and_jacobian,
+    numerical_jacobian,
+    solve_ik,
+)
 
 
 class IkTests(unittest.TestCase):
@@ -48,6 +53,15 @@ class IkTests(unittest.TestCase):
         self.assertEqual(tuple(q_ik.shape), (4, 6))
         self.assertEqual(tuple(err.shape), (4,))
         self.assertLess(float(err.max()), 0.03)
+
+    def test_analytic_jacobian_matches_numeric(self):
+        q = self.default.unsqueeze(0).clone()
+        q[0, 0] += 0.3
+        q[0, 2] -= 0.2
+        q[0, 4] += 0.1
+        _, jac_a = forward_kinematics_and_jacobian(q)
+        jac_n = numerical_jacobian(q)
+        self.assertLess(float((jac_a - jac_n).abs().max()), 2e-3)
 
 
 if __name__ == "__main__":
