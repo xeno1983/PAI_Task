@@ -26,6 +26,8 @@ SOFT_TEAL = RGBColor(0xD7, 0xE4, 0xE8)
 SOFT_GREEN = RGBColor(0xD9, 0xE8, 0xDF)
 SOFT_CLAY = RGBColor(0xF0, 0xE0, 0xD8)
 SOFT_GRAY = RGBColor(0xE8, 0xE4, 0xDC)
+ASSETS = Path(__file__).resolve().parent / "assets"
+ROBOT_SIM_PNG = ASSETS / "robot_sim_go2_z1.png"
 
 
 def paint(run, size, bold=False, color=INK) -> None:
@@ -137,46 +139,54 @@ def _arrow_down(slide, x, y, w=Inches(0.18), h=Inches(0.24), color=MUTED):
     return arrow
 
 
-def add_control_flow_slide(prs) -> None:
-    """Diagram: policy → CPG legs / IK+residual arm → PD."""
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+def _clear_slide_shapes(slide) -> None:
+    """Remove every shape from a slide (for in-place redraw)."""
+    for shape in list(slide.shapes):
+        shape._element.getparent().remove(shape._element)
+
+
+def draw_control_flow_slide(slide) -> None:
+    """Populate a blank slide with the CPG + analytic-IK control diagram."""
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, Inches(13.333), Inches(7.5))
     background.fill.solid()
     background.fill.fore_color.rgb = PAPER
     background.line.fill.background()
 
-    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.08), Inches(12.4), Inches(0.36))
-    write(title, ["制御の流れ（今回のアプローチ）"], size=24, bold=True, spacing=0)
-    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.42), Inches(12.6), Inches(0.28))
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.08), Inches(12.4), Inches(0.34))
+    write(title, ["制御方針（CPG＋IK）"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.40), Inches(12.6), Inches(0.28))
     write(
         subtitle,
-        ["方策は小さい指令だけ出す。脚は CPG、腕は IK ベース＋残差が関節目標を組み立て、最後に PD で追従する。"],
+        [
+            "脚は CPG（4 振動子・対角トロット）が 12 関節へ展開。"
+            "腕は解析ヤコビアン IK ベース＋小さな残差。最後は PD。"
+        ],
         size=13,
         color=MUTED,
         spacing=0,
     )
 
-    # Policy
     _flow_box(
         slide,
-        Inches(3.9),
-        Inches(0.78),
-        Inches(5.5),
-        Inches(0.95),
+        Inches(3.6),
+        Inches(0.72),
+        Inches(6.1),
+        Inches(0.88),
         "方策（Actor）　行動 22",
-        ["CPG パラメータ 10 ＋ 腕残差 Δq 6 ＋ 指残差 Δg 1　（おおよそ −1〜1）"],
+        ["CPG パラメータ 15 ＋ 腕残差 Δq 6 ＋ 指残差 Δg 1　（おおよそ −1〜1）"],
         SOFT_TEAL,
         TEAL,
     )
-    _arrow_down(slide, Inches(6.45), Inches(1.76), color=TEAL)
+    _arrow_down(slide, Inches(6.45), Inches(1.62), color=TEAL)
 
-    # Split labels
+    # Two columns that must not overlap: left ≤ 6.4", right ≥ 6.7".
+    mid = Inches(6.55)
     _caption(
         slide,
-        Inches(0.40),
-        Inches(2.00),
+        Inches(0.32),
+        Inches(1.88),
         Inches(6.0),
-        Inches(0.28),
+        Inches(0.26),
         "脚レーン（全段階）",
         size=14,
         bold=True,
@@ -185,10 +195,10 @@ def add_control_flow_slide(prs) -> None:
     )
     _caption(
         slide,
-        Inches(6.95),
-        Inches(2.00),
-        Inches(6.0),
-        Inches(0.28),
+        Inches(6.75),
+        Inches(1.88),
+        Inches(6.2),
+        Inches(0.26),
         "腕レーン（reach / haul / carry / catch）",
         size=14,
         bold=True,
@@ -196,98 +206,69 @@ def add_control_flow_slide(prs) -> None:
         align=PP_ALIGN.LEFT,
     )
 
-    # Leg pipeline
-    leg_y = Inches(2.35)
-    bw, bh = Inches(2.85), Inches(1.15)
-    gap = Inches(0.32)
-    x = Inches(0.35)
-    _flow_box(
-        slide,
-        x,
-        leg_y,
-        bw,
-        bh,
-        "① CPG 15",
-        ["周波数・振幅・持ち上げ", "姿勢バイアス・旋回など"],
-        SOFT_GREEN,
-        GREEN,
-    )
-    _arrow_right(slide, x + bw + Inches(0.04), leg_y + Inches(0.48), color=GREEN)
-    x = x + bw + gap
-    _flow_box(
-        slide,
-        x,
-        leg_y,
-        bw,
-        bh,
-        "② 環境内 CPG",
-        ["位相を進め、対角トロット", "を 12 関節指令へ展開"],
-        SOFT_GREEN,
-        GREEN,
-    )
-    _arrow_right(slide, x + bw + Inches(0.04), leg_y + Inches(0.48), color=GREEN)
-    x = x + bw + gap
-    _flow_box(
-        slide,
-        x,
-        leg_y,
-        Inches(2.55),
-        bh,
-        "③ 脚 PD",
-        ["kp 60 / kd 1.5", "→ Go2 脚 12"],
-        SOFT_GRAY,
-        MUTED,
-    )
+    # Leg: three compact boxes in the left half only.
+    leg_y = Inches(2.22)
+    lbw, lbh = Inches(1.85), Inches(1.20)
+    lgap = Inches(0.22)
+    lx = Inches(0.32)
+    _flow_box(slide, lx, leg_y, lbw, lbh, "① CPG 15", ["周波数・振幅・持ち上げ", "姿勢・旋回など"], SOFT_GREEN, GREEN)
+    _arrow_right(slide, lx + lbw + Inches(0.02), leg_y + Inches(0.50), w=Inches(0.18), color=GREEN)
+    lx = lx + lbw + lgap
+    _flow_box(slide, lx, leg_y, lbw, lbh, "② 環境内 CPG", ["対角トロットで", "12 関節へ展開"], SOFT_GREEN, GREEN)
+    _arrow_right(slide, lx + lbw + Inches(0.02), leg_y + Inches(0.50), w=Inches(0.18), color=GREEN)
+    lx = lx + lbw + lgap
+    _flow_box(slide, lx, leg_y, lbw, lbh, "③ 脚 PD", ["kp 60 / kd 1.5", "→ Go2 脚 12"], SOFT_GRAY, MUTED)
 
-    # Arm pipeline
-    arm_y = Inches(2.35)
-    x = Inches(6.95)
-    aw = Inches(2.95)
+    # Arm: three boxes in the right half only (same row).
+    arm_y = Inches(2.22)
+    abw, abh = Inches(1.90), Inches(1.20)
+    agap = Inches(0.22)
+    ax = Inches(6.75)
     _flow_box(
         slide,
-        x,
+        ax,
         arm_y,
-        aw,
-        bh,
-        "① EE 目標 → 数値 IK",
-        ["到達点 / 箱 / 目標など", "ベース姿勢 q_ik を解く"],
+        abw,
+        abh,
+        "① EE → 解析 IK",
+        ["解析ヤコビアン", "で q_ik を解く"],
         SOFT_CLAY,
         CLAY,
     )
-    _arrow_right(slide, x + aw + Inches(0.04), arm_y + Inches(0.48), color=CLAY)
-    x = x + aw + gap
+    _arrow_right(slide, ax + abw + Inches(0.02), arm_y + Inches(0.50), w=Inches(0.18), color=CLAY)
+    ax = ax + abw + agap
     _flow_box(
         slide,
-        x,
+        ax,
         arm_y,
-        aw,
-        bh,
+        abw,
+        abh,
         "② ＋ 残差",
-        ["q = q_ik + 0.12·Δq", "指 = 段階開閉 + 0.35·Δg"],
+        ["q_ik + 0.12·Δq", "指 + 0.35·Δg"],
         SOFT_CLAY,
         CLAY,
     )
-    # Second row under arm for PD (fits width better)
-    _arrow_down(slide, Inches(10.55), Inches(3.52), color=CLAY)
+    _arrow_right(slide, ax + abw + Inches(0.02), arm_y + Inches(0.50), w=Inches(0.18), color=CLAY)
+    ax = ax + abw + agap
     _flow_box(
         slide,
-        Inches(8.55),
-        Inches(3.78),
-        Inches(4.35),
-        Inches(0.95),
+        ax,
+        arm_y,
+        abw,
+        abh,
         "③ 腕・指 PD",
-        ["腕 kp 80 / kd 8　　指 kp 20 / kd 2　→ Z1 6 軸 + グリッパ"],
+        ["腕 80/8　指 20/2", "→ Z1 + グリッパ"],
         SOFT_GRAY,
         MUTED,
     )
 
-    # Walk note under leg lane
+    # Walk note: left column only (no overlap with arm).
     note = slide.shapes.add_shape(
         MSO_SHAPE.ROUNDED_RECTANGLE,
-        Inches(0.35),
-        Inches(3.78),
-        Inches(7.90),
-        Inches(0.95),
+        Inches(0.32),
+        Inches(3.55),
+        Inches(6.05),
+        Inches(1.05),
     )
     note.adjustments[0] = 0.08
     note.fill.solid()
@@ -298,55 +279,341 @@ def add_control_flow_slide(prs) -> None:
     write(
         note,
         [
-            "歩行（walk）だけは腕レーンを使わない",
-            "方策マスクは CPG のみ。腕は固定、または学習用にランダム保持（重心補償の練習）。",
+            "歩行（walk）では腕レーンを使わない",
+            "マスクは CPG のみ。腕は固定、または学習用にランダム保持。",
         ],
         size=12,
         color=INK,
         spacing=2,
     )
-    note.text_frame.margin_left = Inches(0.14)
-    note.text_frame.margin_top = Inches(0.12)
+    note.text_frame.margin_left = Inches(0.12)
+    note.text_frame.margin_top = Inches(0.14)
 
-    # Bottom comparison strip
-    _box(slide, Inches(0.35), Inches(5.00), Inches(12.6), Inches(2.20), WHITE, line=TEAL)
+    # Arm note: right column.
+    arm_note = slide.shapes.add_shape(
+        MSO_SHAPE.ROUNDED_RECTANGLE,
+        Inches(6.75),
+        Inches(3.55),
+        Inches(6.20),
+        Inches(1.05),
+    )
+    arm_note.adjustments[0] = 0.08
+    arm_note.fill.solid()
+    arm_note.fill.fore_color.rgb = WHITE
+    arm_note.line.color.rgb = CLAY
+    arm_note.line.width = Pt(1.0)
+    arm_note.shadow.inherit = False
+    write(
+        arm_note,
+        [
+            "IK は解析ヤコビアン（数値差分ではない）",
+            "EE 目標（到達点・箱・置き場）→ q_ik → 残差で微調整。",
+        ],
+        size=12,
+        color=INK,
+        spacing=2,
+    )
+    arm_note.text_frame.margin_left = Inches(0.12)
+    arm_note.text_frame.margin_top = Inches(0.14)
+
+    _ = mid  # documents the left/right split used above
+    _box(slide, Inches(0.32), Inches(4.80), Inches(12.65), Inches(2.40), WHITE, line=TEAL)
     _caption(
         slide,
-        Inches(0.50),
-        Inches(5.10),
+        Inches(0.48),
+        Inches(4.90),
         Inches(12.2),
-        Inches(0.30),
+        Inches(0.28),
         "なぜこの分け方か",
         size=15,
         bold=True,
         color=TEAL,
         align=PP_ALIGN.LEFT,
     )
-    left = slide.shapes.add_textbox(Inches(0.50), Inches(5.45), Inches(6.0), Inches(1.55))
+    left = slide.shapes.add_textbox(Inches(0.48), Inches(5.25), Inches(6.0), Inches(1.75))
     write(
         left,
         [
             "脚（CPG）",
-            "・12 関節を直接出さず、歩容の「つまみ」10 個にする",
+            "・12 関節を直接出さず、歩容の「つまみ」15 個にする",
             "・位相は環境が持つので、リズムが崩れにくい",
-            "・BC / GAIL の教師も同じ CPG 空間で教える",
+            "・BC の教師も同じ CPG 空間で教える",
         ],
         size=12,
         color=INK,
         spacing=2,
     )
-    right = slide.shapes.add_textbox(Inches(6.70), Inches(5.45), Inches(6.0), Inches(1.55))
+    right = slide.shapes.add_textbox(Inches(6.80), Inches(5.25), Inches(5.9), Inches(1.75))
     write(
         right,
         [
-            "腕（IK＋残差）",
-            "・大まかな手先位置は IK が担当（探索を小さく）",
+            "腕（解析 IK＋残差）",
+            "・大まかな手先位置は解析 IK が担当（探索を小さく）",
             "・方策は微調整だけ → 学習が安定しやすい",
             "・旧・腕フル指令の重みとは非互換（行動の意味が違う）",
         ],
         size=12,
         color=INK,
         spacing=2,
+    )
+
+
+def add_control_flow_slide(prs) -> None:
+    """Diagram: policy → CPG legs / analytic IK+residual arm → PD."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    draw_control_flow_slide(slide)
+
+
+def add_purpose_slide(prs) -> None:
+    """First slide: what we want to achieve (report wording)."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.12), Inches(12.4), Inches(0.40))
+    write(title, ["最終課題の目的"], size=28, bold=True, spacing=0)
+
+    hero = slide.shapes.add_textbox(Inches(0.40), Inches(0.65), Inches(12.4), Inches(1.15))
+    write(
+        hero,
+        [
+            "四足ロボット（Go2）にアーム（Z1）を載せた構成で、",
+            "不整地を歩いて「箱」を所定位置まで運ぶ方策を学習すること。",
+        ],
+        size=20,
+        bold=True,
+        color=INK,
+        spacing=5,
+    )
+
+    card(
+        slide,
+        Inches(0.28),
+        Inches(2.05),
+        Inches(6.25),
+        Inches(5.05),
+        "やりたいこと",
+        [
+            "アーム付き四足で不整地を渡り、箱を拾う",
+            "もう一度不整地を渡り、目標へ置く",
+            "脚の歩行と腕の操作を一つの方策で扱う",
+            "手先制御は、将来のキャッチ課題にもつなげる",
+        ],
+        TEAL,
+    )
+    card(
+        slide,
+        Inches(6.78),
+        Inches(2.05),
+        Inches(6.25),
+        Inches(5.05),
+        "難しい点と対応方針",
+        [
+            "① いきなり箱運びは難しい",
+            "　→ 教師 CPG を BC で模倣し、",
+            "　　歩行 → 到達 → 箱運びと段階を上げる",
+            "",
+            "② 脚 12 関節と腕を同時探索すると重い",
+            "　→ 脚は CPG、腕は解析 IK＋残差に構造化",
+        ],
+        CLAY,
+    )
+
+
+def add_robot_model_slide(prs) -> None:
+    """Robot model + problem setting on one report slide."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(12.4), Inches(0.36))
+    write(title, ["ロボットと問題設定"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.46), Inches(12.6), Inches(0.26))
+    write(
+        subtitle,
+        ["Genesis 上の Unitree Go2 ＋ Z1。平地→不整地→拾う→不整地→置く。1 試行 20 秒。"],
+        size=13,
+        color=MUTED,
+        spacing=0,
+    )
+
+    if ROBOT_SIM_PNG.is_file():
+        slide.shapes.add_picture(str(ROBOT_SIM_PNG), Inches(0.32), Inches(0.90), Inches(7.6), Inches(4.25))
+    else:
+        note = slide.shapes.add_textbox(Inches(0.5), Inches(2.5), Inches(7.0), Inches(1.0))
+        write(note, [f"画像がありません: {ROBOT_SIM_PNG.name}"], size=16, color=MUTED, spacing=0)
+
+    card(
+        slide,
+        Inches(8.15),
+        Inches(0.90),
+        Inches(4.85),
+        Inches(2.85),
+        "モデル",
+        [
+            "胴体　Go2（四足）",
+            "脚　3 関節 × 4 ＝ 12",
+            "腕　Z1（6 軸＋グリッパ）",
+            "手先 TCP を解析 IK の目標に",
+        ],
+        TEAL,
+    )
+    card(
+        slide,
+        Inches(8.15),
+        Inches(3.90),
+        Inches(4.85),
+        Inches(3.20),
+        "課題の流れ",
+        [
+            "出発（平地）→ 不整地",
+            "→ 箱を拾う → 不整地",
+            "→ 目標へ置く",
+            "成功：目標近く・低く置く",
+            "失敗：大きく傾くと転倒",
+        ],
+        CLAY,
+    )
+
+
+def add_cpg_network_slide(prs) -> None:
+    """Explain the CPG network: params → 4 oscillators → 12 joints."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.08), Inches(12.4), Inches(0.34))
+    write(title, ["CPG ネットワーク（脚のリズム生成）"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.42), Inches(12.6), Inches(0.26))
+    write(
+        subtitle,
+        ["方策は関節を直接出さず、CPG のつまみ 15 個を出す。環境内の 4 振動子が対角トロットで 12 関節へ展開する。"],
+        size=12,
+        color=MUTED,
+        spacing=0,
+    )
+
+    _flow_box(
+        slide,
+        Inches(0.30),
+        Inches(0.85),
+        Inches(2.55),
+        Inches(1.55),
+        "方策",
+        ["観測 81", "→ CPG パラメータ 15"],
+        SOFT_TEAL,
+        TEAL,
+    )
+    _arrow_right(slide, Inches(2.95), Inches(1.45), color=TEAL)
+    _flow_box(
+        slide,
+        Inches(3.35),
+        Inches(0.85),
+        Inches(3.10),
+        Inches(1.55),
+        "CPG デコード",
+        ["freq / amp / lift…", "dphi・couple・entrain"],
+        SOFT_GREEN,
+        GREEN,
+    )
+    _arrow_right(slide, Inches(6.55), Inches(1.45), color=GREEN)
+    _flow_box(
+        slide,
+        Inches(6.95),
+        Inches(0.85),
+        Inches(3.10),
+        Inches(1.55),
+        "4 振動子",
+        ["FL・FR・RL・RR", "各足が位相 φ を保持"],
+        SOFT_CLAY,
+        CLAY,
+    )
+    _arrow_right(slide, Inches(10.15), Inches(1.45), color=CLAY)
+    _flow_box(
+        slide,
+        Inches(10.55),
+        Inches(0.85),
+        Inches(2.45),
+        Inches(1.55),
+        "12 関節",
+        ["hip/thigh/calf×4", "→ 脚 PD"],
+        SOFT_GRAY,
+        MUTED,
+    )
+
+    # Oscillator network map
+    _caption(
+        slide,
+        Inches(0.30),
+        Inches(2.60),
+        Inches(7.2),
+        Inches(0.28),
+        "振動子ネットワーク（対角トロット＋軟結合）",
+        size=14,
+        bold=True,
+        color=GREEN,
+        align=PP_ALIGN.LEFT,
+    )
+
+    def osc(x, y, name, role, fill, accent):
+        sh = slide.shapes.add_shape(MSO_SHAPE.OVAL, x, y, Inches(1.70), Inches(1.05))
+        sh.fill.solid()
+        sh.fill.fore_color.rgb = fill
+        sh.line.color.rgb = accent
+        sh.line.width = Pt(1.75)
+        sh.shadow.inherit = False
+        _caption(slide, x, y + Inches(0.18), Inches(1.70), Inches(0.30), name, size=14, bold=True, color=accent)
+        _caption(slide, x, y + Inches(0.50), Inches(1.70), Inches(0.35), role, size=11, color=INK)
+
+    osc(Inches(0.55), Inches(3.05), "FL", "ペア A　φ", SOFT_GREEN, GREEN)
+    osc(Inches(3.00), Inches(3.05), "FR", "ペア B　φ＋π", SOFT_CLAY, CLAY)
+    osc(Inches(0.55), Inches(4.45), "RL", "ペア B", SOFT_CLAY, CLAY)
+    osc(Inches(3.00), Inches(4.45), "RR", "ペア A", SOFT_GREEN, GREEN)
+
+    # Soft coupling note between diagonals
+    couple = slide.shapes.add_textbox(Inches(4.95), Inches(3.15), Inches(2.55), Inches(2.2))
+    write(
+        couple,
+        [
+            "軟結合 couple",
+            "対角の位相へ引き戻す",
+            "",
+            "Δab / Δa / Δb",
+            "不整地用のずれ",
+            "",
+            "entrain",
+            "接地でスタンスへ引く",
+        ],
+        size=12,
+        color=INK,
+        spacing=1,
+    )
+
+    card(
+        slide,
+        Inches(7.70),
+        Inches(2.60),
+        Inches(5.25),
+        Inches(4.25),
+        "なぜ CPG か",
+        [
+            "12 関節を直接学習すると探索が重い",
+            "リズム構造を環境側に置き、方策は",
+            "　周波数・振幅・旋回などのつまみだけ",
+            "教師（CPG）→ BC → PPO と同一の",
+            "　行動空間（CPG 15）を共有できる",
+            "平坦では硬い対角トロット",
+            "不整地では位相適応 5 つで接地をずらす",
+            "展開後は sin(φ) で振り、持ち上げは",
+            "　relu(−sin(φ))。後退は amp の符号",
+        ],
+        TEAL,
     )
 
 
@@ -363,7 +630,7 @@ def add_cpg_ik_detail_slide(prs) -> None:
     subtitle = slide.shapes.add_textbox(Inches(0.30), Inches(0.38), Inches(12.6), Inches(0.26))
     write(
         subtitle,
-        ["方策は 22 次元。脚は対角トロット CPG（位相オフセット・軟結合・接地引き込み付き）、手先は数値 IK＋残差。"],
+        ["方策は 22 次元。脚は対角トロット CPG（位相オフセット・軟結合・接地引き込み付き）、手先は解析ヤコビアン IK＋残差。"],
         size=12,
         color=MUTED,
         spacing=0,
@@ -489,7 +756,7 @@ def add_cpg_ik_detail_slide(prs) -> None:
         ik_box,
         [
             "① EE 目標を選ぶ（到達点・箱・目標・ボール予測など）",
-            "② 数値 IK（減衰最小二乗）でベース姿勢 q_ik を解く",
+            "② 解析ヤコビアン IK（減衰最小二乗）でベース姿勢 q_ik を解く",
             "③ 方策の腕 Δq 6 を ×0.12 rad して加算　q = q_ik + 0.12·Δq",
             "④ 指は段階の開閉ベース + 残差 ×0.35　→ 腕・指 PD",
             "歩行（walk）では腕レーンは使わない（CPG のみ／腕は固定や乱数保持）",
@@ -576,7 +843,7 @@ def add_control_compare_slide(prs) -> None:
             "特徴",
             "・歩容の形は CPG、方策はパラメータ調整",
             "・手先の大まかな位置は IK、方策は微調整",
-            "・BC / GAIL / PPO が同じ 17 次元を共有",
+            "・BC / PPO が同じ 22 次元を共有",
             "",
             "向いていること",
             "・歩行暖機（教師 CPG → 模倣 → PPO）",
@@ -1003,110 +1270,296 @@ def add_loss_slide(prs, curve_png: Path | None) -> None:
         write(note, ["学習記録がまだ無いので、曲線は空です。"], size=16, color=MUTED, spacing=0)
 
 
-def main() -> None:
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
+def add_obs_action_slide(prs) -> None:
+    """Observation vector and action / control quantities."""
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
     background.fill.solid()
     background.fill.fore_color.rgb = PAPER
     background.line.fill.background()
 
-    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(10.4), Inches(0.40))
-    write(title, ["Pick-and-Carry　学習条件・観測・制御"], size=24, bold=True, spacing=0)
-    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.50), Inches(12.6), Inches(0.28))
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(12.4), Inches(0.36))
+    write(title, ["観測・制御量"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.46), Inches(12.6), Inches(0.28))
     write(
         subtitle,
-        ["Unitree Go2 ＋ Unitree Z1　　PPO / BC / GAIL　　81/17（脚 CPG・腕 IK+残差）"],
-        size=12,
+        ["全段階で観測 81・行動 22 を共有。位置は胴体基準（前が +X）。脚指令は CPG 展開後の 12 関節も観測に入れる。"],
+        size=13,
         color=MUTED,
         spacing=0,
     )
 
     y = Inches(0.88)
-    h = Inches(6.38)
-    w = Inches(4.18)
-    gap = Inches(0.14)
-    x0 = Inches(0.28)
+    h = Inches(6.35)
+    w = Inches(6.25)
+    gap = Inches(0.20)
     card(
         slide,
-        x0,
-        y,
-        w,
-        h,
-        "学習条件",
-        [
-            "ロボット　Go2 に Z1（6 軸、約 5.2 kg）",
-            "方策　512×256×128 ELU、正規分布",
-            "更新　16 環境 × 128 step / iteration",
-            "最適化　Adam 1e-3（KL 0.01 で調整）、clip 0.2",
-            "割引　γ 0.99、λ 0.95、entropy 0.01",
-            "時間　dt 0.02 s、1 試行 20 秒",
-            "コース　平地 → 不整地 → 拾う → 不整地 → 置く",
-            "地面　波 3.5 cm、または段差 4.5 / 6 cm",
-            "箱と目標の下は平ら。段は毎回 ±2 cm",
-            "箱　一辺 4 cm。拾う 0.55 m、置く 0.45 m",
-            "成功　目標の半径 0.28 m、高さ 0.08 m 未満",
-            "前進　0.40 m/s を追う。転倒 −5、設置 +10",
-            "分け方　歩行のみ／分割／同時 から選択",
-            "継続　箱運びは logs/ppo_z1",
-        ],
-        TEAL,
-    )
-    card(
-        slide,
-        x0 + w + gap,
+        Inches(0.28),
         y,
         w,
         h,
         "観測　81",
         [
-            "位置は胴体基準。前が +X、上が +Z",
-            "脚の角度　　　　12　立ち姿勢との差",
-            "脚の角速度　　　12　×0.05",
-            "重力の向き　　　3",
-            "胴体の並進速度　3　×2",
-            "胴体の角速度　　3　×0.25",
-            "胴体の高さ　　　1　世界座標の z",
-            "足の接地　　　　4　接触力 1 N 超",
-            "腕の角度　　　　6",
-            "腕の角速度　　　6　×0.05",
-            "指の開き　　　　1　−90度が開き、0が閉じ",
-            "指の速度　　　　1　×0.05",
-            "手先・物資・目標　各 3　球では目標=球の速度",
+            "脚の角度・角速度　　各 12",
+            "重力方向 3、胴体並進・角速度 各 3、高さ 1",
+            "足の接地　　4（接触力 1 N 超）",
+            "腕の角度・角速度　各 6、指の開閉・速度 各 1",
+            "手先・物資・目標　各 3（胴体基準）",
             "把持フラグ 1、段階 one-hot 4",
-            "速度指令　　　　3　球では 0.3 秒先の位置",
-            "直前の脚の指令　12　CPG が展開した関節",
-            "カメラ時は物資の 3 つだけ検知位置",
-            "見えない物資は (0, 0, −1)",
+            "速度指令 3（キャッチ時は予測位置）",
+            "直前の脚指令 12（CPG が展開した関節）",
         ],
         CLAY,
     )
     card(
         slide,
-        x0 + 2 * (w + gap),
+        Inches(0.28) + w + gap,
         y,
         w,
         h,
-        "制御　17（CPG＋IK残差）",
+        "制御量　行動 22 → 関節目標",
         [
-            "方策出力　CPG 15 ＋ 腕 Δq 6 ＋ 指 Δg 1",
-            "脚は環境内 CPG が位相を進め 12 関節へ展開",
-            "　　振幅・周波数・姿勢バイアス・旋回など",
-            "　　展開後を PD（kp 60 / kd 1.5）で追従",
-            "腕は IK ベース + 小さな残差（×0.12 rad）",
-            "　　reach/箱/目標などへ数値 IK",
-            "　　kp 80 / kd 8",
-            "指は段階ベース開閉 + 残差（×0.35 rad）",
-            "　　kp 20 / kd 2",
-            "把持　閉じ側へ 0.20 rad 以内、距離 0.12 m",
-            "歩行は CPG のみ。腕は固定／ランダム保持",
-            "旧・腕フル指令の重みは reach 以降で非互換",
+            "方策出力",
+            "　CPG 15　リズムのつまみ",
+            "　腕 Δq 6　IK への残差（×0.12 rad）",
+            "　指 Δg 1　開閉残差（×0.35）",
+            "",
+            "環境側で組み立て",
+            "　CPG → 脚 12 関節　PD kp60/kd1.5",
+            "　IK + Δq → 腕 6　PD kp80/kd8",
+            "　段階ベース + Δg → 指　PD kp20/kd2",
+            "",
+            "学習設定（抜粋）",
+            "　16 環境 × 128 step、γ0.99、clip0.2",
+            "　1 試行 20 秒、dt 0.02 s",
         ],
         GREEN,
     )
+
+
+def add_learning_flow_slide(prs) -> None:
+    """BC first, then curriculum RL stages."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(12.4), Inches(0.36))
+    write(title, ["学習の流れ（BC → カリキュラム）"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.46), Inches(12.6), Inches(0.28))
+    write(
+        subtitle,
+        ["まず教師 CPG を BC でまね、そのあと PPO で段階を上げる。各段階の重みを次の初期値にする。"],
+        size=13,
+        color=MUTED,
+        spacing=0,
+    )
+
+    # Horizontal flow
+    boxes = [
+        (Inches(0.30), "① 教師 CPG", "前進・左右旋回", SOFT_TEAL, TEAL),
+        (Inches(2.85), "② BC", "同じ 3 技能を模倣", SOFT_GREEN, GREEN),
+        (Inches(5.40), "③ 歩行 PPO", "指令追従を強化", SOFT_CLAY, CLAY),
+        (Inches(7.95), "④ 到達", "手先を空中点へ", SOFT_TEAL, TEAL),
+        (Inches(10.50), "⑤ 箱運び", "拾う・運ぶ・置く", SOFT_GREEN, GREEN),
+    ]
+    for x, head, body, fill, accent in boxes:
+        _flow_box(slide, x, Inches(0.95), Inches(2.35), Inches(1.35), head, [body], fill, accent)
+    for x in (Inches(2.55), Inches(5.10), Inches(7.65), Inches(10.20)):
+        _arrow_right(slide, x, Inches(1.45), w=Inches(0.26), color=MUTED)
+
+    card(
+        slide,
+        Inches(0.28),
+        Inches(2.60),
+        Inches(6.25),
+        Inches(4.55),
+        "模倣（教師 → BC）",
+        [
+            "教師は開ループ CPG（対角トロット）",
+            "演示は前進・左旋回・右旋回のみ",
+            "BC が同じ行動空間（CPG 15）を学習",
+            "ここまでで「歩ける初期方策」を得る",
+        ],
+        TEAL,
+    )
+    card(
+        slide,
+        Inches(6.78),
+        Inches(2.60),
+        Inches(6.25),
+        Inches(4.55),
+        "カリキュラム（PPO）",
+        [
+            "歩行　速度指令への一致を強化学習",
+            "到達　歩行重みから。手先を点へ",
+            "箱運び　拾って目標へ置く",
+            "（任意）キャッチは到達重みから",
+            "観測 81・行動 22 が全段階で共通",
+            "次段階へ進むかは録画を見て判断",
+        ],
+        GREEN,
+    )
+
+
+def add_conclusion_slide(prs) -> None:
+    """Closing reflection: struggles, ambitions, compute limits."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.12), Inches(12.4), Inches(0.40))
+    write(title, ["結論・今後に向けて"], size=28, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.55), Inches(12.6), Inches(0.28))
+    write(
+        subtitle,
+        ["今回できたことと、足りなかった点を整理する。"],
+        size=14,
+        color=MUTED,
+        spacing=0,
+    )
+
+    card(
+        slide,
+        Inches(0.28),
+        Inches(1.05),
+        Inches(4.15),
+        Inches(5.95),
+        "学習で苦労したこと",
+        [
+            "歩行の安定化に時間がかかった",
+            "腕を同時に動かすと探索が重い",
+            "段階のつなぎ（重み引き継ぎ）で",
+            "　性能が落ちやすい",
+            "報酬設計と難度の戻しが繊細",
+            "録画を見ながらの判断が必要",
+        ],
+        TEAL,
+    )
+    card(
+        slide,
+        Inches(4.58),
+        Inches(1.05),
+        Inches(4.15),
+        Inches(5.95),
+        "やりたかった高度なタスク",
+        [
+            "飛来ボールのキャッチ完成",
+            "持ち歩き〜設置までの一気通貫",
+            "より速い指令・荒い不整地",
+            "実機寄りのセンサノイズ耐性",
+            "複数箱・長いコースの連続搬送",
+        ],
+        CLAY,
+    )
+    card(
+        slide,
+        Inches(8.88),
+        Inches(1.05),
+        Inches(4.15),
+        Inches(5.95),
+        "計算リソースの制約",
+        [
+            "手元 GPU では並列環境数・",
+            "　反復数が限られる",
+            "reach 以降は IK で step が重い",
+            "長時間カリキュラムを回し切れず",
+            "高度な段階まで十分に学習できず",
+            "→ 解析 IK などで高速化しつつ",
+            "　段階を絞って提出に至った",
+        ],
+        GREEN,
+    )
+
+
+def add_reward_method_slide(prs) -> None:
+    """Compact reward + training tricks for the report."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    background = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    background.fill.solid()
+    background.fill.fore_color.rgb = PAPER
+    background.line.fill.background()
+    title = slide.shapes.add_textbox(Inches(0.32), Inches(0.10), Inches(12.4), Inches(0.36))
+    write(title, ["報酬と学習の工夫"], size=24, bold=True, spacing=0)
+    subtitle = slide.shapes.add_textbox(Inches(0.34), Inches(0.46), Inches(12.6), Inches(0.26))
+    write(
+        subtitle,
+        ["成功の瞬間だけでなく毎ステップで導く。難しすぎたら一段易しく戻す。"],
+        size=13,
+        color=MUTED,
+        spacing=0,
+    )
+    card(
+        slide,
+        Inches(0.28),
+        Inches(0.90),
+        Inches(6.25),
+        Inches(6.20),
+        "主な報酬",
+        [
+            "前進　0.40 m/s への一致",
+            "接近　手先→箱、箱→目標",
+            "把持・設置　成功時に加点",
+            "転倒　大きく減点",
+            "歩行段階は速度トラッキング中心",
+            "到達は手先の接近・保持が中心",
+        ],
+        TEAL,
+    )
+    card(
+        slide,
+        Inches(6.78),
+        Inches(0.90),
+        Inches(6.25),
+        Inches(6.20),
+        "工夫",
+        [
+            "段階分け（歩行→到達→箱運び）",
+            "直前段階の重みを初期値にする",
+            "観測 81・行動 22 を全段階で共有",
+            "成績が続くと難度を戻す／上げる",
+            "脚 CPG・腕 解析 IK＋残差で探索を縮小",
+        ],
+        GREEN,
+    )
+
+
+def build_report_presentation() -> Presentation:
+    """Lean deck for the written report (no duplicate / outdated slides)."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    add_purpose_slide(prs)
+    add_robot_model_slide(prs)
     add_control_flow_slide(prs)
+    add_cpg_network_slide(prs)
+    add_obs_action_slide(prs)
+    add_learning_flow_slide(prs)
+    add_reward_method_slide(prs)
+    curve_png = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry" / "PickAndCarry_curves.png"
+    rows = _load_metrics()
+    if rows:
+        render_curve_png(curve_png, rows)
+    add_loss_slide(prs, curve_png if rows else None)
+    add_conclusion_slide(prs)
+    return prs
+
+
+def main() -> None:
+    # Full reference deck (kept for development / long appendix).
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    add_purpose_slide(prs)
+    add_robot_model_slide(prs)
+    add_control_flow_slide(prs)
+    add_obs_action_slide(prs)
+    add_learning_flow_slide(prs)
+    add_cpg_network_slide(prs)
     add_cpg_ik_detail_slide(prs)
     add_control_compare_slide(prs)
     add_problem_slide(prs)
@@ -1126,6 +1579,12 @@ def main() -> None:
     prs.save(out_repo)
     print(out_desktop)
     print(out_repo)
+
+    # Report-oriented 改版 (deduplicated, clearer order).
+    report = build_report_presentation()
+    out_report = Path.home() / "Desktop" / "起動スクリプト" / "PickAndCarry" / "PickAndCarry_学習条件_改版.pptx"
+    report.save(out_report)
+    print(out_report)
 
 
 if __name__ == "__main__":

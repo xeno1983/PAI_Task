@@ -26,14 +26,21 @@ HEIGHT = 720
 FPS = 25
 INK = (28, 40, 44)
 WHITE = (255, 255, 255)
+# Course-provided bookends for the graded submission video (1920x1080, no audio).
+OP_PATH = ROOT / "PAI応用1_最終課題_OP.mp4"
+ED_PATH = ROOT / "PAI応用1_最終課題_ED.mp4"
+BOOKEND_NAMES = frozenset({OP_PATH.name, ED_PATH.name})
 
-# Narrative order. Anything else in the folder is appended after these.
+# Narrative order. Teacher/BC show only forward + left/right turn (no full reel, no GAIL).
 PREFERRED = (
     "PickAndCarry_smoke.mp4",
     "PickAndCarry_z1_smoke.mp4",
-    "trot_teacher_demo.mp4",
-    "bc_trot_demo.mp4",
-    "gail_trot_demo.mp4",
+    "trot_teacher_forward.mp4",
+    "trot_teacher_turn_left.mp4",
+    "trot_teacher_turn_right.mp4",
+    "bc_trot_forward.mp4",
+    "bc_trot_turn_left.mp4",
+    "bc_trot_turn_right.mp4",
     "PickAndCarry_walk.mp4",
     "PickAndCarry_reach.mp4",
     "PickAndCarry_haul.mp4",
@@ -50,9 +57,12 @@ PREFERRED = (
 TITLES = {
     "PickAndCarry_smoke.mp4": ("起動確認", "ロボットが足場に立つかを見ます"),
     "PickAndCarry_z1_smoke.mp4": ("起動確認（Z1）", "軽い腕でも足場に立つかを見ます"),
-    "trot_teacher_demo.mp4": ("教師デモ（CPG）", "立つ・座る・歩く・旋回などを CPG 教師が示します"),
-    "bc_trot_demo.mp4": ("BC デモ", "教師を模倣した行動クローニングの方策です"),
-    "gail_trot_demo.mp4": ("GAIL デモ", "識別器報酬で強化学習した模倣方策です"),
+    "trot_teacher_forward.mp4": ("教師・前進", "CPG 教師の前進です"),
+    "trot_teacher_turn_left.mp4": ("教師・左旋回", "CPG 教師の左旋回です"),
+    "trot_teacher_turn_right.mp4": ("教師・右旋回", "CPG 教師の右旋回です"),
+    "bc_trot_forward.mp4": ("BC・前進", "行動クローニングの前進です"),
+    "bc_trot_turn_left.mp4": ("BC・左旋回", "行動クローニングの左旋回です"),
+    "bc_trot_turn_right.mp4": ("BC・右旋回", "行動クローニングの右旋回です"),
     "PickAndCarry_walk.mp4": ("歩行", "止まる・歩く・曲がるを、腕を動かしながら続けます"),
     "PickAndCarry_reach.mp4": ("到達", "歩行の重みから続け、空中の点に手先を届かせます"),
     "PickAndCarry_ppo.mp4": ("箱運び", "保存した重みで、拾って目標へ置きます"),
@@ -68,95 +78,182 @@ TITLES = {
     "PickAndCarry_z1_compare.mp4": ("学習の途中経過（Z1）", "早い時点と遅い時点を並べます"),
 }
 OUTPUT_NAME = "PickAndCarry_presentation.mp4"
-SLIDE_NARRATION = (
-    "学習条件です。ユニットリーのゴーツーに、ユニットリーのゼットワンを載せます。"
-    "学習はピーピーオーと、行動クローニング、ゲイルです。全段階が観測81、制御17です。"
-    "脚はシーピージーのパラメータを方策が出し、環境が12関節へ展開します。"
-    "腕が違う古い保存や、制御19の古い重みは続きに使いません。"
-    "箱運びの段階は、歩く、拾う、運ぶ、置く、の4つです。",
-    "問題設定です。平らな場所から出発し、不整地を渡って箱を拾います。"
-    "もう一度不整地を渡り、目標に置きます。箱と目標の下は平らです。"
-    "茶色の段は、段差を選んだときだけで、箱の前に1段、置く前に2段です。"
-    "1試行は20秒です。目標の近くに低く置くと成功で、大きく傾くと転倒です。",
-    "段階的な学習です。最初は歩行です。平地から始めて、傾斜と段差へ広げ、腕を動かしながら歩きます。"
-    "次に、空中の点へ手先を届かせる到達です。そのあと、歩きながら持つ、箱運び、ボールのキャッチの順です。"
-    "同じ大きさの観測と行動なので、直前の段階の重みを初期値にします。"
-    "箱運びは、歩きながら持つ段階の重みから続けます。キャッチは到達の重みから続け、静止、ゆっくり、ばらす、飛ぶ、ノイズの順に難しくします。"
-    "1秒保持すると成功です。次の段階へ進むかは、録画を見て決めます。人の点数で報酬は置き換えていません。",
-    "学習の工夫です。歩行と把持を一度に覚えさせず、段階に分けています。"
-    "同じ観測81と行動17です。直前の段階の重みを初期値にします。"
-    "報酬は、成功した瞬間だけではなく、毎ステップの接近と、速度の一致でも点を出します。"
-    "歩行で成績が低いあいだは平地に戻し、キャッチで成功が少ないあいだは易しいボールに戻します。"
-    "8回続いて回復したら、選んだ課題まで上げます。メニューからは、上の段階の重みで易しい課題を学び直すこともできます。",
-    "報酬の説明です。箱運びでは、秒速0.4メートルで前に進むと点が増えます。"
-    "箱に手を近づける、つかむ、運ぶ、目標に置く、でも点が増えます。"
-    "置けた瞬間は10点、転ぶと5点の減点です。横滑りと、大きすぎる操作も減点です。"
-    "歩行の段階では、この表の代わりに、指令した速度への一致が点になります。"
-    "到達とキャッチでは、手をボールへ近づけること、速度を揃えること、指のあいだで保持することが点になります。",
-    "損失と学習曲線です。方策のロスは、良かった行動を少しずつ増やす量で、"
-    "一度の変化はクリップ0.2までに制限します。価値のロスは、これからの報酬の予測誤差で、係数は1.0です。"
-    "エントロピーは0.01で、探索を残します。"
-    "箱運びの曲線では、報酬と把持率は上がるほど良く、手先と箱の距離は下がるほど良いです。"
-    "歩行の記録はトラッキングで、1に近いほど指令どおりです。方策のロスは、ゼロの近くに落ち着きます。",
+# Submission target: OP/ED + body must stay within this budget.
+# Allow a little headroom so full narrations are not rejected after padding.
+MAX_TOTAL_SECONDS = 210.0
+# Per-recording cap so demos/playbacks do not dominate the reel.
+# Skill clips (forward/turn) are shorter; stage plays can use the full cap.
+CLIP_MAX_SECONDS = 10.0
+SKILL_CLIP_MAX_SECONDS = 6.0
+SKILL_CLIP_NAMES = frozenset(
+    {
+        "trot_teacher_forward.mp4",
+        "trot_teacher_turn_left.mp4",
+        "trot_teacher_turn_right.mp4",
+        "bc_trot_forward.mp4",
+        "bc_trot_turn_left.mp4",
+        "bc_trot_turn_right.mp4",
+    }
 )
-# Conditions, the course, the curriculum, and the training techniques play first.
-OPENING_SLIDES = 4
+# Final submission page picks from 改版.pptx (1-based). Skip P4 CPG network and P7.
+OPENING_PAGES = (1, 2, 3, 5, 6)
+CLOSING_PAGES = (8, 9)  # P8 curves → P9 conclusion
+# Kept for CLI compatibility with --opening-slides / --closing-slides.
+OPENING_SLIDES = len(OPENING_PAGES)
+CLOSING_SLIDES = len(CLOSING_PAGES)
+# Quiet beat between slides / before the next section (seconds).
+TRANSITION_SECONDS = 2.5
+# Spoken lines use readings that Microsoft Haruka will not mis-parse
+# (e.g. 残差 → ざんさ, not のこりさ). Visual slide text stays in kanji.
+OPENING_NARRATION = {
+    1: "最終課題の目的です。ゴーツーにゼットワンを載せ、不整地を歩いて箱を所定位置まで運ぶほうさくを学習します。",
+    2: (
+        "ロボットと問題設定です。よんそくじゅうにかんせつとろくじくアームで、"
+        "平地から不整地を渡り、箱を拾い、目標へ置きます。"
+    ),
+    3: "せいぎょほうしんです。あしはシーピージー、腕はかいせきアイケーとざんさです。",
+    5: "かんそくとせいぎょりょうです。かんそくははちじゅういち、こうどうはにじゅうにです。",
+    6: (
+        "学習の流れです。教師シーピージーをビーシーでまね、"
+        "ピーピーオーで歩行、とうたつ、はこはこびとだんかいを上げます。"
+    ),
+}
+CLOSING_NARRATION = {
+    8: (
+        "ロスと学習曲線です。ほうさくロス、かちロス、エントロピーで更新します。"
+        "ほうしゅうやはじりつが上がり、距離とロスが下がるほど良いです。"
+    ),
+    9: (
+        "結論です。歩行の安定化や段階のつなぎに苦労しました。"
+        "キャッチなど、より高度なタスクまで進めたい意図はありましたが、"
+        "計算リソースが足りず、十分な反復を回せませんでした。"
+        "そのため解析アイケーなどで高速化しつつ、段階を絞って提出しています。"
+    ),
+}
+LAUNCHER_PPTX = LAUNCHER / "PickAndCarry_学習条件_改版.pptx"
 VIDEO_NARRATION = {
     "PickAndCarry_smoke.mp4": "起動確認です。ロボットが足場に立つかを見ます。",
-    "PickAndCarry_z1_smoke.mp4": "ゼットワンでの起動確認です。軽い腕でも足場に立つかを見ます。",
-    "trot_teacher_demo.mp4": "教師デモです。シーピージー教師が立つ、座る、歩く、旋回などの技能を示します。",
-    "bc_trot_demo.mp4": "行動クローニングのデモです。教師のシーピージー出力を模倣した方策です。",
-    "gail_trot_demo.mp4": "ゲイルのデモです。識別器の報酬で強化学習した模倣方策です。",
-    "PickAndCarry_walk.mp4": "歩行です。止まる、歩く、曲がるを、腕を動かしながら続ける方策を再生しています。",
-    "PickAndCarry_reach.mp4": "到達です。歩行の重みから続けて、空中の点に手先を届かせる様子です。",
-    "PickAndCarry_ppo.mp4": "箱運びです。保存した重みで、不整地を渡って箱を拾い、目標へ運ぶ様子です。",
-    "PickAndCarry_z1.mp4": "ゼットワンの箱運びです。歩きながら持つ段階の重みから続けた方策です。",
-    "PickAndCarry_haul.mp4": "歩きながら持つ段階です。到達の重みから、箱を持ったまま歩きます。",
-    "PickAndCarry_catch_static.mp4": "キャッチの静止です。手の前で止まっているボールを、1秒つかむ様子です。",
-    "PickAndCarry_catch_slow.mp4": "キャッチのゆっくりです。まっすぐ転がってくるボールをつかむ様子です。",
-    "PickAndCarry_catch_random.mp4": "キャッチのばらす段階です。速さと方向が毎回変わるボールをつかむ様子です。",
-    "PickAndCarry_catch_fly.mp4": "キャッチの飛ぶ段階です。転がってから宙を飛んでくるボールを、手の位置に合わせてつかむ様子です。",
-    "PickAndCarry_catch_noisy.mp4": "キャッチのノイズ段階です。ボールの位置を少しずらして見せたときの様子です。",
-    "PickAndCarry_catch.mp4": "転がるボールを掴む段階です。前の段階の重みから続けた方策です。",
-    "PickAndCarry_compare.mp4": "学習の途中経過です。同じ配置で、早い時点と遅い時点を同時に再生しています。",
-    "PickAndCarry_z1_compare.mp4": "ゼットワンの途中経過です。同じ配置で、早い時点と遅い時点を同時に再生しています。",
+    "PickAndCarry_z1_smoke.mp4": "ゼットワンでの起動確認です。",
+    "trot_teacher_forward.mp4": "教師データのぜんしんです。オープンループのシーピージーが前へ進みます。",
+    "trot_teacher_turn_left.mp4": "教師データの左せんかいです。",
+    "trot_teacher_turn_right.mp4": "教師データの右せんかいです。",
+    "bc_trot_forward.mp4": "ビーシーのぜんしんです。教師をもほうしたほうさくです。",
+    "bc_trot_turn_left.mp4": "ビーシーの左せんかいです。",
+    "bc_trot_turn_right.mp4": "ビーシーの右せんかいです。",
+    "PickAndCarry_walk.mp4": "カリキュラムの歩行です。速度しれいに合わせて歩きます。",
+    "PickAndCarry_reach.mp4": "とうたつです。歩行のおもみから続け、空中の点へ、てさきを届けます。",
+    "PickAndCarry_ppo.mp4": "はこはこびです。箱を拾い、目標へ置きます。",
+    "PickAndCarry_z1.mp4": "はこはこびです。ゼットワンで拾って運び、目標へ置きます。",
+    "PickAndCarry_haul.mp4": "持ち歩きです。箱を持ったまま歩きます。",
+    "PickAndCarry_catch_static.mp4": "キャッチの静止です。",
+    "PickAndCarry_catch_slow.mp4": "キャッチのゆっくりです。",
+    "PickAndCarry_catch_random.mp4": "キャッチのばらすです。",
+    "PickAndCarry_catch_fly.mp4": "キャッチの飛ぶです。",
+    "PickAndCarry_catch_noisy.mp4": "キャッチのノイズです。",
+    "PickAndCarry_catch.mp4": "キャッチです。",
+    "PickAndCarry_compare.mp4": "学習の途中経過です。",
+    "PickAndCarry_z1_compare.mp4": "学習の途中経過です。",
+}
+
+# Fallback for any narration that still contains technical kanji.
+_SPEECH_REPLACEMENTS = (
+    ("残差", "ざんさ"),
+    ("開ループ", "オープンループ"),
+    ("対角トロット", "たいかくトロット"),
+    ("制御方針", "せいぎょほうしん"),
+    ("制御量", "せいぎょりょう"),
+    ("方策", "ほうさく"),
+    ("観測", "かんそく"),
+    ("模倣", "もほう"),
+    ("到達", "とうたつ"),
+    ("旋回", "せんかい"),
+    ("前進", "ぜんしん"),
+    ("箱運び", "はこはこび"),
+    ("手先", "てさき"),
+    ("重み", "おもみ"),
+    ("指令", "しれい"),
+    ("解析ヤコビアン", "かいせきヤコビアン"),
+    ("解析", "かいせき"),
+    ("数値", "すうち"),
+    ("次元", "じげん"),
+    ("関節", "かんせつ"),
+    ("段階", "だんかい"),
+    ("四足", "よんそく"),
+    ("六軸", "ろくじく"),
+    ("十二", "じゅうに"),
+    ("十五", "じゅうご"),
+    ("八十一", "はちじゅういち"),
+    ("二十二", "にじゅうに"),
+)
+
+
+def for_speech(text: str) -> str:
+    """Rewrite kanji that the Japanese TTS voice often misreads."""
+    out = text
+    for src, dst in _SPEECH_REPLACEMENTS:
+        out = out.replace(src, dst)
+    return out
+
+
+# Log/play folders often keep algorithm prefixes (ppo_/grpo_) in the basename.
+NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "PickAndCarry_walk.mp4": ("PickAndCarry_ppo_walk.mp4", "PickAndCarry_grpo_walk.mp4"),
+    "PickAndCarry_reach.mp4": ("PickAndCarry_ppo_reach.mp4", "PickAndCarry_grpo_reach.mp4"),
+    "PickAndCarry_haul.mp4": ("PickAndCarry_ppo_haul.mp4",),
+    "PickAndCarry_z1.mp4": ("PickAndCarry_ppo_z1.mp4", "PickAndCarry_z1.mp4"),
+    "PickAndCarry_catch.mp4": ("PickAndCarry_ppo_catch.mp4",),
+    "gail_trot_demo.mp4": ("gail_trot_demo.mp4", "valuedice_trot_demo.mp4"),
 }
 
 
 def _newest_named(folder: Path, name: str) -> Path | None:
-    direct = folder / name
-    if direct.is_file():
-        return direct
-    matches = [path for path in folder.rglob(name) if path.is_file()]
+    candidates = (name,) + NAME_ALIASES.get(name, ())
+    matches: list[Path] = []
+    for candidate in candidates:
+        direct = folder / candidate
+        if direct.is_file():
+            matches.append(direct)
+        matches.extend(path for path in folder.rglob(candidate) if path.is_file())
     if not matches:
         return None
-    return max(matches, key=lambda path: path.stat().st_mtime)
+    # Prefer exact preferred basename when several aliases exist.
+    exact = [path for path in matches if path.name == name]
+    pool = exact or matches
+    return max(pool, key=lambda path: path.stat().st_mtime)
 
 
 def presentation_videos(folder: Path) -> list[Path]:
     """Collect clips by preferred basename (flat or under videos/<task>/<run>/)."""
-    rank = {name: index for index, name in enumerate(PREFERRED)}
     chosen: list[Path] = []
-    seen: set[str] = set()
+    seen_paths: set[Path] = set()
     for name in PREFERRED:
         path = _newest_named(folder, name)
-        if path is None:
+        if path is None or path in seen_paths:
             continue
         chosen.append(path)
-        seen.add(name)
-    extras = [
-        path
-        for path in folder.rglob("*.mp4")
-        if path.name != OUTPUT_NAME and path.name not in seen and path not in chosen
-    ]
-    extras.sort(key=lambda path: (rank.get(path.name, len(PREFERRED)), path.stat().st_mtime, path.name.lower()))
-    return chosen + extras
+        seen_paths.add(path)
+    # Do not dump every skill clip; only preferred stage reels belong in the submission.
+    return chosen
+
+
+def canonical_clip_name(path: Path) -> str:
+    """Map ``ppo_`` / ``grpo_`` play filenames back to the preferred title key."""
+    name = path.name
+    if name in TITLES or name in VIDEO_NARRATION:
+        return name
+    for preferred, aliases in NAME_ALIASES.items():
+        if name in aliases:
+            return preferred
+    return name
 
 
 STAGE_CLIPS = (
-    ("trot_teacher_demo.mp4", "教師デモ（CPG）"),
-    ("bc_trot_demo.mp4", "BC デモ"),
-    ("gail_trot_demo.mp4", "GAIL デモ"),
+    ("trot_teacher_forward.mp4", "教師・前進"),
+    ("trot_teacher_turn_left.mp4", "教師・左旋回"),
+    ("trot_teacher_turn_right.mp4", "教師・右旋回"),
+    ("bc_trot_forward.mp4", "BC・前進"),
+    ("bc_trot_turn_left.mp4", "BC・左旋回"),
+    ("bc_trot_turn_right.mp4", "BC・右旋回"),
     ("PickAndCarry_walk.mp4", "歩行"),
     ("PickAndCarry_reach.mp4", "到達"),
     ("PickAndCarry_haul.mp4", "歩きながら持つ"),
@@ -270,13 +367,112 @@ def still_clip(ffmpeg: str, image: Path, seconds: float, output: Path) -> None:
     )
 
 
-def movie_clip(ffmpeg: str, source: Path, output: Path) -> None:
+def transition_gap(ffmpeg: str, seconds: float, output: Path) -> None:
+    """Silent paper-colored pause between slides / sections (with silent AAC)."""
+    _run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=0xF6F3EC:s=1280x720:r={FPS}:d={float(seconds):.2f}",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            str(output),
+        ]
+    )
+
+
+def movie_clip(ffmpeg: str, source: Path, output: Path, max_seconds: float | None = None) -> None:
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(source),
+        "-vf",
+        "scale=1280:720:force_original_aspect_ratio=decrease,"
+        "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x111111,fps=25,format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+    ]
+    if max_seconds is not None and max_seconds > 0:
+        command.extend(["-t", f"{float(max_seconds):.2f}"])
+    command.append(str(output))
+    _run(command)
+
+
+def branding_clip(ffmpeg: str, source: Path, output: Path) -> None:
+    """Normalize OP/ED to 1280x720@25 with silent stereo AAC (matches body concat)."""
+    if not source.is_file():
+        raise SystemExit(f"OP/ED がありません: {source}")
     _run(
         [
             ffmpeg,
             "-y",
             "-i",
             str(source),
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-vf",
+            "scale=1280:720:force_original_aspect_ratio=decrease,"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x000000,fps=25,format=yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            str(output),
+        ]
+    )
+
+
+def normalize_body_for_bookends(ffmpeg: str, body: Path, output: Path) -> None:
+    """Scale body to 1280x720@25 with stereo AAC (keep source audio, else silence)."""
+    probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(body)], capture_output=True, text=True)
+    has_audio = "Audio:" in probe.stderr
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(body),
+    ]
+    if not has_audio:
+        command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
+    command.extend(
+        [
             "-vf",
             "scale=1280:720:force_original_aspect_ratio=decrease,"
             "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x111111,fps=25,format=yuv420p",
@@ -288,10 +484,35 @@ def movie_clip(ffmpeg: str, source: Path, output: Path) -> None:
             "20",
             "-pix_fmt",
             "yuv420p",
-            "-an",
-            str(output),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0" if has_audio else "1:a:0",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
         ]
     )
+    if not has_audio:
+        command.append("-shortest")
+    command.append(str(output))
+    _run(command)
+
+
+def wrap_with_bookends(ffmpeg: str, body: Path, output: Path, work: Path) -> None:
+    """Write ``OP + body + ED`` to ``output``."""
+    op_clip = work / "op_fit.mp4"
+    ed_clip = work / "ed_fit.mp4"
+    body_fit = work / "body_fit.mp4"
+    branding_clip(ffmpeg, OP_PATH, op_clip)
+    branding_clip(ffmpeg, ED_PATH, ed_clip)
+    normalize_body_for_bookends(ffmpeg, body, body_fit)
+    concat_clips(ffmpeg, [op_clip, body_fit, ed_clip], output, audio=True)
 
 
 def media_duration(ffmpeg: str, path: Path) -> float:
@@ -306,7 +527,7 @@ def media_duration(ffmpeg: str, path: Path) -> float:
 def speak(text: str, wav: Path) -> float:
     """Write narration with the installed Japanese voice and return its length."""
     env = os.environ.copy()
-    env["PRES_TEXT"] = text
+    env["PRES_TEXT"] = for_speech(text)
     env["PRES_WAV"] = str(wav)
     script = r"""
 $ErrorActionPreference = 'Stop'
@@ -323,7 +544,52 @@ $synth.Dispose()
 
 
 def mux_voice(ffmpeg: str, video: Path, wav: Path, output: Path) -> None:
-    seconds = media_duration(ffmpeg, video)
+    """Mux narration onto video without cutting the speech short.
+
+    If the wav is longer than the picture, the last video frame is frozen until
+    the voice finishes. If the picture is longer, audio is padded with silence.
+    """
+    v_sec = media_duration(ffmpeg, video)
+    a_sec = media_duration(ffmpeg, wav)
+    out_sec = max(v_sec, a_sec) + 0.15
+    pad_v = max(0.0, out_sec - v_sec)
+    if pad_v > 0.05:
+        # Re-encode so tpad can freeze the last frame for the remaining speech.
+        _run(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(video),
+                "-i",
+                str(wav),
+                "-filter_complex",
+                f"[0:v]tpad=stop_mode=clone:stop_duration={pad_v:.2f},"
+                f"fps={FPS},format=yuv420p[v];"
+                f"[1:a]aresample=44100,aformat=channel_layouts=stereo,"
+                f"apad=whole_dur={out_sec:.2f}[a]",
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-t",
+                f"{out_sec:.2f}",
+                str(output),
+            ]
+        )
+        return
     _run(
         [
             ffmpeg,
@@ -333,7 +599,8 @@ def mux_voice(ffmpeg: str, video: Path, wav: Path, output: Path) -> None:
             "-i",
             str(wav),
             "-filter_complex",
-            f"[1:a]aresample=44100,aformat=channel_layouts=stereo,apad=whole_dur={seconds + 0.2:.2f}[a]",
+            f"[1:a]aresample=44100,aformat=channel_layouts=stereo,"
+            f"apad=whole_dur={out_sec:.2f}[a]",
             "-map",
             "0:v",
             "-map",
@@ -345,7 +612,7 @@ def mux_voice(ffmpeg: str, video: Path, wav: Path, output: Path) -> None:
             "-b:a",
             "128k",
             "-t",
-            f"{seconds:.2f}",
+            f"{out_sec:.2f}",
             str(output),
         ]
     )
@@ -388,23 +655,63 @@ def concat_clips(ffmpeg: str, clips: list[Path], output: Path, audio: bool = Fal
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Build a presentation mp4 from the slides and recordings.")
-    parser.add_argument("--pptx", type=Path, default=LAUNCHER / "PickAndCarry_学習条件.pptx")
+    parser.add_argument("--pptx", type=Path, default=LAUNCHER_PPTX)
     parser.add_argument("--videos", type=Path, default=LAUNCHER)
     parser.add_argument("--output", type=Path, default=LAUNCHER / OUTPUT_NAME)
-    parser.add_argument("--slide-seconds", type=float, default=12.0)
-    parser.add_argument("--card-seconds", type=float, default=3.0)
+    parser.add_argument("--slide-seconds", type=float, default=6.0, help="Minimum seconds per slide.")
+    parser.add_argument(
+        "--slide-max-seconds",
+        type=float,
+        default=10.0,
+        help="Preferred max when speech is short; never shorter than the narration.",
+    )
+    parser.add_argument("--card-seconds", type=float, default=1.5)
+    parser.add_argument("--clip-seconds", type=float, default=CLIP_MAX_SECONDS, help="Max seconds per recording.")
+    parser.add_argument("--max-seconds", type=float, default=MAX_TOTAL_SECONDS, help="Abort if longer than this.")
+    parser.add_argument("--opening-slides", type=int, default=OPENING_SLIDES)
+    parser.add_argument("--closing-slides", type=int, default=CLOSING_SLIDES)
+    parser.add_argument(
+        "--transition-seconds",
+        type=float,
+        default=TRANSITION_SECONDS,
+        help="Quiet seconds between slides / before the next section.",
+    )
+    parser.add_argument(
+        "--wrap-body",
+        type=Path,
+        default=None,
+        help="Skip slide assembly; only prepend OP and append ED around this mp4.",
+    )
+    parser.add_argument(
+        "--no-bookends",
+        action="store_true",
+        help="Do not attach PAI応用1_最終課題_OP/ED.mp4.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.wrap_body is not None:
+        body = args.wrap_body
+        if not body.is_file():
+            raise SystemExit(f"本編がありません: {body}")
+        if args.no_bookends:
+            raise SystemExit("--wrap-body と --no-bookends は同時に使えません")
+        with tempfile.TemporaryDirectory(prefix="pac_wrap_") as tmp:
+            wrap_with_bookends(ffmpeg, body, args.output, Path(tmp))
+        print(f"提出動画（OP+本編+ED）: {args.output.resolve()}")
+        return
+
     if not args.pptx.is_file():
         raise SystemExit(f"スライドがありません: {args.pptx}")
     videos = presentation_videos(args.videos)
     report_stage_clips(args.videos)
     if not videos:
         raise SystemExit(f"つなぐ mp4 がありません: {args.videos}")
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     print(f"スライド: {args.pptx}")
     print("録画:")
     for video in videos:
@@ -412,38 +719,74 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="pac_pres_") as tmp:
         work = Path(tmp)
         slides = export_slides(args.pptx, work / "slides")
-        if len(slides) != len(SLIDE_NARRATION):
-            print(
-                f"スライドは {len(slides)} 枚、説明は {len(SLIDE_NARRATION)} 件です。",
-                flush=True,
-            )
         clips: list[Path] = []
 
-        def append_slide(index: int, slide: Path) -> None:
-            text = SLIDE_NARRATION[index - 1] if index - 1 < len(SLIDE_NARRATION) else "続きのスライドです。"
-            wav = work / f"slide_{index:02d}.wav"
+        gap_n = 0
+
+        def append_gap(reason: str) -> None:
+            nonlocal gap_n
+            if args.transition_seconds <= 0:
+                return
+            gap_n += 1
+            path = work / f"gap_{gap_n:02d}.mp4"
+            transition_gap(ffmpeg, args.transition_seconds, path)
+            clips.append(path)
+            print(f"間 {args.transition_seconds:.1f} 秒（{reason}）", flush=True)
+
+        def append_slide(label: str, slide: Path, text: str, *, gap_after: bool = True) -> None:
+            wav = work / f"{label}.wav"
             spoken = speak(text, wav)
-            seconds = max(args.slide_seconds, spoken + 0.6)
-            silent = work / f"slide_{index:02d}_silent.mp4"
-            clip = work / f"slide_{index:02d}.mp4"
+            # Always cover the full spoken line; slide_max only shortens quiet slides.
+            seconds = max(spoken + 0.8, min(args.slide_max_seconds, args.slide_seconds))
+            silent = work / f"{label}_silent.mp4"
+            clip = work / f"{label}.mp4"
             still_clip(ffmpeg, slide, seconds, silent)
             mux_voice(ffmpeg, silent, wav, clip)
+            out_sec = media_duration(ffmpeg, clip)
             clips.append(clip)
-            print(f"スライド {index}/{len(slides)} を {seconds:.0f} 秒、説明つきで入れました。")
+            print(
+                f"{label} を {out_sec:.0f} 秒（読み上げ {spoken:.1f} 秒）で入れました。",
+                flush=True,
+            )
+            if gap_after:
+                append_gap(label)
 
-        for index, slide in enumerate(slides[:OPENING_SLIDES], start=1):
-            append_slide(index, slide)
+        if not args.no_bookends:
+            op_clip = work / "op_fit.mp4"
+            branding_clip(ffmpeg, OP_PATH, op_clip)
+            clips.append(op_clip)
+            print(f"OP を先頭に追加: {OP_PATH.name}", flush=True)
+            append_gap("OPのあと")
+
+        opening_pages = [p for p in OPENING_PAGES if 1 <= p <= len(slides)]
+        closing_pages = [p for p in CLOSING_PAGES if 1 <= p <= len(slides)]
+        print(
+            f"構成: P{','.join(map(str, opening_pages))} → 学習動画 → P{','.join(map(str, closing_pages))}",
+            flush=True,
+        )
+        for page in opening_pages:
+            text = OPENING_NARRATION.get(page, "続きのスライドです。")
+            append_slide(f"slide_{page:02d}", slides[page - 1], text)
         for video in videos:
-            title, subtitle = TITLES.get(video.name, (video.stem, "録画"))
-            text = VIDEO_NARRATION.get(video.name, f"{title}。{subtitle}")
+            key = canonical_clip_name(video)
+            title, subtitle = TITLES.get(key, (video.stem, "録画"))
+            text = VIDEO_NARRATION.get(key, f"{title}。{subtitle}")
             wav = work / f"{video.stem}.wav"
             spoken = speak(text, wav)
             card = work / f"{video.stem}_card.png"
             title_card(title, subtitle, card)
             movie = work / f"{video.stem}_fit.mp4"
-            movie_clip(ffmpeg, video, movie)
+            clip_cap = (
+                min(args.clip_seconds, SKILL_CLIP_MAX_SECONDS)
+                if canonical_clip_name(video) in SKILL_CLIP_NAMES
+                else args.clip_seconds
+            )
+            movie_clip(ffmpeg, video, movie, max_seconds=clip_cap)
             movie_seconds = media_duration(ffmpeg, movie)
-            card_seconds = max(args.card_seconds, spoken - movie_seconds + 0.6)
+            # Title card absorbs leftover speech time so mux_voice never clips the wav.
+            card_seconds = max(args.card_seconds, spoken - movie_seconds + 0.8)
+            if spoken <= movie_seconds:
+                card_seconds = min(args.card_seconds, 1.2)
             card_clip = work / f"{video.stem}_card.mp4"
             still_clip(ffmpeg, card, card_seconds, card_clip)
             silent = work / f"{video.stem}_silent.mp4"
@@ -451,12 +794,37 @@ def main() -> None:
             concat_clips(ffmpeg, [card_clip, movie], silent)
             mux_voice(ffmpeg, silent, wav, clip)
             clips.append(clip)
-            print(f"録画を追加: {video.name}（説明 {spoken:.0f} 秒）")
-        for offset, slide in enumerate(slides[OPENING_SLIDES:]):
-            append_slide(OPENING_SLIDES + offset + 1, slide)
-        args.output.parent.mkdir(parents=True, exist_ok=True)
+            print(
+                f"録画を追加: {video.name}（映像 {movie_seconds:.0f} 秒、"
+                f"カード {card_seconds:.1f} 秒、読み上げ {spoken:.1f} 秒）",
+                flush=True,
+            )
+        append_gap("学習動画のあと")
+        for i, page in enumerate(closing_pages):
+            text = CLOSING_NARRATION.get(page, "まとめのスライドです。")
+            # Keep a beat between closing slides; skip after the last before ED.
+            append_slide(
+                f"slide_{page:02d}",
+                slides[page - 1],
+                text,
+                gap_after=(i + 1 < len(closing_pages)),
+            )
+
+        if not args.no_bookends:
+            append_gap("EDのまえ")
+            ed_clip = work / "ed_fit.mp4"
+            branding_clip(ffmpeg, ED_PATH, ed_clip)
+            clips.append(ed_clip)
+            print(f"ED を末尾に追加: {ED_PATH.name}", flush=True)
+
         concat_clips(ffmpeg, clips, args.output, audio=True)
-    print(f"プレゼン動画: {args.output.resolve()}")
+    duration = media_duration(ffmpeg, args.output)
+    print(f"プレゼン動画: {args.output.resolve()}（{duration:.1f} 秒）")
+    if duration > args.max_seconds + 0.5:
+        raise SystemExit(
+            f"提出上限 {args.max_seconds:.0f} 秒を超えています（{duration:.1f} 秒）。"
+            " --clip-seconds や --opening-slides を下げて再実行してください。"
+        )
 
 
 if __name__ == "__main__":
