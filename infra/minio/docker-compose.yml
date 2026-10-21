@@ -1,0 +1,42 @@
+# Local S3-compatible store for DVC checkpoints and MLflow artifacts.
+#   docker compose -f infra/minio/docker-compose.yml up -d
+# Console: http://127.0.0.1:9001  (minioadmin / minioadmin)
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: pai-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${PAI_MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${PAI_MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - pai_minio_data:/data
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    container_name: pai-minio-init
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      echo waiting for minio;
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do sleep 1; done;
+      mc mb -p local/pai-dvc || true;
+      mc mb -p local/pai-mlflow || true;
+      mc anonymous set none local/pai-dvc || true;
+      mc anonymous set none local/pai-mlflow || true;
+      echo buckets ready;
+      "
+    environment:
+      MINIO_ROOT_USER: ${PAI_MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${PAI_MINIO_SECRET_KEY:-minioadmin}
+    restart: "no"
+
+volumes:
+  pai_minio_data:

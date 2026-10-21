@@ -152,7 +152,27 @@ Windows では起動スクリプトで「ROS 2 で表示する」を選びます
 
 曲線は報酬、把持率、手先と箱の距離、設置率です。TensorBoard は `tensorboard --logdir logs/ppo_walk` です。ここには方策 Loss、価値 Loss、エントロピーも残ります。
 
-## 5. タスクの要点
+## 5. Git / MLflow / DVC / MinIO
+
+| 層 | 役割 |
+| --- | --- |
+| Git | コードと DVC ポインタ |
+| MLflow | 実験のパラメータ・メトリクス（`logs/mlflow`）。任意で成果物を MinIO へ |
+| DVC | 区切りごとの重み抜粋（`artifacts/checkpoints/`） |
+| MinIO | DVC / MLflow 用のローカル S3（`infra/minio`） |
+
+学習中は従来どおり `logs/` に書き、段階の区切りでだけ `scripts/dvc_sync.py publish` → `push` します。手順の詳細は [docs/DVC_MINIO.md](docs/DVC_MINIO.md) です。
+
+```powershell
+copy .env.example .env
+docker compose -f infra/minio/docker-compose.yml --env-file .env up -d
+.\.venv\Scripts\python.exe -m pip install -r requirements-dvc.txt
+. .\scripts\load_pai_env.ps1
+.\.venv\Scripts\python.exe scripts\dvc_sync.py publish --log-dir logs\ppo_z1
+.\.venv\Scripts\python.exe scripts\dvc_sync.py push
+```
+
+## 6. タスクの要点
 
 コースは、平地から出発し、不整地、拾う平地、不整地、置く平地の順です。1 試行は 20 秒（`dt` 0.02 秒で 1000 ステップ）です。転倒は傾き 60 度超、またはベース高さ 0.18 m 未満です。時間切れは失敗ではなく、価値関数で次状態を補います。
 
@@ -211,21 +231,21 @@ Windows では起動スクリプトで「ROS 2 で表示する」を選びます
 
 箱運びの報酬の式は `pick_and_carry/reward.py` です。到達とキャッチは `pick_and_carry/curriculum.py` の `manipulation_reward`（手先の接近、速度の一致、保持）です。前進（秒速 0.40 m 付近）、接近、把持、運搬、設置（+10）、転倒（-5）、操作量、生存を足します。歩行だけの学習では把持と設置の点は出しません。`ee_dist` は記録用で、報酬には足しません。
 
-## 6. 腕
+## 7. 腕
 
 腕は Unitree Z1 のみです。公式の関節位置と慣性を使い、グリッパ込みで約 5.2 kg、6 軸です。URDF は `assets/urdf/quadruped_z1.urdf` です。観測 81、行動 22（CPG+腕）です。
 
 Go2 の `base` は +X が前、+Z が上です。腕は `arm_mount_joint` で `(-0.05, 0, 0.08)` に固定します。胴体の少し後ろ、上面のすぐ上です。
 
-## 7. Colab
+## 8. Colab
 
 手順は [docs/COLAB.md](docs/COLAB.md) です。ノートブックは `notebooks/pick_and_carry_colab.ipynb` です。起動スクリプトと同じく段階（walk/reach/haul/carry/catch）と手法（PPO/GRPO/Symmetric PPO）を選び、同じ `logs/{algo}_*` に学習・推論します。GPU ランタイムが必須です。3D ウィンドウは使わず、mp4 をノートの中で再生します。
 
-## 8. 実機への適用
+## 9. 実機への適用
 
 シミュレータで学習できた方策を Go2 + Z1 実機へ載せる手順・観測行動の契約・安全な段階適用は [docs/SIM_TO_REAL.md](docs/SIM_TO_REAL.md) です。現状リポジトリは実機 SDK 送信までは含みません（rviz 表示用の ROS ブリッジまで）。
 
-## 9. コードの場所
+## 10. コードの場所
 
 シミュレータがなくても読める計算は次のファイルです。
 

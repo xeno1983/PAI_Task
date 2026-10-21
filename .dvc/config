@@ -1,0 +1,6 @@
+[core]
+    remote = minio
+    analytics = false
+['remote "minio"']
+    url = s3://pai-dvc
+    endpointurl = http://127.0.0.1:9000

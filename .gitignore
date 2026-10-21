@@ -5,6 +5,11 @@ logs/
 *.egg-info/
 .venv/
 
+# Local secrets and DVC cache (*.dvc pointers stay in Git)
+.env
+.dvc/tmp/
+.dvc/cache/
+
 # Trained weights and exported models
 *.pt
 *.pth
