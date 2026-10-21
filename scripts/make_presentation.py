@@ -79,8 +79,8 @@ TITLES = {
 }
 OUTPUT_NAME = "PickAndCarry_presentation.mp4"
 # Submission target: OP/ED + body must stay within this budget.
-# Allow a little headroom so full narrations are not rejected after padding.
-MAX_TOTAL_SECONDS = 210.0
+# OP/ED + slides + stage clips; leave headroom for full narrations.
+MAX_TOTAL_SECONDS = 225.0
 # Per-recording cap so demos/playbacks do not dominate the reel.
 # Skill clips (forward/turn) are shorter; stage plays can use the full cap.
 CLIP_MAX_SECONDS = 10.0
@@ -201,6 +201,11 @@ NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "PickAndCarry_reach.mp4": ("PickAndCarry_ppo_reach.mp4", "PickAndCarry_grpo_reach.mp4"),
     "PickAndCarry_haul.mp4": ("PickAndCarry_ppo_haul.mp4",),
     "PickAndCarry_z1.mp4": ("PickAndCarry_ppo_z1.mp4", "PickAndCarry_z1.mp4"),
+    "PickAndCarry_catch_static.mp4": ("PickAndCarry_ppo_catch_static.mp4",),
+    "PickAndCarry_catch_slow.mp4": ("PickAndCarry_ppo_catch_slow.mp4",),
+    "PickAndCarry_catch_random.mp4": ("PickAndCarry_ppo_catch_random.mp4",),
+    "PickAndCarry_catch_fly.mp4": ("PickAndCarry_ppo_catch_fly.mp4",),
+    "PickAndCarry_catch_noisy.mp4": ("PickAndCarry_ppo_catch_noisy.mp4",),
     "PickAndCarry_catch.mp4": ("PickAndCarry_ppo_catch.mp4",),
     "gail_trot_demo.mp4": ("gail_trot_demo.mp4", "valuedice_trot_demo.mp4"),
 }
