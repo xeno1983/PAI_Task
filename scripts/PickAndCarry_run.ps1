@@ -1275,13 +1275,15 @@ switch ($choice) {
         Write-Host " DVC / MinIO（学習ホットパスでは使わない。区切りで共有用）"
         Write-Host "   1  MinIO を起動（Docker Desktop も必要なら起動）"
         Write-Host "   2  初回セットアップ（pip + DVC remote + MinIO 起動）"
-        Write-Host "   3  チェックポイントを publish → push（段階を選ぶ）"
-        Write-Host "   4  MinIO から pull → restore（段階を選ぶ）"
-        Write-Host "   5  状態確認（dvc status）"
-        Write-Host "   6  MinIO Console を開く"
+        Write-Host "   3  最良チェックポイントを publish → push（metrics で選ぶ・推奨）"
+        Write-Host "   4  最新 iteration を publish → push"
+        Write-Host "   5  MinIO から pull → restore（段階を選ぶ）"
+        Write-Host "   6  DVC の最良重みで推論（pull → resolve → play）"
+        Write-Host "   7  状態確認（dvc status）"
+        Write-Host "   8  MinIO Console を開く"
         Write-Host "   手順書: docs\DVC_MINIO.md"
-        $dvcPick = Read-Host "DVC / MinIO [1]"
-        if ([string]::IsNullOrWhiteSpace($dvcPick)) { $dvcPick = "1" }
+        $dvcPick = Read-Host "DVC / MinIO [3]"
+        if ([string]::IsNullOrWhiteSpace($dvcPick)) { $dvcPick = "3" }
 
         function Invoke-LoadPaiEnv {
             . (Join-Path (Get-Location) "scripts\load_pai_env.ps1")
@@ -1301,15 +1303,20 @@ switch ($choice) {
                 Select-Algo
                 Select-Curriculum -ForPlay
                 $logDir = $script:logDir -replace "/", "\"
-                Write-Host "publish → push 対象: $logDir"
-                & $python -u scripts\dvc_sync.py publish --log-dir $logDir
+                Write-Host "最良を publish → push: $logDir"
+                & $python -u scripts\dvc_sync.py publish --log-dir $logDir --select best --push
                 $code = $LASTEXITCODE
-                if ($code -eq 0) {
-                    & $python -u scripts\dvc_sync.py push
-                    $code = $LASTEXITCODE
-                }
             }
             "4" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $logDir = $script:logDir -replace "/", "\"
+                Write-Host "最新を publish → push: $logDir"
+                & $python -u scripts\dvc_sync.py publish --log-dir $logDir --select latest --push
+                $code = $LASTEXITCODE
+            }
+            "5" {
                 Invoke-LoadPaiEnv
                 Select-Algo
                 Select-Curriculum -ForPlay
@@ -1322,12 +1329,33 @@ switch ($choice) {
                     $code = $LASTEXITCODE
                 }
             }
-            "5" {
+            "6" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $stageName = Split-Path ($script:logDir -replace "/", "\") -Leaf
+                Write-Host "DVC 最良で推論: artifacts\checkpoints\$stageName"
+                & $python -u scripts\dvc_sync.py pull
+                $code = $LASTEXITCODE
+                if ($code -ne 0) { break }
+                $resolved = & $python -u scripts\dvc_sync.py resolve --name $stageName 2>&1 | Select-Object -Last 1
+                if (-not $resolved -or -not (Test-Path -LiteralPath "$resolved")) {
+                    Write-Host "resolve に失敗しました。先にメニュー 9 → 3 で publish してください。"
+                    $code = 1
+                    break
+                }
+                Write-Host "使う重み: $resolved"
+                $video = Join-Path $out ("PickAndCarry_dvc_" + $stageName + ".mp4")
+                & $python -u -m pick_and_carry.train_ppo --play --resume "$resolved" --num-envs 1 --record $video --seconds 20 --log-dir ($script:logDir -replace "/", "\") @algoArgs @armArgs @terrainArgs @curriculumArgs
+                $code = $LASTEXITCODE
+                if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
+            }
+            "7" {
                 Invoke-LoadPaiEnv
                 & $python -u scripts\dvc_sync.py status
                 $code = $LASTEXITCODE
             }
-            "6" {
+            "8" {
                 Invoke-LoadPaiEnv
                 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "scripts\start_minio.ps1") -OpenConsole
                 $code = $LASTEXITCODE

@@ -28,10 +28,12 @@ train → logs/<stage>/ppo_*.pt + metrics.jsonl
 | --- | --- |
 | 9 → 1 | MinIO 起動（必要なら Docker Desktop も起動） |
 | 9 → 2 | 初回セットアップ（pip + DVC remote） |
-| 9 → 3 | チェックポイント publish → push |
-| 9 → 4 | pull → restore |
-| 9 → 5 | `dvc status` |
-| 9 → 6 | MinIO Console を開く |
+| 9 → 3 | **最良**チェックポイントを publish → push（`metrics.jsonl` で選ぶ） |
+| 9 → 4 | **最新** iteration を publish → push |
+| 9 → 5 | pull → restore |
+| 9 → 6 | DVC の最良重みで推論（pull → `best.pt` → play） |
+| 9 → 7 | `dvc status` |
+| 9 → 8 | MinIO Console を開く |
 
 手動で起動する場合:
 
@@ -68,22 +70,37 @@ dvc remote list
 
 ```powershell
 .\scripts\load_pai_env.ps1
-.\.venv\Scripts\python.exe scripts\dvc_sync.py publish --log-dir logs\ppo_z1
-.\.venv\Scripts\python.exe scripts\dvc_sync.py push
+# 既定は --select best（metrics ピークに最も近い重み + best.pt）
+.\.venv\Scripts\python.exe scripts\dvc_sync.py publish --log-dir logs\ppo_z1 --select best --push
+# 最新 iteration だけ欲しいとき
+.\.venv\Scripts\python.exe scripts\dvc_sync.py publish --log-dir logs\ppo_curriculum_walk --select latest --push
 ```
 
-別マシン / クリーンな作業ツリーで戻す:
+別マシン / クリーンな作業ツリーで戻す・推論する:
 
 ```powershell
 .\scripts\load_pai_env.ps1
 .\.venv\Scripts\python.exe scripts\dvc_sync.py pull
 .\.venv\Scripts\python.exe scripts\dvc_sync.py restore --log-dir logs\ppo_z1
+# 推論用パス（best.pt）を表示
+.\.venv\Scripts\python.exe scripts\dvc_sync.py resolve --name ppo_z1
+.\.venv\Scripts\python.exe -m pick_and_carry.train_ppo --play --resume artifacts\checkpoints\ppo_z1\best.pt --num-envs 1 --log-dir logs\ppo_z1
 ```
 
-`publish` は次だけを `artifacts/checkpoints/<name>/` に抜粋します。
+`publish` は次を `artifacts/checkpoints/<name>/` に抜粋します。
 
-- 最新の `ppo_*.pt`（および同梱の模倣重みがあれば）
-- `metrics.jsonl` / `run.json`（あれば）
+- `--select best`（既定）: `metrics.jsonl` の段階別スコア最大に近い `ppo_*.pt`
+- `--select latest`: 最大 iteration の `ppo_*.pt`
+- 常に安定名 `best.pt` と `manifest.json`（選んだ iteration / score）
+- `metrics.jsonl` / `run.json` / 模倣重み（あれば）
+
+段階別の「最良」スコア（概略）:
+
+- walk: tracking / walk_score / gait
+- reach: approach / reward
+- carry・z1・haul: grasp / ee_dist / reward
+- catch: success / reward
+- その他: reward
 
 ## 5. MLflow 成果物を MinIO へ
 
