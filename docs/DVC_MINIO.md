@@ -22,8 +22,23 @@ train → logs/<stage>/ppo_*.pt + metrics.jsonl
 
 ## 1. MinIO 起動
 
+起動スクリプト（`PickAndCarry_run`）の **メニュー 9** から操作できます。
+
+| 番号 | 内容 |
+| --- | --- |
+| 9 → 1 | MinIO 起動（必要なら Docker Desktop も起動） |
+| 9 → 2 | 初回セットアップ（pip + DVC remote） |
+| 9 → 3 | チェックポイント publish → push |
+| 9 → 4 | pull → restore |
+| 9 → 5 | `dvc status` |
+| 9 → 6 | MinIO Console を開く |
+
+手動で起動する場合:
+
 ```powershell
 copy .env.example .env
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_minio.ps1
+# または
 docker compose -f infra/minio/docker-compose.yml --env-file .env up -d
 ```
 

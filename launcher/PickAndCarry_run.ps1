@@ -33,6 +33,7 @@ Write-Host "   5  学習曲線を開く（追加学習なし）"
 Write-Host "   6  プレゼン用の動画を作る（追加学習なし）"
 Write-Host "   7  Colab 用 zip を起動スクリプトの PickAndCarry フォルダに作る"
 Write-Host "   8  学習手法の結果を比較する（PPO / GRPO / Symmetric PPO）"
+Write-Host "   9  DVC / MinIO（チェックポイント共有。Docker で MinIO 起動・publish / pull）"
 Write-Host ""
 
 function Get-LatestIteration {
@@ -1223,11 +1224,15 @@ switch ($choice) {
     }
     "6" {
         Write-Host ""
-        Write-Host "学習条件のスライドを更新し、起動フォルダの動画からプレゼン動画を作ります。"
-        & $python -u scripts\make_summary_slide.py
-        if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE; break }
+        Write-Host "改版スライドで提出動画を作ります（PickAndCarry_学習条件_改版.pptx）。"
         $video = Join-Path $out "PickAndCarry_presentation.mp4"
-        & $python -u scripts\make_presentation.py --pptx (Join-Path $out "PickAndCarry_学習条件.pptx") --videos $out --output $video
+        $pptx = Join-Path $out "PickAndCarry_学習条件_改版.pptx"
+        if (-not (Test-Path $pptx)) {
+            Write-Host "改版 PPTX が無いのでスライドを生成します…"
+            & $python -u scripts\make_summary_slide.py
+            if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE; break }
+        }
+        & $python -u scripts\make_presentation.py --pptx $pptx --videos $out --output $video
         $code = $LASTEXITCODE
         if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
     }
@@ -1263,6 +1268,74 @@ switch ($choice) {
             & $python -u scripts\plot_curves.py --compare @dirs --labels @labels --output $curves
             $code = $LASTEXITCODE
             if ($code -eq 0 -and (Test-Path $curves)) { Start-Process $curves }
+        }
+    }
+    "9" {
+        Write-Host ""
+        Write-Host " DVC / MinIO（学習ホットパスでは使わない。区切りで共有用）"
+        Write-Host "   1  MinIO を起動（Docker Desktop も必要なら起動）"
+        Write-Host "   2  初回セットアップ（pip + DVC remote + MinIO 起動）"
+        Write-Host "   3  チェックポイントを publish → push（段階を選ぶ）"
+        Write-Host "   4  MinIO から pull → restore（段階を選ぶ）"
+        Write-Host "   5  状態確認（dvc status）"
+        Write-Host "   6  MinIO Console を開く"
+        Write-Host "   手順書: docs\DVC_MINIO.md"
+        $dvcPick = Read-Host "DVC / MinIO [1]"
+        if ([string]::IsNullOrWhiteSpace($dvcPick)) { $dvcPick = "1" }
+
+        function Invoke-LoadPaiEnv {
+            . (Join-Path (Get-Location) "scripts\load_pai_env.ps1")
+        }
+
+        switch ($dvcPick) {
+            "1" {
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "scripts\start_minio.ps1")
+                $code = $LASTEXITCODE
+            }
+            "2" {
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "scripts\setup_dvc_minio.ps1")
+                $code = $LASTEXITCODE
+            }
+            "3" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $logDir = $script:logDir -replace "/", "\"
+                Write-Host "publish → push 対象: $logDir"
+                & $python -u scripts\dvc_sync.py publish --log-dir $logDir
+                $code = $LASTEXITCODE
+                if ($code -eq 0) {
+                    & $python -u scripts\dvc_sync.py push
+                    $code = $LASTEXITCODE
+                }
+            }
+            "4" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $logDir = $script:logDir -replace "/", "\"
+                Write-Host "pull → restore 先: $logDir"
+                & $python -u scripts\dvc_sync.py pull
+                $code = $LASTEXITCODE
+                if ($code -eq 0) {
+                    & $python -u scripts\dvc_sync.py restore --log-dir $logDir
+                    $code = $LASTEXITCODE
+                }
+            }
+            "5" {
+                Invoke-LoadPaiEnv
+                & $python -u scripts\dvc_sync.py status
+                $code = $LASTEXITCODE
+            }
+            "6" {
+                Invoke-LoadPaiEnv
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "scripts\start_minio.ps1") -OpenConsole
+                $code = $LASTEXITCODE
+            }
+            default {
+                Write-Host "不明な番号です: $dvcPick"
+                $code = 1
+            }
         }
     }
     default {

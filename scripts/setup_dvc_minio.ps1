@@ -5,20 +5,14 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
-if (-not (Test-Path -LiteralPath ".env")) {
-    Copy-Item -LiteralPath ".env.example" -Destination ".env"
-    Write-Host "Created .env from .env.example"
+# Start Docker + MinIO first (shared with menu 9).
+& (Join-Path $PSScriptRoot "start_minio.ps1")
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WARNING: MinIO did not start. Fix Docker Desktop and re-run this script."
+    $global:LASTEXITCODE = 0
 }
 
 . (Join-Path $PSScriptRoot "load_pai_env.ps1")
-
-Write-Host "Starting MinIO (requires Docker Desktop running)..."
-$composeFile = Join-Path $Root "infra\minio\docker-compose.yml"
-docker compose -f $composeFile --env-file ".env" up -d
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: MinIO did not start. Start Docker Desktop and re-run this script."
-    $global:LASTEXITCODE = 0
-}
 
 $python = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
