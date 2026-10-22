@@ -1,10 +1,14 @@
 # Local S3-compatible store for DVC checkpoints and MLflow artifacts.
 #   docker compose -f infra/minio/docker-compose.yml up -d
 # Console: http://127.0.0.1:9001  (minioadmin / minioadmin)
+#
+# Note (2026): Docker Hub removed minio/minio and minio/mc. Prefer images already
+# cached locally (pull_policy: if_not_present). Quay may require login.
 
 services:
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: minio/minio:latest
+    pull_policy: if_not_present
     container_name: pai-minio
     command: server /data --console-address ":9001"
     environment:
@@ -17,7 +21,8 @@ services:
       - pai_minio_data:/data
 
   minio-init:
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: minio/mc:latest
+    pull_policy: if_not_present
     container_name: pai-minio-init
     depends_on:
       minio:

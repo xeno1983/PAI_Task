@@ -45,6 +45,8 @@ docker compose -f infra/minio/docker-compose.yml --env-file .env up -d
 - API: http://127.0.0.1:9000
 - Console: http://127.0.0.1:9001 （既定ユーザ / パスワードは `.env`）
 
+> **Image note (2026):** Docker Hub から `minio/minio` / `minio/mc` が消えています。compose は `pull_policy: if_not_present` でローカルキャッシュを使います。未取得のマシンでは quay.io ログイン後に同タグを pull するか、既に持っている `minio/minio:latest` / `minio/mc:latest` を使ってください。
+
 ## 2. 依存関係
 
 ```powershell
