@@ -1,0 +1,47 @@
+# Local S3-compatible store for DVC checkpoints and MLflow artifacts.
+#   docker compose -f infra/minio/docker-compose.yml up -d
+# Console: http://127.0.0.1:9001  (minioadmin / minioadmin)
+#
+# Note (2026): Docker Hub removed minio/minio and minio/mc. Prefer images already
+# cached locally (pull_policy: if_not_present). Quay may require login.
+
+services:
+  minio:
+    image: minio/minio:latest
+    pull_policy: if_not_present
+    container_name: pai-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${PAI_MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${PAI_MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - pai_minio_data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    pull_policy: if_not_present
+    container_name: pai-minio-init
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      echo waiting for minio;
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do sleep 1; done;
+      mc mb -p local/pai-dvc || true;
+      mc mb -p local/pai-mlflow || true;
+      mc anonymous set none local/pai-dvc || true;
+      mc anonymous set none local/pai-mlflow || true;
+      echo buckets ready;
+      "
+    environment:
+      MINIO_ROOT_USER: ${PAI_MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${PAI_MINIO_SECRET_KEY:-minioadmin}
+    restart: "no"
+
+volumes:
+  pai_minio_data:

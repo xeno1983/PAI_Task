@@ -1,0 +1,11 @@
+# Keep DVC focused on curated artifacts/, not the live training tree.
+logs/**
+.venv/**
+**/__pycache__/**
+*.pyc
+.ipynb_checkpoints/**
+scripts/**/*.mp4
+scripts/**/*.pptx
+scripts/**/*.html
+提出/**
+.cursor/**

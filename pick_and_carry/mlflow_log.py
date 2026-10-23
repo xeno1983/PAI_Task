@@ -1,8 +1,9 @@
 """Local MLflow record for one training invocation.
 
 metrics.jsonl and the ppo_*.pt files stay where they are. This copy keeps each
-invocation separate, including which checkpoint it started from. The store is a
-SQLite file under ``logs/mlflow``.
+invocation separate, including which checkpoint it started from. Tracking
+metadata stays in SQLite under ``logs/mlflow``. Artifact blobs go to local disk
+by default, or to MinIO (``s3://pai-mlflow``) when ``PAI_MINIO_ENDPOINT`` is set.
 """
 
 from __future__ import annotations
@@ -29,12 +30,13 @@ class LocalTracker:
                 flush=True,
             )
             return
+        _apply_minio_credentials()
         store = _store_dir(log_dir)
         store.mkdir(parents=True, exist_ok=True)
         (store / "artifacts").mkdir(exist_ok=True)
         db = store / "mlflow.db"
         mlflow.set_tracking_uri("sqlite:///" + db.resolve().as_posix())
-        artifact_root = (store / "artifacts").resolve().as_uri()
+        artifact_root, artifact_kind = _artifact_root(store)
         if mlflow.get_experiment_by_name("pick-and-carry") is None:
             mlflow.create_experiment("pick-and-carry", artifact_location=artifact_root)
         mlflow.set_experiment("pick-and-carry")
@@ -75,6 +77,7 @@ class LocalTracker:
             "disc_epochs": info.get("disc_epochs"),
             "demo_seconds": info.get("demo_seconds"),
             "log_dir": str(log_dir),
+            "artifact_backend": artifact_kind,
         }
         params = {key: value for key, value in params.items() if value is not None}
         self._call(lambda: mlflow.log_params({key: "" if value is None else str(value) for key, value in params.items()}))
@@ -82,7 +85,8 @@ class LocalTracker:
         if resumed:
             self._call(lambda: mlflow.set_tag("resumed_from", str(resumed)))
         self._call(lambda: mlflow.set_tag("algorithm", algo))
-        print(f"MLflow に残します: {store}", flush=True)
+        self._call(lambda: mlflow.set_tag("artifact_backend", artifact_kind))
+        print(f"MLflow に残します: {store}（artifacts: {artifact_kind}）", flush=True)
         print(
             r"見るときは .\.venv\Scripts\mlflow ui --backend-store-uri sqlite:///logs/mlflow/mlflow.db --workers 1",
             flush=True,
@@ -135,3 +139,30 @@ def _store_dir(log_dir: Path) -> Path:
     if parent.name == "logs":
         return parent / "mlflow"
     return Path("logs") / "mlflow"
+
+
+def _apply_minio_credentials() -> None:
+    """Map PAI_* MinIO settings onto the AWS_* names boto3 / MLflow expect."""
+    if os.environ.get("PAI_MINIO_ACCESS_KEY") and not os.environ.get("AWS_ACCESS_KEY_ID"):
+        os.environ["AWS_ACCESS_KEY_ID"] = os.environ["PAI_MINIO_ACCESS_KEY"]
+    if os.environ.get("PAI_MINIO_SECRET_KEY") and not os.environ.get("AWS_SECRET_ACCESS_KEY"):
+        os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ["PAI_MINIO_SECRET_KEY"]
+    endpoint = os.environ.get("PAI_MINIO_ENDPOINT")
+    if endpoint and not os.environ.get("MLFLOW_S3_ENDPOINT_URL"):
+        os.environ["MLFLOW_S3_ENDPOINT_URL"] = endpoint
+    os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+
+
+def _artifact_root(store: Path) -> tuple[str, str]:
+    """Return (artifact_uri, backend_label). Prefer MinIO when endpoint is configured."""
+    endpoint = os.environ.get("MLFLOW_S3_ENDPOINT_URL") or os.environ.get("PAI_MINIO_ENDPOINT")
+    if not endpoint:
+        return (store / "artifacts").resolve().as_uri(), "local"
+    if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get("AWS_SECRET_ACCESS_KEY"):
+        print(
+            "MinIO エンドポイントはあるが AWS 資格情報が無いので、artifacts はローカルにします。",
+            flush=True,
+        )
+        return (store / "artifacts").resolve().as_uri(), "local"
+    bucket = os.environ.get("PAI_MINIO_MLFLOW_BUCKET", "pai-mlflow")
+    return f"s3://{bucket}/artifacts", "minio"

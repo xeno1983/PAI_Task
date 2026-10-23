@@ -32,27 +32,13 @@ ED_PATH = ROOT / "PAI応用1_最終課題_ED.mp4"
 BOOKEND_NAMES = frozenset({OP_PATH.name, ED_PATH.name})
 
 # Narrative order. Teacher/BC show only forward + left/right turn (no full reel, no GAIL).
+# Lean ≤2 min reel: one teacher / one BC sample, then walk → reach → carry.
 PREFERRED = (
-    "PickAndCarry_smoke.mp4",
-    "PickAndCarry_z1_smoke.mp4",
     "trot_teacher_forward.mp4",
-    "trot_teacher_turn_left.mp4",
-    "trot_teacher_turn_right.mp4",
     "bc_trot_forward.mp4",
-    "bc_trot_turn_left.mp4",
-    "bc_trot_turn_right.mp4",
     "PickAndCarry_walk.mp4",
     "PickAndCarry_reach.mp4",
-    "PickAndCarry_haul.mp4",
     "PickAndCarry_z1.mp4",
-    "PickAndCarry_catch_static.mp4",
-    "PickAndCarry_catch_slow.mp4",
-    "PickAndCarry_catch_random.mp4",
-    "PickAndCarry_catch_fly.mp4",
-    "PickAndCarry_catch_noisy.mp4",
-    "PickAndCarry_catch.mp4",
-    "PickAndCarry_compare.mp4",
-    "PickAndCarry_z1_compare.mp4",
 )
 TITLES = {
     "PickAndCarry_smoke.mp4": ("起動確認", "ロボットが足場に立つかを見ます"),
@@ -79,71 +65,53 @@ TITLES = {
 }
 OUTPUT_NAME = "PickAndCarry_presentation.mp4"
 # Submission target: OP/ED + body must stay within this budget.
-# OP/ED + slides + stage clips; leave headroom for full narrations.
-MAX_TOTAL_SECONDS = 225.0
+# Hard cap for the graded reel (OP + body + ED).
+MAX_TOTAL_SECONDS = 120.0
 # Per-recording cap so demos/playbacks do not dominate the reel.
-# Skill clips (forward/turn) are shorter; stage plays can use the full cap.
-CLIP_MAX_SECONDS = 10.0
-SKILL_CLIP_MAX_SECONDS = 6.0
+CLIP_MAX_SECONDS = 7.0
+SKILL_CLIP_MAX_SECONDS = 4.0
 SKILL_CLIP_NAMES = frozenset(
     {
         "trot_teacher_forward.mp4",
-        "trot_teacher_turn_left.mp4",
-        "trot_teacher_turn_right.mp4",
         "bc_trot_forward.mp4",
-        "bc_trot_turn_left.mp4",
-        "bc_trot_turn_right.mp4",
     }
 )
-# Final submission page picks from 改版.pptx (1-based). Skip P4 CPG network and P7.
-OPENING_PAGES = (1, 2, 3, 5, 6)
-CLOSING_PAGES = (8, 9)  # P8 curves → P9 conclusion
+# 改版.pptx pages (1-based). Drop P4 CPG, P5 obs, P7 reward, P8 loss for ≤2 min.
+OPENING_PAGES = (1, 2, 3, 6)
+CLOSING_PAGES = (9,)  # conclusion only
 # Kept for CLI compatibility with --opening-slides / --closing-slides.
 OPENING_SLIDES = len(OPENING_PAGES)
 CLOSING_SLIDES = len(CLOSING_PAGES)
 # Quiet beat between slides / before the next section (seconds).
-TRANSITION_SECONDS = 2.5
+TRANSITION_SECONDS = 1.0
 # Spoken lines use readings that Microsoft Haruka will not mis-parse
 # (e.g. 残差 → ざんさ, not のこりさ). Visual slide text stays in kanji.
 OPENING_NARRATION = {
-    1: "最終課題の目的です。ゴーツーにゼットワンを載せ、不整地を歩いて箱を所定位置まで運ぶほうさくを学習します。",
-    2: (
-        "ロボットと問題設定です。よんそくじゅうにかんせつとろくじくアームで、"
-        "平地から不整地を渡り、箱を拾い、目標へ置きます。"
-    ),
+    1: "最終課題の目的です。ゴーツーにゼットワンを載せ、箱を運ぶほうさくを学習します。",
+    2: "ロボットと問題設定です。不整地を渡り、箱を拾って目標へ置きます。",
     3: "せいぎょほうしんです。あしはシーピージー、腕はかいせきアイケーとざんさです。",
-    5: "かんそくとせいぎょりょうです。かんそくははちじゅういち、こうどうはにじゅうにです。",
-    6: (
-        "学習の流れです。教師シーピージーをビーシーでまね、"
-        "ピーピーオーで歩行、とうたつ、はこはこびとだんかいを上げます。"
-    ),
+    6: "学習の流れです。教師をビーシーでまね、ピーピーオーでだんかいを上げます。",
 }
 CLOSING_NARRATION = {
-    8: (
-        "ロスと学習曲線です。ほうさくロス、かちロス、エントロピーで更新します。"
-        "ほうしゅうやはじりつが上がり、距離とロスが下がるほど良いです。"
-    ),
     9: (
-        "結論です。歩行の安定化や段階のつなぎに苦労しました。"
-        "キャッチなど、より高度なタスクまで進めたい意図はありましたが、"
-        "計算リソースが足りず、十分な反復を回せませんでした。"
-        "そのため解析アイケーなどで高速化しつつ、段階を絞って提出しています。"
+        "結論です。歩行の安定化とだんかいのつなぎに苦労しました。"
+        "計算リソースの制約から段階を絞り、解析アイケーなどで高速化して提出しています。"
     ),
 }
 LAUNCHER_PPTX = LAUNCHER / "PickAndCarry_学習条件_改版.pptx"
 VIDEO_NARRATION = {
     "PickAndCarry_smoke.mp4": "起動確認です。ロボットが足場に立つかを見ます。",
     "PickAndCarry_z1_smoke.mp4": "ゼットワンでの起動確認です。",
-    "trot_teacher_forward.mp4": "教師データのぜんしんです。オープンループのシーピージーが前へ進みます。",
+    "trot_teacher_forward.mp4": "教師のぜんしんです。",
     "trot_teacher_turn_left.mp4": "教師データの左せんかいです。",
     "trot_teacher_turn_right.mp4": "教師データの右せんかいです。",
-    "bc_trot_forward.mp4": "ビーシーのぜんしんです。教師をもほうしたほうさくです。",
+    "bc_trot_forward.mp4": "ビーシーのぜんしんです。",
     "bc_trot_turn_left.mp4": "ビーシーの左せんかいです。",
     "bc_trot_turn_right.mp4": "ビーシーの右せんかいです。",
-    "PickAndCarry_walk.mp4": "カリキュラムの歩行です。速度しれいに合わせて歩きます。",
-    "PickAndCarry_reach.mp4": "とうたつです。歩行のおもみから続け、空中の点へ、てさきを届けます。",
-    "PickAndCarry_ppo.mp4": "はこはこびです。箱を拾い、目標へ置きます。",
-    "PickAndCarry_z1.mp4": "はこはこびです。ゼットワンで拾って運び、目標へ置きます。",
+    "PickAndCarry_walk.mp4": "歩行です。",
+    "PickAndCarry_reach.mp4": "とうたつです。てさきを届けます。",
+    "PickAndCarry_ppo.mp4": "はこはこびです。",
+    "PickAndCarry_z1.mp4": "はこはこびです。",
     "PickAndCarry_haul.mp4": "持ち歩きです。箱を持ったまま歩きます。",
     "PickAndCarry_catch_static.mp4": "キャッチの静止です。",
     "PickAndCarry_catch_slow.mp4": "キャッチのゆっくりです。",
@@ -254,20 +222,10 @@ def canonical_clip_name(path: Path) -> str:
 
 STAGE_CLIPS = (
     ("trot_teacher_forward.mp4", "教師・前進"),
-    ("trot_teacher_turn_left.mp4", "教師・左旋回"),
-    ("trot_teacher_turn_right.mp4", "教師・右旋回"),
     ("bc_trot_forward.mp4", "BC・前進"),
-    ("bc_trot_turn_left.mp4", "BC・左旋回"),
-    ("bc_trot_turn_right.mp4", "BC・右旋回"),
     ("PickAndCarry_walk.mp4", "歩行"),
     ("PickAndCarry_reach.mp4", "到達"),
-    ("PickAndCarry_haul.mp4", "歩きながら持つ"),
     ("PickAndCarry_z1.mp4", "箱運び"),
-    ("PickAndCarry_catch_static.mp4", "キャッチ（静止）"),
-    ("PickAndCarry_catch_slow.mp4", "キャッチ（ゆっくり）"),
-    ("PickAndCarry_catch_random.mp4", "キャッチ（ばらす）"),
-    ("PickAndCarry_catch_fly.mp4", "キャッチ（飛ぶ）"),
-    ("PickAndCarry_catch_noisy.mp4", "キャッチ（ノイズ）"),
 )
 
 

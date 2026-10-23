@@ -33,6 +33,7 @@ Write-Host "   5  学習曲線を開く（追加学習なし）"
 Write-Host "   6  プレゼン用の動画を作る（追加学習なし）"
 Write-Host "   7  Colab 用 zip を起動スクリプトの PickAndCarry フォルダに作る"
 Write-Host "   8  学習手法の結果を比較する（PPO / GRPO / Symmetric PPO）"
+Write-Host "   9  DVC / MinIO（チェックポイント共有。Docker で MinIO 起動・publish / pull）"
 Write-Host ""
 
 function Get-LatestIteration {
@@ -1223,11 +1224,15 @@ switch ($choice) {
     }
     "6" {
         Write-Host ""
-        Write-Host "学習条件のスライドを更新し、起動フォルダの動画からプレゼン動画を作ります。"
-        & $python -u scripts\make_summary_slide.py
-        if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE; break }
+        Write-Host "改版スライドで提出動画を作ります（PickAndCarry_学習条件_改版.pptx）。"
         $video = Join-Path $out "PickAndCarry_presentation.mp4"
-        & $python -u scripts\make_presentation.py --pptx (Join-Path $out "PickAndCarry_学習条件.pptx") --videos $out --output $video
+        $pptx = Join-Path $out "PickAndCarry_学習条件_改版.pptx"
+        if (-not (Test-Path $pptx)) {
+            Write-Host "改版 PPTX が無いのでスライドを生成します…"
+            & $python -u scripts\make_summary_slide.py
+            if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE; break }
+        }
+        & $python -u scripts\make_presentation.py --pptx $pptx --videos $out --output $video
         $code = $LASTEXITCODE
         if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
     }
@@ -1263,6 +1268,118 @@ switch ($choice) {
             & $python -u scripts\plot_curves.py --compare @dirs --labels @labels --output $curves
             $code = $LASTEXITCODE
             if ($code -eq 0 -and (Test-Path $curves)) { Start-Process $curves }
+        }
+    }
+    "9" {
+        Write-Host ""
+        Write-Host " DVC / MinIO（学習ホットパスでは使わない。区切りで共有用）"
+        Write-Host "   1  MinIO を起動（Docker Desktop も必要なら起動）"
+        Write-Host "   2  初回セットアップ（pip + DVC remote + MinIO 起動）"
+        Write-Host "   3  最良チェックポイントを publish → push（metrics で選ぶ・推奨）"
+        Write-Host "   4  最新 iteration を publish → push"
+        Write-Host "   5  MinIO から pull → restore（段階を選ぶ）"
+        Write-Host "   6  DVC の最良重みで推論（pull → resolve → play）"
+        Write-Host "   7  状態確認（dvc status）"
+        Write-Host "   8  MinIO Console を開く"
+        Write-Host "   9  Mender Artifact を作る（DVC best.pt → .mender / OTA 用）"
+        Write-Host "   手順書: docs\DVC_MINIO.md / docs\MENDER_OTA.md"
+        $dvcPick = Read-Host "DVC / MinIO [3]"
+        if ([string]::IsNullOrWhiteSpace($dvcPick)) { $dvcPick = "3" }
+
+        function Invoke-LoadPaiEnv {
+            . (Join-Path (Get-Location) "scripts\load_pai_env.ps1")
+        }
+
+        switch ($dvcPick) {
+            "1" {
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "scripts\start_minio.ps1")
+                $code = $LASTEXITCODE
+            }
+            "2" {
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "scripts\setup_dvc_minio.ps1")
+                $code = $LASTEXITCODE
+            }
+            "3" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $logDir = $script:logDir -replace "/", "\"
+                Write-Host "最良を publish → push: $logDir"
+                & $python -u scripts\dvc_sync.py publish --log-dir $logDir --select best --push
+                $code = $LASTEXITCODE
+            }
+            "4" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $logDir = $script:logDir -replace "/", "\"
+                Write-Host "最新を publish → push: $logDir"
+                & $python -u scripts\dvc_sync.py publish --log-dir $logDir --select latest --push
+                $code = $LASTEXITCODE
+            }
+            "5" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $logDir = $script:logDir -replace "/", "\"
+                Write-Host "pull → restore 先: $logDir"
+                & $python -u scripts\dvc_sync.py pull
+                $code = $LASTEXITCODE
+                if ($code -eq 0) {
+                    & $python -u scripts\dvc_sync.py restore --log-dir $logDir
+                    $code = $LASTEXITCODE
+                }
+            }
+            "6" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $stageName = Split-Path ($script:logDir -replace "/", "\") -Leaf
+                Write-Host "DVC 最良で推論: artifacts\checkpoints\$stageName"
+                & $python -u scripts\dvc_sync.py pull
+                $code = $LASTEXITCODE
+                if ($code -ne 0) { break }
+                $resolved = & $python -u scripts\dvc_sync.py resolve --name $stageName 2>&1 | Select-Object -Last 1
+                if (-not $resolved -or -not (Test-Path -LiteralPath "$resolved")) {
+                    Write-Host "resolve に失敗しました。先にメニュー 9 → 3 で publish してください。"
+                    $code = 1
+                    break
+                }
+                Write-Host "使う重み: $resolved"
+                $video = Join-Path $out ("PickAndCarry_dvc_" + $stageName + ".mp4")
+                & $python -u -m pick_and_carry.train_ppo --play --resume "$resolved" --num-envs 1 --record $video --seconds 20 --log-dir ($script:logDir -replace "/", "\") @algoArgs @armArgs @terrainArgs @curriculumArgs
+                $code = $LASTEXITCODE
+                if ($code -eq 0 -and (Test-Path $video)) { Start-Process $video }
+            }
+            "7" {
+                Invoke-LoadPaiEnv
+                & $python -u scripts\dvc_sync.py status
+                $code = $LASTEXITCODE
+            }
+            "8" {
+                Invoke-LoadPaiEnv
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "scripts\start_minio.ps1") -OpenConsole
+                $code = $LASTEXITCODE
+            }
+            "9" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $stageName = Split-Path ($script:logDir -replace "/", "\") -Leaf
+                $deviceType = if ($env:PAI_MENDER_DEVICE_TYPE) { $env:PAI_MENDER_DEVICE_TYPE } else { "go2-z1" }
+                Write-Host "Mender Artifact: stage=$stageName device_type=$deviceType"
+                Write-Host "（先に 9→3 で best.pt を publish しておくこと）"
+                & $python -u scripts\mender_pack_model.py --name $stageName --device-type $deviceType
+                $code = $LASTEXITCODE
+                if ($code -eq 0) {
+                    Write-Host "出力先: artifacts\mender\  → Hosted Mender にアップロードして配信"
+                    Write-Host "手順: docs\MENDER_OTA.md"
+                }
+            }
+            default {
+                Write-Host "不明な番号です: $dvcPick"
+                $code = 1
+            }
         }
     }
     default {
