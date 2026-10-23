@@ -12,6 +12,8 @@ Unitree Go2 の背中に腕を固定し、不整地を渡って立方体を拾�
 
 ## 2. 環境構築（Windows）
 
+新しい PC 向けの通し手順は [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) です（Git clone、venv、起動スクリプト、DVC/MinIO、Mender）。
+
 PowerShell で、プロジェクトルートに仮想環境を作ります。システム Python の PyTorch は触りません。Genesis より先に CUDA 付き PyTorch を入れます。
 
 ```powershell
