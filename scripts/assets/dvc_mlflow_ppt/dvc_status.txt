@@ -1,0 +1,5 @@
+﻿+ C:\Users\xeno1\PAI_Task\.venv\Scripts\dvc.exe status
+Data and pipelines are up to date.
+local curated stages:
+  ppo_curriculum_walk  [best.pt]  select=best iter=1860 score=0.4554062721552327 ckpt=ppo_001860.pt
+

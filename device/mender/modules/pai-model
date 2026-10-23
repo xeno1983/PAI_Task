@@ -1,0 +1,82 @@
+#!/bin/sh
+# Mender Update Module: install Pick-and-Carry policy weights (best.pt).
+# Install on device as: /usr/share/mender/modules/v3/pai-model  (chmod +x)
+#
+# Artifact type must be "pai-model" (see scripts/mender_pack_model.py).
+
+set -e
+
+STATE="$1"
+FILES="$2"
+
+DEST_ROOT="${PAI_MODEL_DIR:-/data/pai/models}"
+ACTIVE_LINK="${DEST_ROOT}/active"
+STAGE_FILE="${DEST_ROOT}/active_stage.txt"
+
+case "$STATE" in
+    SupportsRollback)
+        echo "Yes"
+        ;;
+    NeedsArtifactReboot)
+        echo "No"
+        ;;
+    ArtifactInstall)
+        META="$FILES/header/meta-data"
+        STAGE="default"
+        if [ -f "$META" ]; then
+            # meta-data is JSON; pull "stage" if present (busybox-friendly grep).
+            STAGE=$(sed -n 's/.*"stage"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$META" | head -n1)
+            [ -n "$STAGE" ] || STAGE="default"
+        fi
+        TARGET="${DEST_ROOT}/${STAGE}"
+        BACKUP="${DEST_ROOT}/.backup_${STAGE}"
+        mkdir -p "$DEST_ROOT"
+        rm -rf "$BACKUP"
+        if [ -d "$TARGET" ]; then
+            mv "$TARGET" "$BACKUP"
+        fi
+        mkdir -p "$TARGET"
+        # Payload files live under $FILES/files/
+        if [ -d "$FILES/files" ]; then
+            cp -a "$FILES/files/." "$TARGET/"
+        else
+            echo "pai-model: missing payload files under $FILES/files" >&2
+            exit 1
+        fi
+        if [ ! -f "$TARGET/best.pt" ]; then
+            # Accept a single renamed checkpoint as best.pt
+            FIRST_PT=$(ls "$TARGET"/*.pt 2>/dev/null | head -n1 || true)
+            if [ -n "$FIRST_PT" ]; then
+                cp -f "$FIRST_PT" "$TARGET/best.pt"
+            else
+                echo "pai-model: best.pt not found in payload" >&2
+                exit 1
+            fi
+        fi
+        ln -sfn "$TARGET" "$ACTIVE_LINK"
+        printf '%s\n' "$STAGE" > "$STAGE_FILE"
+        echo "pai-model: installed stage=$STAGE -> $TARGET"
+        ;;
+    ArtifactCommit)
+        STAGE=$(cat "$STAGE_FILE" 2>/dev/null || echo default)
+        rm -rf "${DEST_ROOT}/.backup_${STAGE}"
+        ;;
+    ArtifactRollback)
+        STAGE=$(cat "$STAGE_FILE" 2>/dev/null || echo default)
+        TARGET="${DEST_ROOT}/${STAGE}"
+        BACKUP="${DEST_ROOT}/.backup_${STAGE}"
+        if [ -d "$BACKUP" ]; then
+            rm -rf "$TARGET"
+            mv "$BACKUP" "$TARGET"
+            ln -sfn "$TARGET" "$ACTIVE_LINK"
+            echo "pai-model: rolled back stage=$STAGE"
+        else
+            echo "pai-model: no backup to roll back" >&2
+            exit 1
+        fi
+        ;;
+    ArtifactFailure|Cleanup)
+        ;;
+esac
+
+exit 0

@@ -152,7 +152,7 @@ Windows では起動スクリプトで「ROS 2 で表示する」を選びます
 
 曲線は報酬、把持率、手先と箱の距離、設置率です。TensorBoard は `tensorboard --logdir logs/ppo_walk` です。ここには方策 Loss、価値 Loss、エントロピーも残ります。
 
-## 5. Git / MLflow / DVC / MinIO
+## 5. Git / MLflow / DVC / MinIO / Mender
 
 | 層 | 役割 |
 | --- | --- |
@@ -160,8 +160,9 @@ Windows では起動スクリプトで「ROS 2 で表示する」を選びます
 | MLflow | 実験のパラメータ・メトリクス（`logs/mlflow`）。任意で成果物を MinIO へ |
 | DVC | 区切りごとの重み抜粋（`artifacts/checkpoints/`） |
 | MinIO | DVC / MLflow 用のローカル S3（`infra/minio`） |
+| Mender | 実機への方策 OTA（`best.pt` → `.mender`） |
 
-学習中は従来どおり `logs/` に書き、段階の区切りでだけ `scripts/dvc_sync.py publish` → `push` します。手順の詳細は [docs/DVC_MINIO.md](docs/DVC_MINIO.md) です。
+学習中は従来どおり `logs/` に書き、段階の区切りでだけ `scripts/dvc_sync.py publish` → `push` します。手順は [docs/DVC_MINIO.md](docs/DVC_MINIO.md)。実機配信は [docs/MENDER_OTA.md](docs/MENDER_OTA.md) です。
 
 ```powershell
 copy .env.example .env

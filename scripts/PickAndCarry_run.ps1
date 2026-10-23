@@ -1281,7 +1281,8 @@ switch ($choice) {
         Write-Host "   6  DVC の最良重みで推論（pull → resolve → play）"
         Write-Host "   7  状態確認（dvc status）"
         Write-Host "   8  MinIO Console を開く"
-        Write-Host "   手順書: docs\DVC_MINIO.md"
+        Write-Host "   9  Mender Artifact を作る（DVC best.pt → .mender / OTA 用）"
+        Write-Host "   手順書: docs\DVC_MINIO.md / docs\MENDER_OTA.md"
         $dvcPick = Read-Host "DVC / MinIO [3]"
         if ([string]::IsNullOrWhiteSpace($dvcPick)) { $dvcPick = "3" }
 
@@ -1359,6 +1360,21 @@ switch ($choice) {
                 Invoke-LoadPaiEnv
                 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "scripts\start_minio.ps1") -OpenConsole
                 $code = $LASTEXITCODE
+            }
+            "9" {
+                Invoke-LoadPaiEnv
+                Select-Algo
+                Select-Curriculum -ForPlay
+                $stageName = Split-Path ($script:logDir -replace "/", "\") -Leaf
+                $deviceType = if ($env:PAI_MENDER_DEVICE_TYPE) { $env:PAI_MENDER_DEVICE_TYPE } else { "go2-z1" }
+                Write-Host "Mender Artifact: stage=$stageName device_type=$deviceType"
+                Write-Host "（先に 9→3 で best.pt を publish しておくこと）"
+                & $python -u scripts\mender_pack_model.py --name $stageName --device-type $deviceType
+                $code = $LASTEXITCODE
+                if ($code -eq 0) {
+                    Write-Host "出力先: artifacts\mender\  → Hosted Mender にアップロードして配信"
+                    Write-Host "手順: docs\MENDER_OTA.md"
+                }
             }
             default {
                 Write-Host "不明な番号です: $dvcPick"

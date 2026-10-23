@@ -8,6 +8,7 @@
 | MLflow | 実験パラメータ・メトリクス・（任意）成果物 URI | `logs/mlflow` + MinIO `pai-mlflow` |
 | DVC | 重み・抜粋メトリクスなど大きい成果物の版管理 | ポインタは Git、実体は MinIO `pai-dvc` |
 | MinIO | S3 互換オブジェクトストレージ | `infra/minio`（ローカル） |
+| Mender | 実機への OTA（方策 `best.pt`） | `docs/MENDER_OTA.md` / `artifacts/mender/` |
 
 ```
 train → logs/<stage>/ppo_*.pt + metrics.jsonl
@@ -34,6 +35,7 @@ train → logs/<stage>/ppo_*.pt + metrics.jsonl
 | 9 → 6 | DVC の最良重みで推論（pull → `best.pt` → play） |
 | 9 → 7 | `dvc status` |
 | 9 → 8 | MinIO Console を開く |
+| 9 → 9 | Mender Artifact 作成（`best.pt` → `.mender`、OTA 用） |
 
 手動で起動する場合:
 

@@ -160,12 +160,23 @@ agent.eval()
 
 ---
 
-## 6. 作業の進め方（まとめ）
+## 6. OTA（Mender）で重みを配る
 
-1. シミュで対象段階の重みを確定し、再生動画で品質を見る。  
-2. 実機では開ループ → 歩行方策 → 腕付きの順に載せる。  
-3. 観測・行動・周波数・座標をシミュと同一契約にする。  
-4. ギャップが出たら、まず符号・遅延・ゲインを疑い、必要ならドメインランダマイズ强化で再学習。  
-5. 実機 SDK アダプタを `scripts/deploy_real.py` 等としてリポジトリに足す。
+研究室の PC 間共有は DVC/MinIO、実機への配達は Mender を使います。
 
-関連ドキュメント: [COLAB.md](COLAB.md)（クラウド学習）、[LOCOMOTION_PLAN.md](LOCOMOTION_PLAN.md)（歩行改善の経緯）、ルートの [README.md](../README.md)。
+1. シミュで最良を dvc_sync.py publish --select best する。
+2. scripts/mender_pack_model.py で .mender を作る。
+3. Hosted Mender 等へ上げ、端末の Update Module pai-model が /data/pai/models/active/best.pt に入れる。
+
+詳細: [MENDER_OTA.md](MENDER_OTA.md)。
+
+## 7. 作業の進め方（まとめ）
+
+1. シミュで対象段階の重みを確定し、再生動画で品質を見る。
+2. 実機では開ループ → 歩行方策 → 腕付きの順に載せる。
+3. 観測・行動・周波数・座標をシミュと同一契約にする。
+4. ギャップが出たら、まず符号・遅延・ゲインを疑い、必要ならドメインランダマイズ強化で再学習。
+5. 実機 SDK アダプタを scripts/deploy_real.py 等としてリポジトリに足す。
+6. 確定した est.pt は Mender で OTA 配信する（[MENDER_OTA.md](MENDER_OTA.md)）。
+
+関連ドキュメント: [COLAB.md](COLAB.md)、[LOCOMOTION_PLAN.md](LOCOMOTION_PLAN.md)、[DVC_MINIO.md](DVC_MINIO.md)、[MENDER_OTA.md](MENDER_OTA.md)、ルートの [README.md](../README.md)。
